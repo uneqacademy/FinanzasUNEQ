@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Finanzas UNEQ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.min.js"></script>
+
+  <style>
+    :root{
+      --ink:#14213D;
+      --ink-soft:#3E4C6B;
+      --bg:#F1F2F5;
+      --surface:#FFFFFF;
+      --border:#DEDFE3;
+      --muted:#6B7280;
+      --income:#1C7C54;
+      --income-bg:#E8F4EE;
+      --expense:#A8322D;
+      --expense-bg:#FBEAE9;
+      --navy-hover:#0B1730;
+      --radius:10px;
+    }
+    *{ box-sizing:border-box; }
+    #fin-app-root{
+      font-family:'Inter',system-ui,sans-serif;
+      color:var(--ink);
+      background:var(--bg);
+      min-height:600px;
+      border-radius:14px;
+      overflow:hidden;
+      display:flex;
+      font-variant-numeric: tabular-nums;
+    }
+    #fin-app-root h1,#fin-app-root h2,#fin-app-root h3{
+      font-family:'Space Grotesk',sans-serif;
+      margin:0;
+      letter-spacing:-0.01em;
+    }
+    #fin-app-root .money{ font-variant-numeric: tabular-nums; font-feature-settings:"tnum" 1; }
+
+    /* ---------- Sidebar ---------- */
+    .fa-sidebar{
+      width:210px; flex:0 0 210px;
+      background:var(--ink);
+      color:#fff;
+      padding:20px 14px;
+      display:flex; flex-direction:column;
+      gap:4px;
+    }
+    .fa-brand{
+      font-family:'Space Grotesk',sans-serif;
+      font-weight:700; font-size:16px;
+      padding:4px 10px 18px 10px;
+      display:flex; align-items:center; gap:8px;
+    }
+    .fa-brand .dot{ width:9px; height:9px; border-radius:50%; background:var(--income); display:inline-block; }
+    .fa-nav-btn{
+      display:flex; align-items:center; gap:10px;
+      background:transparent; border:none; color:#C3C9DB;
+      text-align:left; padding:10px 12px; border-radius:8px;
+      font-family:'Inter',sans-serif; font-size:13.5px; font-weight:500;
+      cursor:pointer; transition:background .15s ease, color .15s ease;
+    }
+    .fa-nav-btn:hover{ background:rgba(255,255,255,.06); color:#fff; }
+    .fa-nav-btn.active{ background:#fff; color:var(--ink); font-weight:600; }
+    .fa-nav-icon{ width:16px; text-align:center; font-size:14px; }
+    .fa-sidebar-footer{
+      margin-top:auto; padding:12px 10px 0 10px; font-size:11px; color:#7C87A3; border-top:1px solid rgba(255,255,255,.1);
+    }
+    .fa-sidebar-export{
+      margin-top:14px; width:100%; background:#fff; color:var(--ink); border:none; border-radius:8px;
+      padding:10px 12px; font-family:'Inter',sans-serif; font-weight:600; font-size:12.5px; cursor:pointer;
+      transition:background .15s ease;
+    }
+    .fa-sidebar-export:hover{ background:#E8EAED; }
+    .fa-sidebar-export-secondary{ margin-top:6px; background:transparent; color:#C3C9DB; border:1px solid rgba(255,255,255,.2); }
+    .fa-sidebar-export-secondary:hover{ background:rgba(255,255,255,.08); color:#fff; }
+
+    /* ---------- Main ---------- */
+    .fa-main{ flex:1; min-width:0; padding:24px 28px 40px 28px; overflow-y:auto; max-height:900px; }
+    .fa-topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; flex-wrap:wrap; gap:10px; }
+    .fa-topbar h1{ font-size:21px; }
+    .fa-topbar .fa-sub{ color:var(--muted); font-size:12.5px; margin-top:2px; }
+    .fa-year-select{
+      font-family:'Inter',sans-serif; font-size:13px; font-weight:600; color:var(--ink);
+      background:#fff; border:1px solid var(--border); border-radius:8px; padding:7px 10px; cursor:pointer;
+    }
+
+    /* ---------- Cards / KPIs ---------- */
+    .fa-kpi-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:20px; }
+    @media (max-width:900px){ .fa-kpi-grid{ grid-template-columns:repeat(2,1fr);} }
+    .fa-kpi-grid-6{ grid-template-columns:repeat(6,1fr); }
+    @media (max-width:1100px){ .fa-kpi-grid-6{ grid-template-columns:repeat(3,1fr); } }
+    @media (max-width:900px){ .fa-kpi-grid-6{ grid-template-columns:repeat(2,1fr); } }
+    .fa-kpi{
+      background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--ink);
+      border-radius:var(--radius); padding:13px 14px;
+    }
+    .fa-kpi.income{ border-left-color:var(--income); }
+    .fa-kpi.expense{ border-left-color:var(--expense); }
+    .fa-kpi-label{ font-size:11px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.03em; margin-bottom:6px; }
+    .fa-kpi-value{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; }
+    .fa-kpi-value.income{ color:var(--income); }
+    .fa-kpi-value.expense{ color:var(--expense); }
+
+    .fa-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:18px; margin-bottom:18px; }
+    .fa-card-title{ font-size:14px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; justify-content:space-between; }
+    .fa-charts-row{ display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:18px; }
+    @media (max-width:900px){ .fa-charts-row{ grid-template-columns:1fr; } }
+    .fa-chart-box{ position:relative; height:230px; }
+    .fa-svg-chart{ width:100%; height:calc(100% - 22px); display:block; }
+    .fa-chart-legend{ display:flex; gap:14px; justify-content:center; margin-top:4px; }
+    .fa-legend-item{ display:flex; align-items:center; gap:5px; font-size:11px; color:var(--muted); }
+    .fa-legend-dot{ width:8px; height:8px; border-radius:2px; display:inline-block; }
+    .fa-donut-wrap{ display:flex; align-items:center; gap:18px; height:100%; }
+    .fa-donut-circle{ width:130px; height:130px; min-width:130px; border-radius:50%;
+      -webkit-mask: radial-gradient(circle, transparent 54%, #000 55%);
+      mask: radial-gradient(circle, transparent 54%, #000 55%); }
+    .fa-donut-legend{ flex:1; min-width:0; max-height:210px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+    .fa-donut-legend-item{ display:flex; align-items:center; gap:7px; font-size:11.5px; }
+    .fa-donut-dot{ width:8px; height:8px; border-radius:2px; flex:0 0 auto; }
+    .fa-donut-label{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-soft); }
+    .fa-donut-pct{ font-weight:600; color:var(--ink); }
+    .fa-real-grid{ display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    .fa-real-col{ flex:1; min-width:150px; }
+    .fa-real-op{ font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; color:var(--muted); }
+    .fa-real-label{ font-size:11px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.02em; margin-bottom:4px; }
+    .fa-real-value{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; }
+    .fa-real-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+    .fa-real-highlight{ background:var(--income-bg); border:1px solid var(--income); border-radius:var(--radius); padding:12px 14px; }
+    @media (max-width:760px){ .fa-real-op{ display:none; } .fa-real-col{ width:100%; } }
+
+    /* ---------- Tables ---------- */
+    table.fa-table{ width:100%; border-collapse:collapse; font-size:13px; }
+    table.fa-table th{
+      text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted);
+      font-weight:600; padding:8px 10px; border-bottom:1px solid var(--border);
+    }
+    table.fa-table td{ padding:9px 10px; border-bottom:1px solid #EEEFF2; vertical-align:middle; }
+    table.fa-table tr.income-row{ border-left:3px solid var(--income); }
+    table.fa-table tr.expense-row{ border-left:3px solid var(--expense); }
+    table.fa-table tr:hover{ background:#FAFAFB; }
+    table.fa-table td.num, table.fa-table th.num{ text-align:right; }
+    table.fa-table th.sortable{ cursor:pointer; user-select:none; white-space:nowrap; }
+    table.fa-table th.sortable:hover{ color:var(--ink); background:rgba(255,255,255,.08); }
+    .fa-sort-icon{ font-size:9px; opacity:.45; margin-left:2px; }
+    .fa-sort-icon.active{ opacity:1; }
+    .fa-filter-bar{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+    .fa-filter-bar input[type="text"]{ flex:1; min-width:160px; padding:7px 10px; border:1px solid var(--border); border-radius:7px; font-size:13px; font-family:'Inter',sans-serif; }
+    .fa-filter-bar select{ padding:7px 9px; border:1px solid var(--border); border-radius:7px; font-size:13px; font-family:'Inter',sans-serif; background:#fff; color:var(--ink); }
+    .fa-filter-count{ font-size:11.5px; color:var(--muted); margin-bottom:8px; }
+    .fa-badge{ display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+    .fa-badge.pagado{ background:var(--income-bg); color:var(--income); }
+    .fa-badge.pendiente{ background:#FFF4DE; color:#96660A; }
+    .fa-row-actions{ display:flex; gap:6px; justify-content:flex-end; }
+    .fa-icon-btn{ background:none; border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:12px; cursor:pointer; color:var(--ink-soft); }
+    .fa-icon-btn:hover{ background:#F3F4F6; }
+    .fa-icon-btn.danger:hover{ background:var(--expense-bg); color:var(--expense); border-color:var(--expense); }
+    .fa-table-wrap{ overflow-x:auto; }
+    .fa-empty{ text-align:center; padding:30px 10px; color:var(--muted); font-size:13px; }
+
+    /* ---------- Forms ---------- */
+    .fa-form-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:10px; align-items:end; }
+    @media (max-width:900px){ .fa-form-grid{ grid-template-columns:repeat(2,1fr); } }
+    .fa-field label{ display:block; font-size:11px; font-weight:600; color:var(--muted); margin-bottom:4px; text-transform:uppercase; letter-spacing:.02em; }
+    .fa-field input, .fa-field select{
+      width:100%; padding:8px 9px; border:1px solid var(--border); border-radius:7px; font-size:13px;
+      font-family:'Inter',sans-serif; color:var(--ink); background:#fff;
+    }
+    .fa-field input:focus, .fa-field select:focus{ outline:2px solid var(--ink); outline-offset:1px; }
+    .fa-btn{
+      font-family:'Inter',sans-serif; font-weight:600; font-size:13px; border:none; border-radius:8px;
+      padding:9px 16px; cursor:pointer; transition:background .15s ease;
+    }
+    .fa-btn-primary{ background:var(--ink); color:#fff; }
+    .fa-btn-primary:hover{ background:var(--navy-hover); }
+    .fa-btn-ghost{ background:#fff; border:1px solid var(--border); color:var(--ink); }
+    .fa-btn-ghost:hover{ background:#F3F4F6; }
+    .fa-btn-danger{ background:#fff; border:1px solid var(--expense); color:var(--expense); }
+    .fa-btn-danger:hover{ background:var(--expense-bg); }
+    .fa-form-actions{ display:flex; gap:8px; margin-top:12px; }
+
+    /* ---------- Config chips ---------- */
+    .fa-chip-group{ display:flex; flex-wrap:wrap; gap:7px; margin:10px 0 16px 0; }
+    .fa-chip{
+      display:flex; align-items:center; gap:6px; background:#F3F4F6; border:1px solid var(--border);
+      border-radius:20px; padding:5px 6px 5px 12px; font-size:12.5px;
+    }
+    .fa-chip button{ background:var(--border); border:none; border-radius:50%; width:16px; height:16px; font-size:10px; line-height:1; cursor:pointer; color:var(--ink-soft); }
+    .fa-chip button:hover{ background:var(--expense); color:#fff; }
+    .fa-add-chip-row{ display:flex; gap:8px; margin-bottom:6px; }
+    .fa-add-chip-row input{ flex:1; padding:7px 9px; border:1px solid var(--border); border-radius:7px; font-size:13px; }
+
+    .fa-mini-select{
+      width:100%; padding:5px 4px; font-size:11.5px; border:1px solid var(--border); border-radius:6px;
+      font-family:'Inter',sans-serif; background:#fff; color:var(--ink); text-align:center;
+    }
+    .fa-mini-select.st-pagado{ background:var(--income-bg); color:var(--income); border-color:var(--income); font-weight:600; }
+    .fa-mini-select.st-pendiente{ background:#FFF4DE; color:#96660A; border-color:#E8B84B; font-weight:600; }
+    .fa-alert-box{
+      background:var(--expense-bg); border:1px solid var(--expense); border-radius:var(--radius);
+      padding:16px 18px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    }
+    .fa-alert-box .fa-alert-label{ font-size:12.5px; font-weight:600; color:var(--expense); }
+    .fa-alert-box .fa-alert-value{ font-family:'Space Grotesk',sans-serif; font-size:24px; font-weight:700; color:var(--expense); }
+    .fa-toast{
+      position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+      background:var(--ink); color:#fff; padding:10px 18px; border-radius:8px; font-size:13px;
+      opacity:0; pointer-events:none; transition:opacity .25s ease; z-index:50;
+    }
+    .fa-toast.show{ opacity:1; }
+    .fa-modal-overlay{
+      position:fixed; inset:0; background:rgba(20,33,61,.55); z-index:100;
+      display:flex; align-items:center; justify-content:center; padding:20px;
+    }
+    .fa-modal{
+      background:#fff; border-radius:14px; padding:22px 24px; max-width:420px; width:100%;
+      box-shadow:0 20px 60px rgba(0,0,0,.25);
+    }
+    .fa-modal-message{ font-size:14px; color:var(--ink); line-height:1.5; margin-bottom:18px; white-space:pre-line; }
+    .fa-modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
+    .fa-bulk-bar{
+      display:flex; align-items:center; gap:12px; background:var(--expense-bg); border:1px solid var(--expense);
+      border-radius:8px; padding:9px 14px; margin-bottom:12px; font-size:13px; flex-wrap:wrap;
+    }
+    .fa-bulk-bar .fa-bulk-count{ font-weight:600; color:var(--ink); }
+    table.fa-table th.fa-checkbox-col, table.fa-table td.fa-checkbox-col{ width:34px; text-align:center; padding-left:12px; padding-right:4px; }
+    table.fa-table input[type="checkbox"]{ width:15px; height:15px; cursor:pointer; accent-color: var(--ink); }
+    .fa-informe-actions{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .fa-informe-period{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+    .fa-informe-period select{ padding:7px 9px; border:1px solid var(--border); border-radius:7px; font-size:13px; font-family:'Inter',sans-serif; background:#fff; }
+    @media print{
+      #fin-app-root, #fa-toast{ display:none !important; }
+      #fa-informe-container{ display:block !important; position:static !important; left:0 !important; }
+    }
+    .fa-loading, .fa-error{ padding:60px 20px; text-align:center; color:var(--muted); font-size:14px; }
+    .fa-hint{ font-size:11.5px; color:var(--muted); margin-top:8px; }
+    .fa-section-note{ font-size:12px; color:var(--muted); margin-bottom:14px; }
+    .fa-mobile-tabs{ display:none; }
+    @media (max-width:760px){
+      #fin-app-root{ flex-direction:column; }
+      .fa-sidebar{ width:100%; flex-direction:row; overflow-x:auto; padding:12px; align-items:center; }
+      .fa-brand{ padding:0 10px 0 0; }
+      .fa-sidebar-footer{ display:none; }
+      .fa-main{ max-height:none; }
+      .fa-kpi-grid{ grid-template-columns:repeat(2,1fr); }
+    }
+  </style>
+</head>
+<body>
+
+<div id="fin-app-root"></div>
+<div class="fa-toast" id="fa-toast"></div>
+
+<!-- Módulos de Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, get, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // Configuración de tu Firebase
+  const firebaseConfig = {
+    apiKey: "AIzaSyDGmQuEXsFAdypuUPSxbLWQLyqwEjYXqRk",
+    authDomain: "finanzasuneq.firebaseapp.com",
+    databaseURL: "https://finanzasuneq-default-rtdb.firebaseio.com",
+    projectId: "finanzasuneq",
+    storageBucket: "finanzasuneq.firebasestorage.app",
+    messagingSenderId: "437380582204",
+    appId: "1:437380582204:web:0dd879f1ecc93074b6ac39",
+    measurementId: "G-HTT52NHPNP"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Adaptador global de almacenamiento hacia Firebase Realtime Database
+  window.storage = {
+    async get(key) {
+      try {
+        const snapshot = await get(ref(db, key));
+        if (snapshot.exists()) {
+          return { value: JSON.stringify(snapshot.val()) };
+        }
+        return null;
+      } catch (err) {
+        console.error("Error al leer desde Firebase DB:", err);
+        return null;
+      }
+    },
+    async set(key, valueStr) {
+      try {
+        const parsed = JSON.parse(valueStr);
+        await set(ref(db, key), parsed);
+        return true;
+      } catch (err) {
+        console.error("Error al escribir en Firebase DB:", err);
+        return false;
+      }
+    }
+  };
+
+  // Disparar evento para indicar que la capa de almacenamiento está lista
+  window.dispatchEvent(new Event('storage-ready'));
+</script>
+
+<script>
+window.addEventListener('storage-ready', function() {
+  (function(){
+    const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos"];
+    const CAT_GASTOS_DEFAULT = ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos"];
+    const METODOS_DEFAULT = ["Transferencia","Tarjeta de Débito","Tarjeta de Crédito","Efectivo","Cheque"];
+
+    const SEED_CONFIG = {
+      "anio": 2026,
+      "saldoInicial": 1748488,
+      "categoriasIngresos": [
+        "Venta Programas Online (USD)", "Venta Programas Online (CLP)", "Mentorías Personalizadas (CLP)",
+        "SponsorShip", "Capacitaciones", "Charlas", "Otros Ingresos", "Crédito Comercial", "Aporte Inversionista", "Servicios de Agencia"
+      ],
+      "categoriasGastos": [
+        "Sueldos y Honorarios", "Arriendo y Servicios Básicos", "Software y Herramientas", "Marketing y Ventas",
+        "Servicios Profesionales (Contable/Legal)", "Impuestos y Contribuciones", "Comisiones", "Gratificaciones",
+        "Bonos", "Equipamiento", "Capacitaciones y Cursos", "Créditos y Renegociaciones", "Otros Gastos",
+        "Retiros Socios", "Transporte, Estacionamientos y Traslados", "Alimentación y Snacks", "Viáticos"
+      ],
+      "metodosPago": ["Transferencia", "Tarjeta de Débito", "Tarjeta de Crédito", "Efectivo", "Cheque", "Cargo Automático", "Pago en línea"]
+    };
+
+    const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+    const MESES_CORTO = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+
+    const root = document.getElementById('fin-app-root');
+    const toastEl = document.getElementById('fa-toast');
+    let toastTimer = null;
+
+    let state = {
+      loading: true,
+      error: null,
+      activeTab: 'resumen',
+      config: null,
+      ingresos: [],
+      gastos: [],
+      pagosFijosCatalogo: [],
+      pagosFijosEstado: {},
+      editingIngresoId: null,
+      editingGastoId: null,
+      editingPFId: null,
+      detalleMes: new Date().getMonth(),
+      mesCortePF: new Date().getMonth(),
+      confirmDialog: null,
+      pendingImportJson: null,
+      selected: { ingresos: new Set(), gastos: new Set() },
+      informe: { mesDesde: 0, mesHasta: 11 },
+      composicionVista: { tipo: 'fijos', modo: 'monto' },
+      tables: {
+        ingresos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', estado:'', mes:'' },
+        gastos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', metodo:'', mes:'', tipo:'' },
+        resumenMensual: { sortKey:'mesIdx', sortDir:'asc', search:'' },
+        flujoCaja: { sortKey:'mesIdx', sortDir:'asc', search:'' },
+        rentMensual: { sortKey:'mesIdx', sortDir:'asc', search:'' },
+        rentCategorias: { sortKey:'monto', sortDir:'desc', search:'' },
+        pfEstado: { sortKey:'concepto', sortDir:'asc', search:'' },
+        pfDeuda: { sortKey:'concepto', sortDir:'asc', search:'' },
+        composicion: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', metodo:'', mes:'', tipo:'' }
+      }
+    };
+
+    function todayISO(){
+      const d = new Date();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${d.getFullYear()}-${m}-${day}`;
+    }
+
+    function uid(prefix){
+      return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
+    }
+
+    function fmtMoney(n){
+      const v = Math.round(Number(n)||0);
+      const sign = v < 0 ? '-' : '';
+      return sign + '$' + Math.abs(v).toLocaleString('es-CL');
+    }
+
+    function fmtMoneyC(n){
+      const text = fmtMoney(n);
+      return Number(n) < 0 ? `<span style="color:var(--expense)">${text}</span>` : text;
+    }
+
+    function fmtPct(n){
+      if (!isFinite(n)) n = 0;
+      return (n*100).toLocaleString('es-CL', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
+    }
+
+    function fmtPctC(n){
+      const text = fmtPct(n);
+      return (isFinite(n) && n < 0) ? `<span style="color:var(--expense)">${text}</span>` : text;
+    }
+
+    function fmtDate(iso){
+      if(!iso) return '';
+      const [y,m,d] = iso.split('-');
+      return `${d}-${m}-${y}`;
+    }
+
+    function escapeHtml(str){
+      if (str === undefined || str === null) return '';
+      return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+    }
+
+    function showToast(msg){
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(()=> toastEl.classList.remove('show'), 2800);
+    }
+
+    async function saveKey(key, value){
+      try {
+        const res = await window.storage.set(key, JSON.stringify(value));
+        return res;
+      } catch (e) {
+        console.error(`Error guardando ${key}:`, e);
+        showToast('Error al conectar con la base de datos');
+        return false;
+      }
+    }
+
+    async function loadKeySeeded(key, seedValue){
+      try {
+        const res = await window.storage.get(key);
+        if (res && res.value) {
+          return JSON.parse(res.value);
+        }
+        await saveKey(key, seedValue);
+        return seedValue;
+      } catch (e) {
+        return seedValue;
+      }
+    }
+
+    async function init(){
+      try {
+        const config = await loadKeySeeded('config', SEED_CONFIG);
+        const ingresos = await loadKeySeeded('ingresos', []);
+        const gastos = await loadKeySeeded('gastos', []);
+        const pagosFijosCatalogo = await loadKeySeeded('pagosFijosCatalogo', []);
+        const pagosFijosEstado = await loadKeySeeded('pagosFijosEstado', {});
+
+        state.config = config || SEED_CONFIG;
+        state.ingresos = ingresos || [];
+        state.gastos = gastos || [];
+        state.pagosFijosCatalogo = pagosFijosCatalogo || [];
+        state.pagosFijosEstado = pagosFijosEstado || {};
+        state.loading = false;
+      } catch (e) {
+        console.error(e);
+        state.error = 'No se pudieron cargar tus datos desde Firebase. Revisa tu conexión.';
+        state.loading = false;
+      }
+      render();
+    }
+
+    function getSaldoActual(){
+      const ingresosPagados = state.ingresos.filter(i=>i.estado==='Pagado').reduce((s,i)=>s+(Number(i.monto)||0),0);
+      const totalGastos = state.gastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
+      return (Number(state.config.saldoInicial)||0) + ingresosPagados - totalGastos;
+    }
+
+    function render(){
+      if(state.loading){
+        root.innerHTML = `<div class="fa-loading">Conectando con Firebase…</div>`;
+        return;
+      }
+      if(state.error){
+        root.innerHTML = `<div class="fa-error">${escapeHtml(state.error)}</div>`;
+        return;
+      }
+      root.innerHTML = `
+        <div class="fa-sidebar">
+          <div class="fa-brand"><span class="dot"></span> Finanzas UNEQ</div>
+          <button class="fa-nav-btn ${state.activeTab==='resumen'?'active':''}" onclick="setTab('resumen')">Resumen</button>
+          <button class="fa-nav-btn ${state.activeTab==='ingresos'?'active':''}" onclick="setTab('ingresos')">Ingresos</button>
+          <button class="fa-nav-btn ${state.activeTab==='gastos'?'active':''}" onclick="setTab('gastos')">Gastos</button>
+        </div>
+        <div class="fa-main">
+          <h1>Finanzas UNEQ</h1>
+          <p>Conectado con Firebase correctamente.</p>
+          <p><strong>Saldo actual en Caja:</strong> ${fmtMoneyC(getSaldoActual())}</p>
+        </div>
+      `;
+    }
+
+    window.setTab = function(t){ state.activeTab = t; render(); };
+
+    init();
+  })();
+});
+</script>
+</body>
+</html>
