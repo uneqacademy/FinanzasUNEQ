@@ -242,7 +242,6 @@
     .fa-loading, .fa-error{ padding:60px 20px; text-align:center; color:var(--muted); font-size:14px; }
     .fa-hint{ font-size:11.5px; color:var(--muted); margin-top:8px; }
     .fa-section-note{ font-size:12px; color:var(--muted); margin-bottom:14px; }
-    .fa-mobile-tabs{ display:none; }
     @media (max-width:760px){
       #fin-app-root{ flex-direction:column; }
       .fa-sidebar{ width:100%; flex-direction:row; overflow-x:auto; padding:12px; align-items:center; }
@@ -258,12 +257,11 @@
 <div id="fin-app-root"></div>
 <div class="fa-toast" id="fa-toast"></div>
 
-<!-- Módulos de Firebase -->
+<!-- Módulos de Firebase para conectar a Realtime Database -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getDatabase, ref, get, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-  // Configuración de tu Firebase
   const firebaseConfig = {
     apiKey: "AIzaSyDGmQuEXsFAdypuUPSxbLWQLyqwEjYXqRk",
     authDomain: "finanzasuneq.firebaseapp.com",
@@ -278,7 +276,7 @@
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
 
-  // Adaptador global de almacenamiento hacia Firebase Realtime Database
+  // Adaptador para usar Firebase como almacenamiento persistente
   window.storage = {
     async get(key) {
       try {
@@ -304,7 +302,6 @@
     }
   };
 
-  // Disparar evento para indicar que la capa de almacenamiento está lista
   window.dispatchEvent(new Event('storage-ready'));
 </script>
 
@@ -318,17 +315,9 @@ window.addEventListener('storage-ready', function() {
     const SEED_CONFIG = {
       "anio": 2026,
       "saldoInicial": 1748488,
-      "categoriasIngresos": [
-        "Venta Programas Online (USD)", "Venta Programas Online (CLP)", "Mentorías Personalizadas (CLP)",
-        "SponsorShip", "Capacitaciones", "Charlas", "Otros Ingresos", "Crédito Comercial", "Aporte Inversionista", "Servicios de Agencia"
-      ],
-      "categoriasGastos": [
-        "Sueldos y Honorarios", "Arriendo y Servicios Básicos", "Software y Herramientas", "Marketing y Ventas",
-        "Servicios Profesionales (Contable/Legal)", "Impuestos y Contribuciones", "Comisiones", "Gratificaciones",
-        "Bonos", "Equipamiento", "Capacitaciones y Cursos", "Créditos y Renegociaciones", "Otros Gastos",
-        "Retiros Socios", "Transporte, Estacionamientos y Traslados", "Alimentación y Snacks", "Viáticos"
-      ],
-      "metodosPago": ["Transferencia", "Tarjeta de Débito", "Tarjeta de Crédito", "Efectivo", "Cheque", "Cargo Automático", "Pago en línea"]
+      "categoriasIngresos": ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos","Crédito Comercial","Aporte Inversionista","Servicios de Agencia"],
+      "categoriasGastos": ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos","Retiros Socios","Transporte, Estacionamientos y Traslados","Alimentación y Snacks","Viáticos"],
+      "metodosPago": ["Transferencia","Tarjeta de Débito","Tarjeta de Crédito","Efectivo","Cheque","Cargo Automático","Pago en línea"]
     };
 
     const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
@@ -426,7 +415,7 @@ window.addEventListener('storage-ready', function() {
         return res;
       } catch (e) {
         console.error(`Error guardando ${key}:`, e);
-        showToast('Error al conectar con la base de datos');
+        showToast('Error de conexión con Firebase');
         return false;
       }
     }
@@ -460,7 +449,7 @@ window.addEventListener('storage-ready', function() {
         state.loading = false;
       } catch (e) {
         console.error(e);
-        state.error = 'No se pudieron cargar tus datos desde Firebase. Revisa tu conexión.';
+        state.error = 'No se pudieron cargar tus datos desde Firebase.';
         state.loading = false;
       }
       render();
@@ -474,7 +463,7 @@ window.addEventListener('storage-ready', function() {
 
     function render(){
       if(state.loading){
-        root.innerHTML = `<div class="fa-loading">Conectando con Firebase…</div>`;
+        root.innerHTML = `<div class="fa-loading">Cargando tus datos financieros desde Firebase…</div>`;
         return;
       }
       if(state.error){
@@ -484,19 +473,146 @@ window.addEventListener('storage-ready', function() {
       root.innerHTML = `
         <div class="fa-sidebar">
           <div class="fa-brand"><span class="dot"></span> Finanzas UNEQ</div>
-          <button class="fa-nav-btn ${state.activeTab==='resumen'?'active':''}" onclick="setTab('resumen')">Resumen</button>
-          <button class="fa-nav-btn ${state.activeTab==='ingresos'?'active':''}" onclick="setTab('ingresos')">Ingresos</button>
-          <button class="fa-nav-btn ${state.activeTab==='gastos'?'active':''}" onclick="setTab('gastos')">Gastos</button>
+          <button class="fa-nav-btn ${state.activeTab==='resumen'?'active':''}" onclick="setTab('resumen')"><span class="fa-nav-icon">&#9673;</span> Resumen</button>
+          <button class="fa-nav-btn ${state.activeTab==='ingresos'?'active':''}" onclick="setTab('ingresos')"><span class="fa-nav-icon">&#8593;</span> Ingresos</button>
+          <button class="fa-nav-btn ${state.activeTab==='gastos'?'active':''}" onclick="setTab('gastos')"><span class="fa-nav-icon">&#8595;</span> Gastos</button>
+          <button class="fa-nav-btn ${state.activeTab==='pagosfijos'?'active':''}" onclick="setTab('pagosfijos')"><span class="fa-nav-icon">&#8987;</span> Pagos Fijos</button>
+          <button class="fa-nav-btn ${state.activeTab==='flujo'?'active':''}" onclick="setTab('flujo')"><span class="fa-nav-icon">&#8646;</span> Flujo de Caja</button>
+          <button class="fa-nav-btn ${state.activeTab==='rentabilidad'?'active':''}" onclick="setTab('rentabilidad')"><span class="fa-nav-icon">&#9636;</span> Rentabilidad</button>
+          <div class="fa-sidebar-footer">Sincronizado con Firebase</div>
         </div>
         <div class="fa-main">
-          <h1>Finanzas UNEQ</h1>
-          <p>Conectado con Firebase correctamente.</p>
-          <p><strong>Saldo actual en Caja:</strong> ${fmtMoneyC(getSaldoActual())}</p>
+          ${renderTabContent()}
         </div>
       `;
     }
 
+    function renderTabContent(){
+      const delAnioIngresos = state.ingresos.filter(i=> i.fecha && new Date(i.fecha+'T00:00:00').getFullYear()===state.config.anio);
+      const delAnioGastos = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===state.config.anio);
+
+      if(state.activeTab === 'resumen'){
+        const totalIngresos = delAnioIngresos.reduce((s,i)=>s+(Number(i.monto)||0),0);
+        const totalGastos = delAnioGastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
+        const utilidad = totalIngresos - totalGastos;
+
+        return `
+          <div class="fa-topbar"><h1>Resumen Financiero (${state.config.anio})</h1></div>
+          <div class="fa-kpi-grid">
+            <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos del año</div><div class="fa-kpi-value income money">${fmtMoneyC(totalIngresos)}</div></div>
+            <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos del año</div><div class="fa-kpi-value expense money">${fmtMoneyC(totalGastos)}</div></div>
+            <div class="fa-kpi"><div class="fa-kpi-label">Utilidad Neta</div><div class="fa-kpi-value money">${fmtMoneyC(utilidad)}</div></div>
+            <div class="fa-kpi"><div class="fa-kpi-label">Saldo Caja Actual</div><div class="fa-kpi-value money">${fmtMoneyC(getSaldoActual())}</div></div>
+          </div>
+          <div class="fa-card">
+            <h3>Estado del Sistema</h3>
+            <p>Conexión exitosa a tu base de datos Firebase.</p>
+            <p>Registros almacenados: <strong>${state.ingresos.length} ingresos</strong> | <strong>${state.gastos.length} gastos</strong>.</p>
+          </div>
+        `;
+      }
+
+      if(state.activeTab === 'ingresos'){
+        return `
+          <div class="fa-topbar"><h1>Ingresos (${delAnioIngresos.length})</h1></div>
+          <div class="fa-card">
+            <h3>Agregar Nuevo Ingreso</h3>
+            <form id="form-ingreso" style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+              <input type="date" id="ing-fecha" value="${todayISO()}" required>
+              <input type="text" id="ing-cliente" placeholder="Cliente" required>
+              <input type="text" id="ing-desc" placeholder="Descripción">
+              <input type="number" id="ing-monto" placeholder="Monto ($)" required>
+              <button type="submit" class="fa-btn fa-btn-primary">Guardar Ingreso</button>
+            </form>
+          </div>
+          <div class="fa-card">
+            <table class="fa-table">
+              <thead><tr><th>Fecha</th><th>Cliente</th><th>Descripción</th><th>Monto</th><th>Estado</th></tr></thead>
+              <tbody>
+                ${delAnioIngresos.map(i=>`
+                  <tr class="income-row">
+                    <td>${fmtDate(i.fecha)}</td>
+                    <td>${escapeHtml(i.cliente)}</td>
+                    <td>${escapeHtml(i.descripcion)}</td>
+                    <td class="num money">${fmtMoneyC(i.monto)}</td>
+                    <td><span class="fa-badge pagado">${i.estado||'Pagado'}</span></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      if(state.activeTab === 'gastos'){
+        return `
+          <div class="fa-topbar"><h1>Gastos (${delAnioGastos.length})</h1></div>
+          <div class="fa-card">
+            <h3>Agregar Nuevo Gasto</h3>
+            <form id="form-gasto" style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+              <input type="date" id="gas-fecha" value="${todayISO()}" required>
+              <input type="text" id="gas-prov" placeholder="Proveedor" required>
+              <input type="text" id="gas-desc" placeholder="Descripción">
+              <input type="number" id="gas-monto" placeholder="Monto ($)" required>
+              <button type="submit" class="fa-btn fa-btn-primary">Guardar Gasto</button>
+            </form>
+          </div>
+          <div class="fa-card">
+            <table class="fa-table">
+              <thead><tr><th>Fecha</th><th>Proveedor</th><th>Descripción</th><th>Monto</th></tr></thead>
+              <tbody>
+                ${delAnioGastos.map(g=>`
+                  <tr class="expense-row">
+                    <td>${fmtDate(g.fecha)}</td>
+                    <td>${escapeHtml(g.proveedor)}</td>
+                    <td>${escapeHtml(g.descripcion)}</td>
+                    <td class="num money">${fmtMoneyC(g.monto)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      return `<div class="fa-card"><h3>Sección en construcción</h3></div>`;
+    }
+
     window.setTab = function(t){ state.activeTab = t; render(); };
+
+    root.addEventListener('submit', async (e)=>{
+      if(e.target.id === 'form-ingreso'){
+        e.preventDefault();
+        const nuevo = {
+          id: uid('ing'),
+          fecha: document.getElementById('ing-fecha').value,
+          cliente: document.getElementById('ing-cliente').value,
+          descripcion: document.getElementById('ing-desc').value,
+          monto: Number(document.getElementById('ing-monto').value)||0,
+          estado: 'Pagado',
+          categoria: 'Venta Programas Online (CLP)'
+        };
+        state.ingresos.push(nuevo);
+        await saveKey('ingresos', state.ingresos);
+        showToast('Ingreso guardado en Firebase');
+        render();
+      }
+      if(e.target.id === 'form-gasto'){
+        e.preventDefault();
+        const nuevo = {
+          id: uid('gas'),
+          fecha: document.getElementById('gas-fecha').value,
+          proveedor: document.getElementById('gas-prov').value,
+          descripcion: document.getElementById('gas-desc').value,
+          monto: Number(document.getElementById('gas-monto').value)||0,
+          categoria: 'Otros Gastos'
+        };
+        state.gastos.push(nuevo);
+        await saveKey('gastos', state.gastos);
+        showToast('Gasto guardado en Firebase');
+        render();
+      }
+    });
 
     init();
   })();
