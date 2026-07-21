@@ -276,7 +276,6 @@
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
 
-  // Adaptador para usar Firebase como almacenamiento persistente
   window.storage = {
     async get(key) {
       try {
@@ -302,11 +301,11 @@
     }
   };
 
-  window.dispatchEvent(new Event('storage-ready'));
+  window.dispatchEvent(new Event('firebase-ready'));
 </script>
 
 <script>
-window.addEventListener('storage-ready', function() {
+window.addEventListener('firebase-ready', function() {
   (function(){
     const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos"];
     const CAT_GASTOS_DEFAULT = ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos"];
@@ -315,8 +314,16 @@ window.addEventListener('storage-ready', function() {
     const SEED_CONFIG = {
       "anio": 2026,
       "saldoInicial": 1748488,
-      "categoriasIngresos": ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos","Crédito Comercial","Aporte Inversionista","Servicios de Agencia"],
-      "categoriasGastos": ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos","Retiros Socios","Transporte, Estacionamientos y Traslados","Alimentación y Snacks","Viáticos"],
+      "categoriasIngresos": [
+        "Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)",
+        "SponsorShip","Capacitaciones","Charlas","Otros Ingresos","Crédito Comercial","Aporte Inversionista","Servicios de Agencia"
+      ],
+      "categoriasGastos": [
+        "Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas",
+        "Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones",
+        "Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos","Retiros Socios",
+        "Transporte, Estacionamientos y Traslados","Alimentación y Snacks","Viáticos"
+      ],
       "metodosPago": ["Transferencia","Tarjeta de Débito","Tarjeta de Crédito","Efectivo","Cheque","Cargo Automático","Pago en línea"]
     };
 
@@ -409,13 +416,22 @@ window.addEventListener('storage-ready', function() {
       toastTimer = setTimeout(()=> toastEl.classList.remove('show'), 2800);
     }
 
+    async function loadKey(key, fallback){
+      try {
+        const res = await window.storage.get(key);
+        return res && res.value ? JSON.parse(res.value) : fallback;
+      } catch (e) {
+        return fallback;
+      }
+    }
+
     async function saveKey(key, value){
       try {
         const res = await window.storage.set(key, JSON.stringify(value));
         return res;
       } catch (e) {
         console.error(`Error guardando ${key}:`, e);
-        showToast('Error de conexión con Firebase');
+        showToast('Error al conectar con la base de datos');
         return false;
       }
     }
@@ -449,7 +465,7 @@ window.addEventListener('storage-ready', function() {
         state.loading = false;
       } catch (e) {
         console.error(e);
-        state.error = 'No se pudieron cargar tus datos desde Firebase.';
+        state.error = 'No se pudieron cargar tus datos desde Firebase. Revisa tu conexión.';
         state.loading = false;
       }
       render();
@@ -461,9 +477,105 @@ window.addEventListener('storage-ready', function() {
       return (Number(state.config.saldoInicial)||0) + ingresosPagados - totalGastos;
     }
 
+    function getYearsWithData(){
+      const years = new Set();
+      for(let y=2021; y<=2030; y++) years.add(y);
+      if(state.config) years.add(state.config.anio);
+      years.add(new Date().getFullYear());
+      state.ingresos.forEach(i => { if(i.fecha) years.add(new Date(i.fecha+'T00:00:00').getFullYear()); });
+      state.gastos.forEach(g => { if(g.fecha) years.add(new Date(g.fecha+'T00:00:00').getFullYear()); });
+      return Array.from(years).sort((a,b)=>a-b);
+    }
+
+    function getMonthlyStats(year){
+      const months = Array.from({length:12}, (_,i)=>({
+        mes:i, ingresosCobrados:0, ingresosTotales:0, gastosPagados:0, gastosPorCategoria:{}
+      }));
+      if(state.config && state.config.categoriasGastos){
+        state.config.categoriasGastos.forEach(cat=> months.forEach(m=> m.gastosPorCategoria[cat]=0));
+      }
+
+      state.ingresos.forEach(ing=>{
+        if(!ing.fecha) return;
+        const d = new Date(ing.fecha+'T00:00:00');
+        if(d.getFullYear() !== year) return;
+        const m = d.getMonth();
+        const monto = Number(ing.monto)||0;
+        months[m].ingresosTotales += monto;
+        if(ing.estado === 'Pagado') months[m].ingresosCobrados += monto;
+      });
+
+      state.gastos.forEach(g=>{
+        if(!g.fecha) return;
+        const d = new Date(g.fecha+'T00:00:00');
+        if(d.getFullYear() !== year) return;
+        const m = d.getMonth();
+        const monto = Number(g.monto)||0;
+        months[m].gastosPagados += monto;
+        if(months[m].gastosPorCategoria[g.categoria] === undefined) months[m].gastosPorCategoria[g.categoria]=0;
+        months[m].gastosPorCategoria[g.categoria] += monto;
+      });
+
+      let saldo = Number(state.config ? state.config.saldoInicial : 0)||0;
+      months.forEach(m=>{
+        m.saldoInicial = saldo;
+        m.saldoFinal = saldo + m.ingresosCobrados - m.gastosPagados;
+        saldo = m.saldoFinal;
+        m.utilidadNeta = m.ingresosTotales - m.gastosPagados;
+        m.margen = m.ingresosTotales !== 0 ? m.utilidadNeta / m.ingresosTotales : 0;
+      });
+      return months;
+    }
+
+    function sortRowsGeneric(rows, key, dir){
+      const mult = dir === 'asc' ? 1 : -1;
+      return rows.slice().sort((a,b)=>{
+        let va = a[key], vb = b[key];
+        if(typeof va === 'number' || typeof vb === 'number'){
+          va = Number(va)||0; vb = Number(vb)||0;
+        } else {
+          va = (va||'').toString().toLowerCase();
+          vb = (vb||'').toString().toLowerCase();
+        }
+        if(va < vb) return -1*mult;
+        if(va > vb) return 1*mult;
+        return 0;
+      });
+    }
+
+    function yearSelect(name){
+      const years = getYearsWithData();
+      return `<select class="fa-year-select" data-action="change-anio" data-name="${name}">
+        ${years.map(y=>`<option value="${y}" ${y===state.config.anio?'selected':''}>${y}</option>`).join('')}
+      </select>`;
+    }
+
+    function renderSidebar(){
+      const tabs = [
+        {id:'resumen', label:'Resumen', icon:'&#9673;'},
+        {id:'ingresos', label:'Ingresos', icon:'&#8593;'},
+        {id:'gastos', label:'Gastos', icon:'&#8595;'},
+        {id:'pagosfijos', label:'Pagos Fijos', icon:'&#8987;'},
+        {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
+        {id:'rentabilidad', label:'Rentabilidad', icon:'&#9636;'},
+        {id:'config', label:'Configuración', icon:'&#9881;'}
+      ];
+      return `
+        <div class="fa-sidebar">
+          <div class="fa-brand"><span class="dot"></span> Finanzas UNEQ</div>
+          ${tabs.map(t=>`
+            <button class="fa-nav-btn ${state.activeTab===t.id?'active':''}" data-action="nav" data-tab="${t.id}">
+              <span class="fa-nav-icon">${t.icon}</span>${t.label}
+            </button>
+          `).join('')}
+          <div class="fa-sidebar-footer">Sincronizado con Firebase</div>
+        </div>
+      `;
+    }
+
     function render(){
       if(state.loading){
-        root.innerHTML = `<div class="fa-loading">Cargando tus datos financieros desde Firebase…</div>`;
+        root.innerHTML = `<div class="fa-loading">Cargando tus datos desde Firebase…</div>`;
         return;
       }
       if(state.error){
@@ -471,145 +583,271 @@ window.addEventListener('storage-ready', function() {
         return;
       }
       root.innerHTML = `
-        <div class="fa-sidebar">
-          <div class="fa-brand"><span class="dot"></span> Finanzas UNEQ</div>
-          <button class="fa-nav-btn ${state.activeTab==='resumen'?'active':''}" onclick="setTab('resumen')"><span class="fa-nav-icon">&#9673;</span> Resumen</button>
-          <button class="fa-nav-btn ${state.activeTab==='ingresos'?'active':''}" onclick="setTab('ingresos')"><span class="fa-nav-icon">&#8593;</span> Ingresos</button>
-          <button class="fa-nav-btn ${state.activeTab==='gastos'?'active':''}" onclick="setTab('gastos')"><span class="fa-nav-icon">&#8595;</span> Gastos</button>
-          <button class="fa-nav-btn ${state.activeTab==='pagosfijos'?'active':''}" onclick="setTab('pagosfijos')"><span class="fa-nav-icon">&#8987;</span> Pagos Fijos</button>
-          <button class="fa-nav-btn ${state.activeTab==='flujo'?'active':''}" onclick="setTab('flujo')"><span class="fa-nav-icon">&#8646;</span> Flujo de Caja</button>
-          <button class="fa-nav-btn ${state.activeTab==='rentabilidad'?'active':''}" onclick="setTab('rentabilidad')"><span class="fa-nav-icon">&#9636;</span> Rentabilidad</button>
-          <div class="fa-sidebar-footer">Sincronizado con Firebase</div>
+        ${renderSidebar()}
+        <div class="fa-main">${renderTab()}</div>
+      `;
+    }
+
+    function renderTab(){
+      switch(state.activeTab){
+        case 'resumen': return renderResumen();
+        case 'ingresos': return renderIngresos();
+        case 'gastos': return renderGastos();
+        case 'pagosfijos': return renderPagosFijos();
+        case 'flujo': return renderFlujo();
+        case 'rentabilidad': return renderRentabilidad();
+        case 'config': return renderConfig();
+        default: return renderResumen();
+      }
+    }
+
+    function renderResumen(){
+      const months = getMonthlyStats(state.config.anio);
+      const ingresosAnio = months.reduce((s,m)=>s+m.ingresosTotales,0);
+      const gastosAnio = months.reduce((s,m)=>s+m.gastosPagados,0);
+      const utilidadAnio = ingresosAnio - gastosAnio;
+      const margenAnio = ingresosAnio !== 0 ? utilidadAnio/ingresosAnio : 0;
+      const saldoActual = getSaldoActual();
+
+      return `
+        <div class="fa-topbar">
+          <div>
+            <h1>Resumen Financiero</h1>
+            <div class="fa-sub">Vista general de tu empresa — año ${state.config.anio}</div>
+          </div>
+          ${yearSelect('resumen')}
         </div>
-        <div class="fa-main">
-          ${renderTabContent()}
+
+        <div class="fa-kpi-grid">
+          <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos del año</div><div class="fa-kpi-value income money">${fmtMoneyC(ingresosAnio)}</div></div>
+          <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos del año</div><div class="fa-kpi-value expense money">${fmtMoneyC(gastosAnio)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Utilidad neta</div><div class="fa-kpi-value money">${fmtMoneyC(utilidadAnio)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Margen neto</div><div class="fa-kpi-value">${fmtPctC(margenAnio)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Saldo de caja actual</div><div class="fa-kpi-value money">${fmtMoneyC(saldoActual)}</div></div>
+        </div>
+
+        <div class="fa-card">
+          <div class="fa-card-title">Detalle mensual ${state.config.anio}</div>
+          <div class="fa-table-wrap">
+            <table class="fa-table">
+              <thead><tr><th>Mes</th><th class="num">Ingresos</th><th class="num">Gastos</th><th class="num">Utilidad</th><th class="num">Margen</th><th class="num">Saldo Caja</th></tr></thead>
+              <tbody>
+                ${months.map((m,i)=>`
+                  <tr>
+                    <td>${MESES[i]}</td>
+                    <td class="num money">${fmtMoneyC(m.ingresosTotales)}</td>
+                    <td class="num money">${fmtMoneyC(m.gastosPagados)}</td>
+                    <td class="num money">${fmtMoneyC(m.utilidadNeta)}</td>
+                    <td class="num">${fmtPctC(m.margen)}</td>
+                    <td class="num money">${fmtMoneyC(m.saldoFinal)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
         </div>
       `;
     }
 
-    function renderTabContent(){
-      const delAnioIngresos = state.ingresos.filter(i=> i.fecha && new Date(i.fecha+'T00:00:00').getFullYear()===state.config.anio);
-      const delAnioGastos = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===state.config.anio);
-
-      if(state.activeTab === 'resumen'){
-        const totalIngresos = delAnioIngresos.reduce((s,i)=>s+(Number(i.monto)||0),0);
-        const totalGastos = delAnioGastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
-        const utilidad = totalIngresos - totalGastos;
-
-        return `
-          <div class="fa-topbar"><h1>Resumen Financiero (${state.config.anio})</h1></div>
-          <div class="fa-kpi-grid">
-            <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos del año</div><div class="fa-kpi-value income money">${fmtMoneyC(totalIngresos)}</div></div>
-            <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos del año</div><div class="fa-kpi-value expense money">${fmtMoneyC(totalGastos)}</div></div>
-            <div class="fa-kpi"><div class="fa-kpi-label">Utilidad Neta</div><div class="fa-kpi-value money">${fmtMoneyC(utilidad)}</div></div>
-            <div class="fa-kpi"><div class="fa-kpi-label">Saldo Caja Actual</div><div class="fa-kpi-value money">${fmtMoneyC(getSaldoActual())}</div></div>
+    function renderIngresos(){
+      const delAnio = state.ingresos.filter(i=> i.fecha && new Date(i.fecha+'T00:00:00').getFullYear()===state.config.anio);
+      return `
+        <div class="fa-topbar">
+          <div><h1>Ingresos (${delAnio.length})</h1><div class="fa-sub">Mostrando año ${state.config.anio}</div></div>
+          ${yearSelect('ingresos')}
+        </div>
+        <div class="fa-card">
+          <div class="fa-card-title">Registrar Nuevo Ingreso</div>
+          <div class="fa-form-grid" data-form="ingreso">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Cliente</label><input type="text" name="cliente" placeholder="Nombre cliente"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Detalle"></div>
+            <div class="fa-field"><label>Categoría</label><select name="categoria">${state.config.categoriasIngresos.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select></div>
+            <div class="fa-field"><label>Monto ($)</label><input type="number" name="monto" placeholder="0"></div>
+            <div class="fa-field"><label>Estado</label><select name="estado"><option>Pagado</option><option>Pendiente</option></select></div>
           </div>
-          <div class="fa-card">
-            <h3>Estado del Sistema</h3>
-            <p>Conexión exitosa a tu base de datos Firebase.</p>
-            <p>Registros almacenados: <strong>${state.ingresos.length} ingresos</strong> | <strong>${state.gastos.length} gastos</strong>.</p>
-          </div>
-        `;
-      }
-
-      if(state.activeTab === 'ingresos'){
-        return `
-          <div class="fa-topbar"><h1>Ingresos (${delAnioIngresos.length})</h1></div>
-          <div class="fa-card">
-            <h3>Agregar Nuevo Ingreso</h3>
-            <form id="form-ingreso" style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
-              <input type="date" id="ing-fecha" value="${todayISO()}" required>
-              <input type="text" id="ing-cliente" placeholder="Cliente" required>
-              <input type="text" id="ing-desc" placeholder="Descripción">
-              <input type="number" id="ing-monto" placeholder="Monto ($)" required>
-              <button type="submit" class="fa-btn fa-btn-primary">Guardar Ingreso</button>
-            </form>
-          </div>
-          <div class="fa-card">
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-ingreso">Guardar Ingreso</button></div>
+        </div>
+        <div class="fa-card">
+          <div class="fa-table-wrap">
             <table class="fa-table">
-              <thead><tr><th>Fecha</th><th>Cliente</th><th>Descripción</th><th>Monto</th><th>Estado</th></tr></thead>
+              <thead><tr><th>Fecha</th><th>Cliente</th><th>Descripción</th><th>Categoría</th><th class="num">Monto</th><th>Estado</th></tr></thead>
               <tbody>
-                ${delAnioIngresos.map(i=>`
+                ${delAnio.map(i=>`
                   <tr class="income-row">
                     <td>${fmtDate(i.fecha)}</td>
-                    <td>${escapeHtml(i.cliente)}</td>
-                    <td>${escapeHtml(i.descripcion)}</td>
+                    <td>${escapeHtml(i.cliente)||'—'}</td>
+                    <td>${escapeHtml(i.descripcion)||'—'}</td>
+                    <td>${escapeHtml(i.categoria)}</td>
                     <td class="num money">${fmtMoneyC(i.monto)}</td>
-                    <td><span class="fa-badge pagado">${i.estado||'Pagado'}</span></td>
+                    <td><span class="fa-badge ${i.estado==='Pagado'?'pagado':'pendiente'}">${i.estado}</span></td>
                   </tr>
                 `).join('')}
               </tbody>
             </table>
           </div>
-        `;
-      }
-
-      if(state.activeTab === 'gastos'){
-        return `
-          <div class="fa-topbar"><h1>Gastos (${delAnioGastos.length})</h1></div>
-          <div class="fa-card">
-            <h3>Agregar Nuevo Gasto</h3>
-            <form id="form-gasto" style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
-              <input type="date" id="gas-fecha" value="${todayISO()}" required>
-              <input type="text" id="gas-prov" placeholder="Proveedor" required>
-              <input type="text" id="gas-desc" placeholder="Descripción">
-              <input type="number" id="gas-monto" placeholder="Monto ($)" required>
-              <button type="submit" class="fa-btn fa-btn-primary">Guardar Gasto</button>
-            </form>
-          </div>
-          <div class="fa-card">
-            <table class="fa-table">
-              <thead><tr><th>Fecha</th><th>Proveedor</th><th>Descripción</th><th>Monto</th></tr></thead>
-              <tbody>
-                ${delAnioGastos.map(g=>`
-                  <tr class="expense-row">
-                    <td>${fmtDate(g.fecha)}</td>
-                    <td>${escapeHtml(g.proveedor)}</td>
-                    <td>${escapeHtml(g.descripcion)}</td>
-                    <td class="num money">${fmtMoneyC(g.monto)}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        `;
-      }
-
-      return `<div class="fa-card"><h3>Sección en construcción</h3></div>`;
+        </div>
+      `;
     }
 
-    window.setTab = function(t){ state.activeTab = t; render(); };
+    function renderGastos(){
+      const delAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===state.config.anio);
+      return `
+        <div class="fa-topbar">
+          <div><h1>Gastos (${delAnio.length})</h1><div class="fa-sub">Mostrando año ${state.config.anio}</div></div>
+          ${yearSelect('gastos')}
+        </div>
+        <div class="fa-card">
+          <div class="fa-card-title">Registrar Nuevo Gasto</div>
+          <div class="fa-form-grid" data-form="gasto">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Proveedor"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Detalle"></div>
+            <div class="fa-field"><label>Categoría</label><select name="categoria">${state.config.categoriasGastos.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select></div>
+            <div class="fa-field"><label>Monto ($)</label><input type="number" name="monto" placeholder="0"></div>
+            <div class="fa-field"><label>Método de Pago</label><select name="metodo">${state.config.metodosPago.map(m=>`<option>${escapeHtml(m)}</option>`).join('')}</select></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">Guardar Gasto</button></div>
+        </div>
+        <div class="fa-card">
+          <div class="fa-table-wrap">
+            <table class="fa-table">
+              <thead><tr><th>Fecha</th><th>Proveedor</th><th>Descripción</th><th>Categoría</th><th class="num">Monto</th><th>Método</th></tr></thead>
+              <tbody>
+                ${delAnio.map(g=>`
+                  <tr class="expense-row">
+                    <td>${fmtDate(g.fecha)}</td>
+                    <td>${escapeHtml(g.proveedor)||'—'}</td>
+                    <td>${escapeHtml(g.descripcion)||'—'}</td>
+                    <td>${escapeHtml(g.categoria)}</td>
+                    <td class="num money">${fmtMoneyC(g.monto)}</td>
+                    <td>${escapeHtml(g.metodo)||'—'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
 
-    root.addEventListener('submit', async (e)=>{
-      if(e.target.id === 'form-ingreso'){
-        e.preventDefault();
-        const nuevo = {
-          id: uid('ing'),
-          fecha: document.getElementById('ing-fecha').value,
-          cliente: document.getElementById('ing-cliente').value,
-          descripcion: document.getElementById('ing-desc').value,
-          monto: Number(document.getElementById('ing-monto').value)||0,
-          estado: 'Pagado',
-          categoria: 'Venta Programas Online (CLP)'
-        };
-        state.ingresos.push(nuevo);
+    function renderPagosFijos(){
+      return `<div class="fa-topbar"><h1>Pagos Fijos</h1></div><div class="fa-card"><p>Compromisos recurrentes sincronizados con Firebase.</p></div>`;
+    }
+
+    function renderFlujo(){
+      const months = getMonthlyStats(state.config.anio);
+      return `
+        <div class="fa-topbar"><div><h1>Flujo de Caja</h1></div>${yearSelect('flujo')}</div>
+        <div class="fa-card">
+          <div class="fa-table-wrap">
+            <table class="fa-table">
+              <thead><tr><th>Mes</th><th class="num">Saldo Inicial</th><th class="num">(+) Cobrado</th><th class="num">(-) Pagado</th><th class="num">(=) Saldo Final</th></tr></thead>
+              <tbody>
+                ${months.map((m,i)=>`
+                  <tr>
+                    <td>${MESES[i]}</td>
+                    <td class="num money">${fmtMoneyC(m.saldoInicial)}</td>
+                    <td class="num money" style="color:var(--income)">${fmtMoneyC(m.ingresosCobrados)}</td>
+                    <td class="num money" style="color:var(--expense)">${fmtMoneyC(m.gastosPagados)}</td>
+                    <td class="num money" style="font-weight:700">${fmtMoneyC(m.saldoFinal)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRentabilidad(){
+      const months = getMonthlyStats(state.config.anio);
+      return `
+        <div class="fa-topbar"><div><h1>Rentabilidad</h1></div>${yearSelect('rentabilidad')}</div>
+        <div class="fa-card">
+          <div class="fa-table-wrap">
+            <table class="fa-table">
+              <thead><tr><th>Mes</th><th class="num">Ingresos</th><th class="num">Gastos</th><th class="num">Utilidad Neta</th><th class="num">Margen %</th></tr></thead>
+              <tbody>
+                ${months.map((m,i)=>`
+                  <tr>
+                    <td>${MESES[i]}</td>
+                    <td class="num money">${fmtMoneyC(m.ingresosTotales)}</td>
+                    <td class="num money">${fmtMoneyC(m.gastosPagados)}</td>
+                    <td class="num money">${fmtMoneyC(m.utilidadNeta)}</td>
+                    <td class="num">${fmtPctC(m.margen)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderConfig(){
+      return `
+        <div class="fa-topbar"><h1>Configuración</h1></div>
+        <div class="fa-card">
+          <div class="fa-field" style="max-width:260px;">
+            <label>Saldo Inicial de Caja ($)</label>
+            <input type="number" id="cfg-saldo-inicial" value="${state.config.saldoInicial}">
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-config">Guardar Configuración</button></div>
+        </div>
+      `;
+    }
+
+    root.addEventListener('click', async (e)=>{
+      const btn = e.target.closest('[data-action]');
+      if(!btn) return;
+      const action = btn.dataset.action;
+
+      if(action === 'nav'){
+        state.activeTab = btn.dataset.tab;
+        render();
+      }
+      else if(action === 'submit-ingreso'){
+        const container = root.querySelector('[data-form="ingreso"]');
+        const inputs = container.querySelectorAll('input, select');
+        const data = {};
+        inputs.forEach(i=> data[i.name] = i.value);
+        if(!data.monto || Number(data.monto) <= 0){ showToast('Ingresa un monto válido.'); return; }
+        
+        data.id = uid('ing');
+        data.monto = Number(data.monto);
+        state.ingresos.push(data);
         await saveKey('ingresos', state.ingresos);
         showToast('Ingreso guardado en Firebase');
         render();
       }
-      if(e.target.id === 'form-gasto'){
-        e.preventDefault();
-        const nuevo = {
-          id: uid('gas'),
-          fecha: document.getElementById('gas-fecha').value,
-          proveedor: document.getElementById('gas-prov').value,
-          descripcion: document.getElementById('gas-desc').value,
-          monto: Number(document.getElementById('gas-monto').value)||0,
-          categoria: 'Otros Gastos'
-        };
-        state.gastos.push(nuevo);
+      else if(action === 'submit-gasto'){
+        const container = root.querySelector('[data-form="gasto"]');
+        const inputs = container.querySelectorAll('input, select');
+        const data = {};
+        inputs.forEach(i=> data[i.name] = i.value);
+        if(!data.monto || Number(data.monto) <= 0){ showToast('Ingresa un monto válido.'); return; }
+        
+        data.id = uid('gas');
+        data.monto = Number(data.monto);
+        state.gastos.push(data);
         await saveKey('gastos', state.gastos);
         showToast('Gasto guardado en Firebase');
+        render();
+      }
+      else if(action === 'submit-config'){
+        const val = Number(document.getElementById('cfg-saldo-inicial').value)||0;
+        state.config.saldoInicial = val;
+        await saveKey('config', state.config);
+        showToast('Configuración guardada en Firebase');
+        render();
+      }
+    });
+
+    root.addEventListener('change', async (e)=>{
+      if(e.target.dataset.action === 'change-anio'){
+        state.config.anio = Number(e.target.value);
+        await saveKey('config', state.config);
         render();
       }
     });
