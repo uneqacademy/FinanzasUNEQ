@@ -5546,9 +5546,9 @@
         <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="export-json">&#128190; Respaldo (.json)</button>
         <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="import-json">&#128228; Importar respaldo (.json)</button>
         <input type="file" id="fa-import-file-input" data-action="import-json-file" accept=".json,application/json" style="display:none;">
+        <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="logout">&#128274; Cerrar sesión</button>
         <div class="fa-sidebar-footer">
           ${escapeHtml(state.user && state.user.email || '')} · ${state.role === 'viewer' ? 'Solo lectura' : 'Editor'}
-          <button class="fa-sidebar-export fa-sidebar-export-secondary" style="margin-top:8px;" data-action="logout">Cerrar sesión</button>
         </div>
       </div>
     `;
@@ -7057,6 +7057,9 @@
         return;
       }
       try{
+        // Persistencia LOCAL explícita: mantiene la sesión iniciada aunque cierres el navegador
+        // (no aplica en ventanas de incógnito, que por diseño no guardan nada al cerrarse).
+        await firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL);
         await firebase.auth().signInWithEmailAndPassword(email, password);
         // onAuthStateChanged se encarga del resto (verificar rol y cargar datos)
       } catch(err){
