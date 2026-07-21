@@ -29,6 +29,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script>
   // Configuración de Firebase (proyecto: finanzasuneq)
   const firebaseConfig = {
@@ -71,8 +72,10 @@
     border-radius:14px;
     overflow:hidden;
     display:flex;
+    flex-direction:column;
     font-variant-numeric: tabular-nums;
   }
+  .fa-app-row{ display:flex; flex:1; min-height:0; }
   #fin-app-root h1,#fin-app-root h2,#fin-app-root h3{
     font-family:'Space Grotesk',sans-serif;
     margin:0;
@@ -276,6 +279,32 @@
     #fa-informe-container{ display:block !important; position:static !important; left:0 !important; }
   }
   .fa-loading, .fa-error{ padding:60px 20px; text-align:center; color:var(--muted); font-size:14px; }
+  .fa-login-wrap{ min-height:520px; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .fa-login-card{ background:#fff; border:1px solid var(--border); border-radius:14px; padding:32px 28px; max-width:360px; width:100%; box-shadow:0 8px 30px rgba(20,33,61,.08); }
+  .fa-login-title{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; color:var(--ink); margin-bottom:6px; }
+  .fa-login-sub{ font-size:13px; color:var(--muted); margin-bottom:20px; line-height:1.5; }
+  .fa-login-error{ background:var(--expense-bg); color:var(--expense); font-size:12.5px; padding:8px 10px; border-radius:7px; margin-bottom:12px; }
+  .fa-readonly-banner{
+    background:#FFF4DE; color:#96660A; text-align:center; font-size:12.5px; font-weight:600;
+    padding:8px; border-bottom:1px solid #E8B84B;
+  }
+  #fin-app-root.fa-readonly [data-action^="submit-"],
+  #fin-app-root.fa-readonly [data-action^="delete-"],
+  #fin-app-root.fa-readonly [data-action^="edit-"],
+  #fin-app-root.fa-readonly [data-action^="bulk-delete"],
+  #fin-app-root.fa-readonly [data-action^="import-"],
+  #fin-app-root.fa-readonly [data-action^="reset-data"],
+  #fin-app-root.fa-readonly [data-action^="remove-cat"],
+  #fin-app-root.fa-readonly [data-action^="add-cat"],
+  #fin-app-root.fa-readonly [data-action="add-metodo"],
+  #fin-app-root.fa-readonly [data-action="remove-metodo"],
+  #fin-app-root.fa-readonly select[data-action="change-estado-pf"],
+  #fin-app-root.fa-readonly input[data-action="toggle-select-ingreso"],
+  #fin-app-root.fa-readonly input[data-action="toggle-select-gasto"],
+  #fin-app-root.fa-readonly input[data-action="toggle-select-all-ingresos"],
+  #fin-app-root.fa-readonly input[data-action="toggle-select-all-gastos"]{
+    pointer-events:none !important; opacity:.4 !important; cursor:not-allowed !important;
+  }
   .fa-hint{ font-size:11.5px; color:var(--muted); margin-top:8px; }
   .fa-section-note{ font-size:12px; color:var(--muted); margin-bottom:14px; }
   .fa-mobile-tabs{ display:none; }
@@ -287,7 +316,7 @@
   }
 
   @media (max-width:760px){
-    #fin-app-root{ flex-direction:column; }
+    .fa-app-row{ flex-direction:column; }
     .fa-sidebar{ width:100%; flex-direction:row; overflow-x:auto; padding:10px 12px; align-items:center; gap:2px; -webkit-overflow-scrolling:touch; }
     .fa-brand{ padding:0 10px 0 2px; flex:0 0 auto; }
     .fa-nav-btn{ flex:0 0 auto; white-space:nowrap; padding:9px 10px; font-size:12.5px; }
@@ -4598,6 +4627,11 @@
   let state = {
     loading: true,
     error: null,
+    authChecked: false,
+    user: null,
+    role: null,        // 'owner' | 'editor' | 'viewer' | null (sin autorizar)
+    readOnly: false,
+    loginError: null,
     activeTab: 'resumen',
     config: null,
     ingresos: [],
@@ -4779,6 +4813,15 @@
   // ---------------- Gráficos (SVG/CSS puro, sin librerías externas) ----------------
   const CHART_PALETTE = ['#14213D','#1C7C54','#A8322D','#C9A227','#3E4C6B','#6B7280','#7C87A3','#96660A','#5A8F7B','#8A5A44','#2D6A8F','#B3541E'];
 
+  // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
+  const MUTATING_ACTIONS = new Set([
+    'submit-ingreso','submit-gasto','submit-pf','submit-config',
+    'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
+    'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
+    'reset-data','confirm-ok','change-estado-pf',
+    'import-json-file','import-csv-ingresos-file','import-csv-gastos-file'
+  ]);
+
   function fmtMoneyShort(v){
     const av = Math.abs(v);
     const sign = v < 0 ? '-' : '';
@@ -4926,6 +4969,10 @@
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
   async function saveKey(key, value, opts){
+    if(state.readOnly){
+      showToast('Estás en modo solo lectura — este cambio no se guardó.');
+      return false;
+    }
     const silent = opts && opts.silent;
     const log = silent ? console.warn : console.error;
     const maxAttempts = silent ? 5 : 3;
@@ -4960,8 +5007,10 @@
     }
   }
 
-  async function init(){
+  async function loadAppData(){
     try {
+      state.loading = true;
+      render();
       // Secuencial (no Promise.all) para no saturar el storage con escrituras simultáneas al sembrar datos.
       const config = await loadKeySeeded('config', SEED_CONFIG);
       const ingresos = await loadKeySeeded('ingresos', SEED_INGRESOS);
@@ -4987,6 +5036,41 @@
       state.loading = false;
     }
     render();
+  }
+
+  // La app arranca esperando a Firebase Auth: sin sesión -> login; con sesión pero sin rol -> sin autorización;
+  // con sesión y rol -> carga los datos financieros normalmente.
+  async function init(){
+    if(typeof firebase === 'undefined' || !firebase.auth){
+      state.authChecked = true;
+      state.error = 'No se pudo cargar el sistema de acceso (Firebase). Revisa tu conexión e intenta recargar la página.';
+      render();
+      return;
+    }
+    firebase.auth().onAuthStateChanged(async (user)=>{
+      state.authChecked = true;
+      state.user = user;
+      state.loginError = null;
+      if(!user){
+        state.role = null;
+        render();
+        return;
+      }
+      try {
+        const snap = await firebase.database().ref('roles/' + user.uid).once('value');
+        const role = snap.val();
+        state.role = role || null;
+        state.readOnly = role === 'viewer';
+      } catch(e){
+        console.error('Error al verificar el rol de acceso', e);
+        state.role = null;
+      }
+      if(state.role){
+        await loadAppData();
+      } else {
+        render();
+      }
+    });
   }
 
   // ---------------- Cálculos ----------------
@@ -5351,6 +5435,18 @@
 
   // ---------------- Render dispatch ----------------
   function render(){
+    if(!state.authChecked){
+      root.innerHTML = `<div class="fa-loading">Verificando sesión…</div>`;
+      return;
+    }
+    if(!state.user){
+      root.innerHTML = renderLogin();
+      return;
+    }
+    if(!state.role){
+      root.innerHTML = renderSinAutorizacion();
+      return;
+    }
     if(state.loading){
       root.innerHTML = `<div class="fa-loading">Cargando tus datos financieros…</div>`;
       return;
@@ -5359,10 +5455,50 @@
       root.innerHTML = `<div class="fa-error">${escapeHtml(state.error)}</div>`;
       return;
     }
+    root.className = state.readOnly ? 'fa-readonly' : '';
     root.innerHTML = `
-      ${renderSidebar()}
-      <div class="fa-main">${renderTab()}</div>
+      ${state.readOnly ? `<div class="fa-readonly-banner">👁️ Modo solo lectura — puedes ver todo, pero no editar</div>` : ''}
+      <div class="fa-app-row">
+        ${renderSidebar()}
+        <div class="fa-main">${renderTab()}</div>
+      </div>
       ${renderConfirmModal()}
+    `;
+  }
+
+  function renderLogin(){
+    return `
+      <div class="fa-login-wrap">
+        <div class="fa-login-card">
+          <div class="fa-brand" style="color:var(--ink); padding:0 0 18px 0; font-size:20px;"><span class="dot"></span> Finanzas</div>
+          <div class="fa-login-title">Inicia sesión</div>
+          <div class="fa-login-sub">Acceso restringido — solo personas autorizadas.</div>
+          <div data-form="login">
+            <div class="fa-field" style="margin-bottom:12px;">
+              <label>Correo</label>
+              <input type="email" name="email" placeholder="tu@correo.com" autocomplete="username">
+            </div>
+            <div class="fa-field" style="margin-bottom:16px;">
+              <label>Contraseña</label>
+              <input type="password" name="password" placeholder="••••••••" autocomplete="current-password">
+            </div>
+            ${state.loginError ? `<div class="fa-login-error">${escapeHtml(state.loginError)}</div>` : ''}
+            <button type="button" class="fa-btn fa-btn-primary" style="width:100%;" data-action="login-submit">Entrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSinAutorizacion(){
+    return `
+      <div class="fa-login-wrap">
+        <div class="fa-login-card">
+          <div class="fa-login-title">Sin autorización</div>
+          <div class="fa-login-sub">Tu cuenta (${escapeHtml(state.user.email||'')}) inició sesión correctamente, pero no tiene acceso asignado a esta app todavía. Pídele a quien administra la app que te agregue.</div>
+          <button type="button" class="fa-btn fa-btn-ghost" style="width:100%; margin-top:10px;" data-action="logout">Cerrar sesión</button>
+        </div>
+      </div>
     `;
   }
 
@@ -5407,10 +5543,13 @@
           </button>
         `).join('')}
         <button class="fa-sidebar-export" data-action="export-excel">&#8681; Descargar Excel</button>
-        <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="export-json">&#128190; Respaldo (.json) para Claude</button>
+        <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="export-json">&#128190; Respaldo (.json)</button>
         <button class="fa-sidebar-export fa-sidebar-export-secondary" data-action="import-json">&#128228; Importar respaldo (.json)</button>
         <input type="file" id="fa-import-file-input" data-action="import-json-file" accept=".json,application/json" style="display:none;">
-        <div class="fa-sidebar-footer">Datos guardados automáticamente, solo visibles para ti.</div>
+        <div class="fa-sidebar-footer">
+          ${escapeHtml(state.user && state.user.email || '')} · ${state.role === 'viewer' ? 'Solo lectura' : 'Editor'}
+          <button class="fa-sidebar-export fa-sidebar-export-secondary" style="margin-top:8px;" data-action="logout">Cerrar sesión</button>
+        </div>
       </div>
     `;
   }
@@ -6901,9 +7040,44 @@
     const btn = e.target.closest('[data-action]');
     if(!btn) return;
     const action = btn.dataset.action;
+    if(state.readOnly && MUTATING_ACTIONS.has(action)){
+      showToast('Estás en modo solo lectura — no puedes hacer cambios.');
+      return;
+    }
     try{
 
-    if(action === 'confirm-cancel'){
+    if(action === 'login-submit'){
+      const container = btn.closest('[data-form="login"]');
+      const data = readFields(container);
+      const email = (data.email||'').trim();
+      const password = data.password||'';
+      if(!email || !password){
+        state.loginError = 'Ingresa tu correo y contraseña.';
+        render();
+        return;
+      }
+      try{
+        await firebase.auth().signInWithEmailAndPassword(email, password);
+        // onAuthStateChanged se encarga del resto (verificar rol y cargar datos)
+      } catch(err){
+        console.error('Login error', err);
+        const msgs = {
+          'auth/invalid-email': 'El correo no tiene un formato válido.',
+          'auth/user-not-found': 'No existe una cuenta con ese correo.',
+          'auth/wrong-password': 'Contraseña incorrecta.',
+          'auth/invalid-credential': 'Correo o contraseña incorrectos.',
+          'auth/too-many-requests': 'Demasiados intentos. Espera un momento e intenta de nuevo.'
+        };
+        state.loginError = msgs[err.code] || 'No se pudo iniciar sesión. Intenta de nuevo.';
+        render();
+      }
+    }
+    else if(action === 'logout'){
+      try{ await firebase.auth().signOut(); } catch(err){ console.error('Logout error', err); }
+      state.role = null;
+      state.readOnly = false;
+    }
+    else if(action === 'confirm-cancel'){
       state.confirmDialog = null;
       state.pendingImportJson = null;
       render();
@@ -7347,6 +7521,11 @@
     const el = e.target.closest('[data-action]');
     if(!el) return;
     const action = el.dataset.action;
+    if(state.readOnly && MUTATING_ACTIONS.has(action)){
+      showToast('Estás en modo solo lectura — no puedes hacer cambios.');
+      el.value = '';
+      return;
+    }
     try{
     if(action === 'import-json-file'){
       const file = el.files && el.files[0];
