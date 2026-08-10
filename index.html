@@ -401,9 +401,31 @@
 
 <script>
 (function(){
-  const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos"];
-  const CAT_GASTOS_DEFAULT = ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos"];
+  const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos","No asociado a Servicios Prestados Directos"];
+  const CAT_GASTOS_DEFAULT = ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos","Gasto no asociado a Venta Directa"];
   const METODOS_DEFAULT = ["Transferencia","Tarjeta de Débito","Tarjeta de Crédito","Efectivo","Cheque"];
+
+  // Categorías "canónicas" de no-venta: cualquier ingreso o gasto registrado con estas categorías exactas
+  // solo se considera en Cuenta Corriente (saldo real) — nunca en Resumen, Flujo de Caja, Rentabilidad ni
+  // Fijos vs Variables. Todas las demás categorías cuentan en todos los cálculos financieros.
+  const CAT_INGRESO_NO_VENTA = "No asociado a Servicios Prestados Directos";
+  const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
+
+  // Se asegura de que las categorías canónicas de no-venta existan en las listas de categorías y estén
+  // marcadas como no-venta, sin tocar ninguna otra personalización que el usuario ya tenga (otras categorías
+  // que haya desmarcado manualmente se respetan). Devuelve true si modificó algo (para saber si hay que guardar).
+  function ensureCategoriasNoVenta(config){
+    let changed = false;
+    if(!config.categoriasIngresos) config.categoriasIngresos = [];
+    if(!config.categoriasGastos) config.categoriasGastos = [];
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_NO_VENTA)){ config.categoriasIngresos.push(CAT_INGRESO_NO_VENTA); changed = true; }
+    if(!config.categoriasGastos.includes(CAT_GASTO_NO_VENTA)){ config.categoriasGastos.push(CAT_GASTO_NO_VENTA); changed = true; }
+    if(!config.categoriasNoVenta) config.categoriasNoVenta = [];
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_NO_VENTA)){ config.categoriasNoVenta.push(CAT_INGRESO_NO_VENTA); changed = true; }
+    if(!config.categoriasGastosNoVenta) config.categoriasGastosNoVenta = [];
+    if(!config.categoriasGastosNoVenta.includes(CAT_GASTO_NO_VENTA)){ config.categoriasGastosNoVenta.push(CAT_GASTO_NO_VENTA); changed = true; }
+    return changed;
+  }
 
   // Datos recuperados del respaldo subido por el usuario (semilla inicial)
   const SEED_CONFIG = {
@@ -427,7 +449,8 @@
     "Alimentación y Snacks",
     "Marketing Y Ventas",
     "Viáticos",
-    "Retiro Socios"
+    "Retiro Socios",
+    "Gasto no asociado a Venta Directa"
   ],
   "categoriasIngresos": [
     "Venta Programas Online (USD)",
@@ -439,7 +462,8 @@
     "Otros Ingresos",
     "Crédito Comercial",
     "Aporte Inversionista",
-    "Servicios de Agencia"
+    "Servicios de Agencia",
+    "No asociado a Servicios Prestados Directos"
   ],
   "metodosPago": [
     "Transferencia",
@@ -451,7 +475,12 @@
     "Pago en línea"
   ],
   "saldoInicial": 1748488,
-  "categoriasNoVenta": []
+  "categoriasNoVenta": [
+    "No asociado a Servicios Prestados Directos"
+  ],
+  "categoriasGastosNoVenta": [
+    "Gasto no asociado a Venta Directa"
+  ]
 };
   const SEED_INGRESOS = [
   {
@@ -5934,6 +5963,8 @@
       };
       if (!state.config.metodosPago) state.config.metodosPago = METODOS_DEFAULT.slice();
       if (!state.config.categoriasNoVenta) state.config.categoriasNoVenta = [];
+      const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
+      if(categoriasNoVentaCambiaron) await saveKey('config', state.config, {silent:true});
       state.ingresos = ingresos || [];
       state.gastos = gastos || [];
       state.pagosFijosCatalogo = pagosFijosCatalogo || [];
@@ -6016,11 +6047,11 @@
     return !noVenta.includes(ing.categoria);
   }
 
-  // Un gasto cuenta para Rentabilidad, Flujo de Caja, Resumen y Fijos vs Variables salvo que esté
-  // marcado individualmente como "Solo Cuenta Corriente" (gastos no asociados a una venta, ej. ajustes
-  // internos o transferencias). Esos gastos solo se usan para cuadrar el saldo real del banco.
+  // Un gasto cuenta para Rentabilidad, Flujo de Caja, Resumen y Fijos vs Variables salvo que su categoría
+  // sea la categoría canónica "no asociada a venta directa" — igual lógica que esIngresoVenta, pero para gastos.
   function esGastoNegocio(g){
-    return !g.soloCuentaCorriente;
+    const noVenta = state.config.categoriasGastosNoVenta || [];
+    return !noVenta.includes(g.categoria);
   }
 
   function getMonthlyStats(year){
@@ -6107,7 +6138,7 @@
       if(new Date(g.fecha+'T00:00:00').getFullYear() !== anio) return;
       movs.push({
         fecha: g.fecha, tipo: 'Gasto', nombre: g.proveedor||'', desc: g.descripcion||'',
-        categoria: g.categoria||'', monto: -(Number(g.monto)||0), venta: null, soloCuentaCorriente: !!g.soloCuentaCorriente
+        categoria: g.categoria||'', monto: -(Number(g.monto)||0), venta: null, soloCuentaCorriente: !esGastoNegocio(g)
       });
     });
     movs.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || a.tipo.localeCompare(b.tipo));
@@ -6875,6 +6906,9 @@
       list = list.filter(i=> `${i.cliente||''} ${i.descripcion||''}`.toLowerCase().includes(s));
     }
     list = sortRowsGeneric(list, ts.sortKey, ts.sortDir);
+    const listTotal = list.reduce((s,i)=>s+(Number(i.monto)||0),0);
+    const listPagado = list.filter(i=>i.estado==='Pagado').reduce((s,i)=>s+(Number(i.monto)||0),0);
+    const listPendiente = list.filter(i=>i.estado==='Pendiente').reduce((s,i)=>s+(Number(i.monto)||0),0);
 
     return `
       <div class="fa-topbar">
@@ -6928,7 +6962,7 @@
           {field:'categoria', allLabel:'Todas las categorías', options: state.config.categoriasIngresos},
           {field:'estado', allLabel:'Todos los estados', options:['Pagado','Pendiente']}
         ]})}
-        <div class="fa-filter-count">Mostrando ${list.length} de ${delAnio.length}</div>
+        <div class="fa-filter-count">Mostrando ${list.length} de ${delAnio.length}${list.length ? ` — Total filtrado: ${fmtMoneyC(listTotal)} (Pagado: ${fmtMoneyC(listPagado)} · Pendiente: ${fmtMoneyC(listPendiente)})` : ''}</div>
         ${list.length === 0 ? `<div class="fa-empty">Ningún ingreso coincide con el filtro.</div>` : `
         ${state.selected.ingresos.size > 0 ? `
         <div class="fa-bulk-bar">
@@ -6961,6 +6995,13 @@
                 </tr>
               `).join('')}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="5" style="text-align:right; font-weight:700;">Total (${list.length} filtrado${list.length===1?'':'s'}):</td>
+                <td class="num money" style="font-weight:700;">${fmtMoneyC(listTotal)}</td>
+                <td colspan="2"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>`}`}
       </div>
@@ -6991,6 +7032,7 @@
       list = list.filter(g=> `${g.proveedor||''} ${g.descripcion||''}`.toLowerCase().includes(s));
     }
     list = sortRowsGeneric(list, ts.sortKey, ts.sortDir);
+    const listTotal = list.reduce((s,g)=>s+(Number(g.monto)||0),0);
 
     return `
       <div class="fa-topbar">
@@ -7017,11 +7059,7 @@
               <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editing && editing.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
             </div>
           </div>
-          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:12px;">
-            <input type="checkbox" name="soloCuentaCorriente" ${editing && editing.soloCuentaCorriente ? 'checked':''}>
-            Solo Cuenta Corriente (no asociado a venta)
-          </label>
-          <div class="fa-hint" style="margin-top:4px;">Márcalo para gastos que no están directamente asociados a una venta (ej. ajustes internos, transferencias). Solo se usarán para cuadrar el saldo real de Cuenta Corriente — no se considerarán en Flujo de Caja, Rentabilidad ni Fijos vs Variables.</div>
+          <div class="fa-hint" style="margin-top:4px;">Si este gasto no está asociado a una venta directa (ej. ajustes internos, transferencias), elige la categoría "${CAT_GASTO_NO_VENTA}" — solo se usará para cuadrar el saldo real de Cuenta Corriente, no contará en Flujo de Caja, Rentabilidad ni Fijos vs Variables.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">${editing? 'Guardar cambios':'Agregar gasto'}</button>
             ${editing? `<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-gasto">Cancelar</button>` : ''}
@@ -7046,7 +7084,7 @@
           {field:'categoria', allLabel:'Todas las categorías', options: state.config.categoriasGastos},
           {field:'metodo', allLabel:'Todos los métodos', options: state.config.metodosPago}
         ]})}
-        <div class="fa-filter-count">Mostrando ${list.length} de ${delAnio.length}</div>
+        <div class="fa-filter-count">Mostrando ${list.length} de ${delAnio.length}${list.length ? ` — Total filtrado: ${fmtMoneyC(listTotal)}` : ''}</div>
         ${list.length === 0 ? `<div class="fa-empty">Ningún gasto coincide con el filtro.</div>` : `
         ${state.selected.gastos.size > 0 ? `
         <div class="fa-bulk-bar">
@@ -7066,7 +7104,7 @@
                   <td class="fa-checkbox-col"><input type="checkbox" data-action="toggle-select-gasto" data-id="${g.id}" ${state.selected.gastos.has(g.id)?'checked':''}></td>
                   <td>${fmtDate(g.fecha)}</td>
                   <td>${escapeHtml(g.proveedor)||'—'}</td>
-                  <td>${escapeHtml(g.descripcion)||'—'}${g.origenPagoFijo?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">🔗 Pago fijo</span>':''}${g.soloCuentaCorriente?' <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">🏦 Solo Cta. Cte.</span>':''}</td>
+                  <td>${escapeHtml(g.descripcion)||'—'}${g.origenPagoFijo?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">🔗 Pago fijo</span>':''}${!esGastoNegocio(g)?' <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">🏦 Solo Cta. Cte.</span>':''}</td>
                   <td>${escapeHtml(g.categoria)}</td>
                   <td class="num money">${fmtMoneyC(g.monto)}</td>
                   <td>${escapeHtml(g.metodo)||'—'}</td>
@@ -7079,6 +7117,13 @@
                 </tr>
               `).join('')}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="5" style="text-align:right; font-weight:700;">Total (${list.length} filtrado${list.length===1?'':'s'}):</td>
+                <td class="num money" style="font-weight:700;">${fmtMoneyC(listTotal)}</td>
+                <td colspan="2"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>`}`}
       </div>
@@ -7287,11 +7332,16 @@
     const ts = state.tables.cuentaCorriente;
     let rows = movsTodas.slice();
     if(ts.mes) rows = rows.filter(r=> MESES[new Date(r.fecha+'T00:00:00').getMonth()] === ts.mes);
+    if(ts.tipo) rows = rows.filter(r=> r.tipo === ts.tipo);
     if(ts.search){
       const q = ts.search.toLowerCase();
       rows = rows.filter(r=> (r.nombre||'').toLowerCase().includes(q) || (r.desc||'').toLowerCase().includes(q) || (r.categoria||'').toLowerCase().includes(q));
     }
     rows = sortRowsGeneric(rows, ts.sortKey, ts.sortDir);
+
+    const rowsIngresos = rows.filter(r=>r.tipo==='Ingreso').reduce((s,r)=>s+r.monto,0);
+    const rowsGastos = rows.filter(r=>r.tipo==='Gasto').reduce((s,r)=>s-r.monto,0);
+    const rowsNeto = rowsIngresos - rowsGastos;
 
     const totalIngresos = movsTodas.filter(m=>m.tipo==='Ingreso').reduce((s,m)=>s+m.monto,0);
     const totalGastos = movsTodas.filter(m=>m.tipo==='Gasto').reduce((s,m)=>s-m.monto,0);
@@ -7310,7 +7360,7 @@
         <div class="fa-kpi income"><div class="fa-kpi-label">Total ingresos ${anio}</div><div class="fa-kpi-value income money">${fmtMoneyC(totalIngresos)}</div></div>
         <div class="fa-kpi expense"><div class="fa-kpi-label">Total gastos ${anio}</div><div class="fa-kpi-value expense money">${fmtMoneyC(totalGastos)}</div></div>
       </div>
-      <div class="fa-hint">De los ingresos de ${anio}, ${fmtMoneyC(totalNoVenta)} corresponden a financiamiento (créditos, aportes) — no a venta directa. De los gastos, ${fmtMoneyC(totalGastoSoloCC)} están marcados como "Solo Cuenta Corriente" — no asociados a venta. Ninguno de los dos aparece en Rentabilidad, Flujo de Caja ni Fijos vs Variables, pero sí quedan reflejados aquí.</div>
+      <div class="fa-hint">De los ingresos de ${anio}, ${fmtMoneyC(totalNoVenta)} corresponden a la categoría "${CAT_INGRESO_NO_VENTA}" — no a venta directa. De los gastos, ${fmtMoneyC(totalGastoSoloCC)} corresponden a la categoría "${CAT_GASTO_NO_VENTA}". Ninguno de los dos se considera en Resumen, Flujo de Caja, Rentabilidad ni Fijos vs Variables, pero sí quedan reflejados aquí (y en el saldo real).</div>
 
       <div class="fa-card">
         <div class="fa-card-title">Evolución del saldo — ${anio}</div>
@@ -7319,8 +7369,17 @@
 
       <div class="fa-card">
         <div class="fa-card-title">Movimientos — ${anio}</div>
-        ${filterBar('cuentaCorriente', { placeholder:'Buscar cliente, proveedor o descripción...', selects:[{ field:'mes', allLabel:'Todos los meses', options: MESES }] })}
+        ${filterBar('cuentaCorriente', { placeholder:'Buscar cliente, proveedor o descripción...', selects:[
+          { field:'mes', allLabel:'Todos los meses', options: MESES },
+          { field:'tipo', allLabel:'Ingresos y Gastos', options: ['Ingreso','Gasto'] }
+        ] })}
+        <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:640px; margin-bottom:12px;">
+          <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos (filtro)</div><div class="fa-kpi-value income money">${fmtMoneyC(rowsIngresos)}</div></div>
+          <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos (filtro)</div><div class="fa-kpi-value expense money">${fmtMoneyC(rowsGastos)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Neto (filtro)</div><div class="fa-kpi-value money">${fmtMoneyC(rowsNeto)}</div></div>
+        </div>
         ${rows.length === 0 ? `<div class="fa-empty">No hay movimientos con estos filtros.</div>` : `
+        <div class="fa-filter-count">Mostrando ${rows.length} de ${movsTodas.length}</div>
         <div class="fa-table-wrap">
           <table class="fa-table">
             <thead><tr>
@@ -7338,6 +7397,13 @@
                 </tr>
               `).join('')}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="4" style="text-align:right; font-weight:700;">Neto del filtro (${rows.length} movimiento${rows.length===1?'':'s'}):</td>
+                <td class="num money" style="font-weight:700;">${fmtMoneyC(rowsNeto)}</td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>`}
       </div>
@@ -7701,7 +7767,7 @@
 
       <div class="fa-card">
         <div class="fa-card-title">¿Cuáles ingresos son venta directa?</div>
-        <div class="fa-section-note">Desmarca las categorías que NO son venta (créditos, aportes de inversionistas, etc). Esos ingresos solo se contarán en Cuenta Corriente — no en Rentabilidad, Flujo de Caja ni el Análisis Real del Negocio.</div>
+        <div class="fa-section-note">Desmarca las categorías que NO son venta (créditos, aportes de inversionistas, etc). Esos ingresos solo se contarán en Cuenta Corriente — no en Resumen, Flujo de Caja, Rentabilidad ni Fijos vs Variables.</div>
         <div class="fa-chip-group">
           ${state.config.categoriasIngresos.map(c=>{
             const esVenta = !(state.config.categoriasNoVenta||[]).includes(c);
@@ -7721,6 +7787,20 @@
         <div class="fa-add-chip-row" data-form="add-cat-gasto">
           <input type="text" name="nuevaCategoria" placeholder="Nueva categoría de gasto">
           <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-gasto">Agregar</button>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">¿Cuáles gastos son venta directa?</div>
+        <div class="fa-section-note">Desmarca las categorías que NO están asociadas a una venta directa (ajustes internos, transferencias, etc). Esos gastos solo se contarán en Cuenta Corriente — no en Rentabilidad, Flujo de Caja ni Fijos vs Variables.</div>
+        <div class="fa-chip-group">
+          ${state.config.categoriasGastos.map(c=>{
+            const esVenta = !(state.config.categoriasGastosNoVenta||[]).includes(c);
+            return `<label class="fa-venta-toggle ${esVenta?'':'no-venta'}">
+              <input type="checkbox" data-action="toggle-cat-no-venta-gasto" data-cat="${escapeHtml(c)}" ${esVenta?'checked':''}>
+              ${escapeHtml(c)}
+            </label>`;
+          }).join('')}
         </div>
       </div>
 
@@ -7818,7 +7898,7 @@
       // --- Gastos ---
       const gasRows = [['Fecha','Proveedor','Descripción','Categoría','Monto','Método de Pago','¿Solo Cuenta Corriente?']];
       state.gastos.slice().sort((a,b)=>(a.fecha||'').localeCompare(b.fecha||'')).forEach(g=>{
-        gasRows.push([g.fecha||'', g.proveedor||'', g.descripcion||'', g.categoria||'', M(g.monto), g.metodo||'', g.soloCuentaCorriente?'Sí':'No']);
+        gasRows.push([g.fecha||'', g.proveedor||'', g.descripcion||'', g.categoria||'', M(g.monto), g.metodo||'', !esGastoNegocio(g)?'Sí':'No']);
       });
       XLSX.utils.book_append_sheet(wb, buildSheet(gasRows, [13,26,34,30,14,18,20]), 'Gastos');
 
@@ -7896,7 +7976,7 @@
         ...state.config.categoriasIngresos.map(c=>[c, (state.config.categoriasNoVenta||[]).includes(c) ? 'No-venta' : 'Venta directa']),
         [],
         ['Categorías de Gastos'],
-        ...state.config.categoriasGastos.map(c=>[c]),
+        ...state.config.categoriasGastos.map(c=>[c, (state.config.categoriasGastosNoVenta||[]).includes(c) ? 'No-venta' : 'Venta directa']),
         [],
         ['Métodos de Pago'],
         ...state.config.metodosPago.map(c=>[c])
@@ -8380,6 +8460,7 @@
           metodosPago: METODOS_DEFAULT.slice(),
           categoriasNoVenta: []
         };
+        ensureCategoriasNoVenta(state.config);
         await Promise.all([
           saveKey('ingresos', []), saveKey('gastos', []), saveKey('config', state.config),
           saveKey('pagosFijosCatalogo', []), saveKey('pagosFijosEstado', {}),
@@ -8402,6 +8483,7 @@
           state.config = newConfig;
           if (!state.config.metodosPago) state.config.metodosPago = METODOS_DEFAULT.slice();
           if (!state.config.categoriasNoVenta) state.config.categoriasNoVenta = [];
+          ensureCategoriasNoVenta(state.config);
           state.ingresos = newIngresos;
           state.gastos = newGastos;
           state.pagosFijosCatalogo = newPFCatalogo;
@@ -8879,6 +8961,18 @@
         state.config.categoriasNoVenta = state.config.categoriasNoVenta.filter(c=>c!==cat);
       } else if(!state.config.categoriasNoVenta.includes(cat)){
         state.config.categoriasNoVenta.push(cat);
+      }
+      await saveKey('config', state.config);
+      render();
+    }
+    else if(action === 'toggle-cat-no-venta-gasto'){
+      const cat = el.dataset.cat;
+      if(!state.config.categoriasGastosNoVenta) state.config.categoriasGastosNoVenta = [];
+      if(el.checked){
+        // Checked = es venta -> se quita de la lista de no-venta
+        state.config.categoriasGastosNoVenta = state.config.categoriasGastosNoVenta.filter(c=>c!==cat);
+      } else if(!state.config.categoriasGastosNoVenta.includes(cat)){
+        state.config.categoriasGastosNoVenta.push(cat);
       }
       await saveKey('config', state.config);
       render();
