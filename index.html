@@ -8659,8 +8659,14 @@
       const val = input ? Number(input.value)||0 : 0;
       if(!state.pagosFijosMontos[p.catId]) state.pagosFijosMontos[p.catId] = {};
       if(!state.pagosFijosMontos[p.catId][p.year]) state.pagosFijosMontos[p.catId][p.year] = Array(12).fill('');
+      const valorAnterior = state.pagosFijosMontos[p.catId][p.year][p.month];
       state.pagosFijosMontos[p.catId][p.year][p.month] = val;
-      await saveKey('pagosFijosMontos', state.pagosFijosMontos);
+      const guardadoOk = await saveKey('pagosFijosMontos', state.pagosFijosMontos, {silent:true});
+      if(!guardadoOk){
+        state.pagosFijosMontos[p.catId][p.year][p.month] = valorAnterior;
+        showToast('No se pudo guardar el monto exigible — revisa tu conexión e inténtalo de nuevo.');
+        return;
+      }
       showToast('Monto exigible del mes actualizado');
       render();
     }
@@ -8678,7 +8684,18 @@
       if(!state.pagosFijosPagos[p.catId]) state.pagosFijosPagos[p.catId] = {};
       if(!state.pagosFijosPagos[p.catId][p.year]) state.pagosFijosPagos[p.catId][p.year] = Array.from({length:12}, ()=>[]);
       state.pagosFijosPagos[p.catId][p.year][p.month].push({ id: abonoId, fecha, monto });
-      await saveKey('pagosFijosPagos', state.pagosFijosPagos);
+
+      // silent:true da más reintentos (5 en vez de 3) — clave en conexiones de celular inestables — y
+      // deja que seamos nosotros quienes avisemos, no el toast genérico de saveKey.
+      const guardadoOk = await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
+      if(!guardadoOk){
+        // No quedó guardado en Firebase: revertimos el cambio local para no mostrar un abono "fantasma"
+        // y NO creamos el gasto asociado (eso es lo que causaba que apareciera en Gastos pero no en Pagos
+        // Fijos, mostrando más deuda de la real). No re-renderizamos para no borrar lo que escribiste.
+        state.pagosFijosPagos[p.catId][p.year][p.month] = state.pagosFijosPagos[p.catId][p.year][p.month].filter(a=>a.id!==abonoId);
+        showToast('No se pudo guardar el abono — revisa tu conexión e inténtalo de nuevo. No se registró en Gastos.');
+        return;
+      }
 
       const abonosDelMes = getPagosDelMes(p.catId, p.year, p.month).length;
       state.gastos.push({
@@ -8691,7 +8708,14 @@
         metodo: state.config.metodosPago[0]||'',
         origenPagoFijo: `pf:${p.catId}:${p.year}-${String(p.month+1).padStart(2,'0')}:${abonoId}`
       });
-      await saveKey('gastos', state.gastos);
+      const gastoGuardadoOk = await saveKey('gastos', state.gastos, {silent:true});
+      if(!gastoGuardadoOk){
+        // El abono sí quedó guardado en Pagos Fijos (ya no está "perdido"), pero el gasto reflejo no.
+        // Avisamos para que reintente sabiendo que la deuda ya está bien contabilizada.
+        showToast('El abono quedó guardado en Pagos Fijos, pero no se pudo registrar en Gastos — revisa tu conexión.');
+        render();
+        return;
+      }
       showToast('Abono registrado — se agregó a Gastos');
       render();
     }
@@ -8701,14 +8725,26 @@
       const abonoId = btn.dataset.abonoId;
       const arr = state.pagosFijosPagos[p.catId] && state.pagosFijosPagos[p.catId][p.year];
       if(arr && arr[p.month]){
+        const abonoEliminado = arr[p.month].find(a=>a.id===abonoId) || null;
         arr[p.month] = arr[p.month].filter(a=>a.id!==abonoId);
-        await saveKey('pagosFijosPagos', state.pagosFijosPagos);
+        const guardadoOk = await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
+        if(!guardadoOk){
+          // No se pudo guardar la eliminación: lo devolvemos a su lugar para no perder el registro.
+          if(abonoEliminado) arr[p.month].push(abonoEliminado);
+          showToast('No se pudo eliminar el abono — revisa tu conexión e inténtalo de nuevo.');
+          return;
+        }
       }
       const tag = `pf:${p.catId}:${p.year}-${String(p.month+1).padStart(2,'0')}:${abonoId}`;
       const idx = state.gastos.findIndex(g=>g.origenPagoFijo===tag);
       if(idx > -1){
         state.gastos.splice(idx, 1);
-        await saveKey('gastos', state.gastos);
+        const gastoOk = await saveKey('gastos', state.gastos, {silent:true});
+        if(!gastoOk){
+          showToast('El abono se quitó de Pagos Fijos, pero no se pudo eliminar el gasto asociado — revísalo en Gastos.');
+          render();
+          return;
+        }
       }
       showToast('Abono eliminado');
       render();
