@@ -452,6 +452,9 @@
     "Retiro Socios",
     "Gasto no asociado a Venta Directa"
   ],
+  "categoriasGastosNoVenta": [
+    "Gasto no asociado a Venta Directa"
+  ],
   "categoriasIngresos": [
     "Venta Programas Online (USD)",
     "Venta Programas Online (CLP)",
@@ -465,6 +468,9 @@
     "Servicios de Agencia",
     "No asociado a Servicios Prestados Directos"
   ],
+  "categoriasNoVenta": [
+    "No asociado a Servicios Prestados Directos"
+  ],
   "metodosPago": [
     "Transferencia",
     "Tarjeta de Débito",
@@ -474,13 +480,7 @@
     "Cargo Automático",
     "Pago en línea"
   ],
-  "saldoInicial": 1748488,
-  "categoriasNoVenta": [
-    "No asociado a Servicios Prestados Directos"
-  ],
-  "categoriasGastosNoVenta": [
-    "Gasto no asociado a Venta Directa"
-  ]
+  "saldoInicial": 1748488
 };
   const SEED_INGRESOS = [
   {
@@ -718,7 +718,7 @@
     "monto": 920042
   },
   {
-    "categoria": "Aporte Inversionista",
+    "categoria": "No asociado a Servicios Prestados Directos",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -727,7 +727,7 @@
     "monto": 300000
   },
   {
-    "categoria": "Aporte Inversionista",
+    "categoria": "No asociado a Servicios Prestados Directos",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -736,7 +736,7 @@
     "monto": 4700000
   },
   {
-    "categoria": "Aporte Inversionista",
+    "categoria": "No asociado a Servicios Prestados Directos",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -1247,6 +1247,42 @@
     "fecha": "2026-08-03",
     "id": "ing_mse432pe_hv4hp",
     "monto": 1111171
+  },
+  {
+    "categoria": "No asociado a Servicios Prestados Directos",
+    "cliente": "Iván Martínez",
+    "descripcion": "ADS",
+    "estado": "Pagado",
+    "fecha": "2026-08-07",
+    "id": "ing_msnpyo5i_n27rs",
+    "monto": 3000000
+  },
+  {
+    "categoria": "No asociado a Servicios Prestados Directos",
+    "cliente": "Iván Martínez",
+    "descripcion": "ADS",
+    "estado": "Pagado",
+    "fecha": "2026-08-07",
+    "id": "ing_msnpzbpi_r69or",
+    "monto": 5000000
+  },
+  {
+    "categoria": "No asociado a Servicios Prestados Directos",
+    "cliente": "Iván Matínez",
+    "descripcion": "ADS",
+    "estado": "Pagado",
+    "fecha": "2026-08-07",
+    "id": "ing_msnpzqrq_cbkam",
+    "monto": 1000000
+  },
+  {
+    "categoria": "Venta Programas Online (CLP)",
+    "cliente": "Carolina",
+    "descripcion": "Next",
+    "estado": "Pagado",
+    "fecha": "2026-08-06",
+    "id": "ing_msnq1j53_m353g",
+    "monto": 46000
   }
 ];
   const SEED_GASTOS = [
@@ -4386,7 +4422,7 @@
     "proveedor": "Banco Itaú"
   },
   {
-    "categoria": "Créditos y Renegociaciones",
+    "categoria": "Gasto no asociado a Venta Directa",
     "descripcion": "Abono REtorno Inversión",
     "fecha": "2026-07-23",
     "id": "gas_mrxtkqr9_t94g0",
@@ -4458,7 +4494,7 @@
     "proveedor": "Banco Itaú"
   },
   {
-    "categoria": "Créditos y Renegociaciones",
+    "categoria": "Gasto no asociado a Venta Directa",
     "descripcion": "Abono 2 REtorno Inversión",
     "fecha": "2026-07-27",
     "id": "gas_ms4rwgdg_3i719",
@@ -4467,7 +4503,7 @@
     "proveedor": "Vivian Gostling"
   },
   {
-    "categoria": "Créditos y Renegociaciones",
+    "categoria": "Gasto no asociado a Venta Directa",
     "descripcion": "Pago fijo: Devolución Inversionista 1 (Julio 2026)",
     "fecha": "2026-07-28",
     "id": "gas_ms4rxffj_fxnm6",
@@ -4577,26 +4613,6 @@
     "proveedor": "Crédito Scotiabank"
   },
   {
-    "categoria": "Créditos y Renegociaciones",
-    "descripcion": "Pago fijo: Crédito Banco Chile (Julio 2026)",
-    "fecha": "2026-08-07",
-    "id": "gas_msj9skqn_n6ysc",
-    "metodo": "Transferencia",
-    "monto": 914215,
-    "origenPagoFijo": "pf:pf_mrl3p75v_sy64j:2026-07:ab_msj9sioh_anm1o",
-    "proveedor": "Crédito Banco Chile"
-  },
-  {
-    "categoria": "Arriendo y Servicios Básicos",
-    "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026)",
-    "fecha": "2026-08-02",
-    "id": "gas_msj9trxm_p1cd6",
-    "metodo": "Transferencia",
-    "monto": 200000,
-    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msj9tpx1_s4fgf",
-    "proveedor": "Arriendo Oficina"
-  },
-  {
     "categoria": "Sueldos y Honorarios",
     "descripcion": "Pago fijo: Sueldo Jacke (Agosto 2026)",
     "fecha": "2026-08-05",
@@ -4605,6 +4621,125 @@
     "monto": 753927,
     "origenPagoFijo": "pf:pf_mrl3g8cx_cfsf5:2026-08:ab_msjbo4hx_64l9h",
     "proveedor": "Sueldo Jacke"
+  },
+  {
+    "categoria": "Comisiones",
+    "descripcion": "COM MANTENCION PLAN CUENTA E",
+    "fecha": "2026-08-10",
+    "id": "gas_msnpekrp_gxgeo",
+    "metodo": "Cargo Automático",
+    "monto": 12336,
+    "proveedor": "Banco Itaú",
+    "soloCuentaCorriente": false
+  },
+  {
+    "categoria": "Impuestos y Contribuciones",
+    "descripcion": "IVA Mantención",
+    "fecha": "2026-08-10",
+    "id": "gas_msnpf6qd_luaio",
+    "metodo": "Cargo Automático",
+    "monto": 2344,
+    "proveedor": "Banco Itaú",
+    "soloCuentaCorriente": false
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnpfsk5_xcs23",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnpg9sl_1fi2j",
+    "metodo": "Transferencia",
+    "monto": 350000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnpgtae_llx6x",
+    "metodo": "Transferencia",
+    "monto": 650000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnph6hp_t582h",
+    "metodo": "Transferencia",
+    "monto": 500000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnphia5_8uyqa",
+    "metodo": "Transferencia",
+    "monto": 500000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_msnphqs5_cmxnd",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-07",
+    "id": "gas_msnpj2l9_6drpd",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe",
+    "soloCuentaCorriente": true
+  },
+  {
+    "categoria": "Sueldos y Honorarios",
+    "descripcion": "Audiovisual SOS",
+    "fecha": "2026-08-07",
+    "id": "gas_msnpn795_zc18y",
+    "metodo": "Transferencia",
+    "monto": 493000,
+    "proveedor": "Ale Salazar",
+    "soloCuentaCorriente": false
+  },
+  {
+    "categoria": "Sueldos y Honorarios",
+    "descripcion": "Saldo Animación SOS",
+    "fecha": "2026-08-07",
+    "id": "gas_msnpq8kl_av4l2",
+    "metodo": "Transferencia",
+    "monto": 702000,
+    "proveedor": "Andrés Martí",
+    "soloCuentaCorriente": false
+  },
+  {
+    "categoria": "Alimentación y Snacks",
+    "descripcion": "Snack Maca",
+    "fecha": "2026-08-05",
+    "id": "gas_msnseqzg_tw0jx",
+    "metodo": "Tarjeta de Débito",
+    "monto": 4620,
+    "proveedor": "Fruttato"
   }
 ];
   const SEED_PF_CATALOGO = [
@@ -4713,7 +4848,7 @@
     "vigenteHasta": ""
   },
   {
-    "categoria": "Créditos y Renegociaciones",
+    "categoria": "Gasto no asociado a Venta Directa",
     "concepto": "Devolución Inversionista 1",
     "fechaInicio": "2026-07-30",
     "id": "pf_mrle3qdn_owk59",
@@ -4795,7 +4930,7 @@
       "",
       "",
       "",
-      "Pendiente",
+      "",
       "",
       "",
       "",
@@ -4842,7 +4977,7 @@
       "Pagado",
       "Pagado",
       "Pagado",
-      "",
+      "Pendiente",
       "Pendiente",
       "",
       "",
@@ -5030,448 +5165,407 @@
     "2026": [
       [
         {
-          "id": "ab_msnnt691_29za9",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_uyalv",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_7euqj",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_k3z1l",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_cfkd4",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_eyvl6",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_9lphp",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_jdf84",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_gxin8",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_sk0ii",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_je1lh",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_jtl4b",
           "monto": 500000
         }
       ],
       [
         {
-          "id": "ab_msnnt691_pq2ph",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_lkg0t",
           "monto": 500000
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrl3p75v_sy64j": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_yc9xc",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_sgwrx",
           "monto": 830221
         }
       ],
       [
         {
-          "id": "ab_msnnt691_ve3l0",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_h0uzw",
           "monto": 830221
         }
       ],
       [
         {
-          "id": "ab_msnnt691_okt3t",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_rahvx",
           "monto": 830221
         }
       ],
       [
         {
-          "id": "ab_msnnt691_c0oh0",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_g7x6j",
           "monto": 830221
         }
       ],
       [
         {
-          "id": "ab_msnnt691_00ovt",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_osnfg",
           "monto": 830221
         }
       ],
       [
         {
-          "id": "ab_msnnt691_u1lk9",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_jsn64",
           "monto": 830221
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrl3rng3_en21w": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_s0wn6",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_iitzn",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_qn41c",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_4htil",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_ryzut",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_0yosi",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_kvnpv",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_nl3he",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_7bvsv",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_v8875",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_bhfcz",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_g62a3",
           "monto": 176934
         }
       ],
       [
         {
-          "id": "ab_msnnt691_veccs",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_unje1",
           "monto": 176934
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrl4ktuo_y3kao": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_y2xjn",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_sh8pz",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_srrgb",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_uwb3p",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_xr3x0",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_rpzwp",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_s1xz5",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_9xqqo",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_18sqa",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_faf09",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_ubttg",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_w1ajk",
           "monto": 19990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_5su93",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_zmttl",
           "monto": 19990
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrl9wjw6_f1mlz": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_u7646",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_7p3lw",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_r5j04",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_i556u",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_wb1v9",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_xqt0n",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_6zrms",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_m3u2i",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_a3zqm",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_il77i",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_ydzsy",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_u41jj",
           "monto": 9990
         }
       ],
       [
         {
-          "id": "ab_msnnt691_v3pl7",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_mmc4o",
           "monto": 9990
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrl9wqrr_14y3g": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_5rkxn",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_s8tx6",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_tr5zn",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_woscy",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_ubhbn",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_ct4nz",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_l42mz",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_o1drg",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_qy9p6",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_jurb2",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_slhhi",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_fd7uz",
           "monto": 6500
         }
       ],
       [
         {
-          "id": "ab_msnnt691_l35nk",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_e9gzn",
           "monto": 6500
         }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
+      ]
     ]
   },
   "pf_mrlbwzsf_1b1jc": {
     "2026": [
       [
         {
-          "id": "ab_msnnt691_5wxl8",
           "fecha": "2026-01-01",
+          "id": "ab_msnv6xof_ahhde",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_yqgeu",
           "fecha": "2026-02-01",
+          "id": "ab_msnv6xof_h3bw9",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_vl4z2",
           "fecha": "2026-03-01",
+          "id": "ab_msnv6xof_9vzwy",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_0zotg",
           "fecha": "2026-04-01",
+          "id": "ab_msnv6xof_a4agb",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_o35t5",
           "fecha": "2026-05-01",
+          "id": "ab_msnv6xof_5kstb",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_cayfz",
           "fecha": "2026-06-01",
+          "id": "ab_msnv6xof_iil8w",
           "monto": 5600
         }
       ],
       [
         {
-          "id": "ab_msnnt691_oa444",
           "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_eimdy",
           "monto": 5600
-        }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
-    ]
-  },
-  "pf_mrle3qdn_owk59": {
-    "2026": [
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [
-        {
-          "id": "ab_msnnt691_suk2s",
-          "fecha": "2026-07-01",
-          "monto": 5000000
-        }
-      ],
-      [],
-      [],
-      [],
-      [],
-      []
-    ]
-  },
-  "pf_mrtyf3dy_rrav7": {
-    "2025": [
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [
-        {
-          "id": "ab_msnnt691_gmt9r",
-          "fecha": "2025-12-01",
-          "monto": 171666
         }
       ]
     ]
+  },
+  "pf_mrle3qdn_owk59": {
+    "2026": {
+      "6": [
+        {
+          "fecha": "2026-07-01",
+          "id": "ab_msnv6xof_j2oei",
+          "monto": 5000000
+        }
+      ]
+    }
+  },
+  "pf_mrtyf3dy_rrav7": {
+    "2025": {
+      "11": [
+        {
+          "fecha": "2025-12-01",
+          "id": "ab_msnv6xof_1rcwp",
+          "monto": 171666
+        }
+      ]
+    }
   }
 };
-  const SEED_PF_MONTOS = {};
+  const SEED_PF_MONTOS = {
+  "pf_mrl3p75v_sy64j": {
+    "2026": [
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      914000,
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  }
+};
 
   const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
   const MESES_CORTO = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
@@ -5915,6 +6009,26 @@
     return { pagos, gastos, cambios };
   }
 
+  // Firebase Realtime Database no guarda posiciones "vacías": si un año de pagosFijosPagos tiene,
+  // por ejemplo, solo enero-julio con abonos, los meses sin abonos (arreglo []) se recortan al guardar,
+  // y al leerlo de vuelta puede llegar un arreglo más corto de 12 (o un objeto con claves "0","1"...)
+  // en vez del arreglo completo. Esta función garantiza SIEMPRE 12 posiciones por año, sin importar
+  // la forma en que haya llegado el dato (arreglo corto, objeto disperso, o ausente). Se debe usar en
+  // cualquier punto donde pagosFijosPagos entre al estado desde una fuente externa (Firebase o un
+  // respaldo importado), para que el resto del código pueda indexar [mes] con seguridad.
+  function normalizePagosFijosPagos(raw){
+    const out = {};
+    Object.keys(raw || {}).forEach(catId=>{
+      out[catId] = {};
+      const years = raw[catId] || {};
+      Object.keys(years).forEach(year=>{
+        const src = years[year] || {};
+        out[catId][year] = Array.from({length:12}, (_,m)=> (src[m] || src[String(m)] || []));
+      });
+    });
+    return out;
+  }
+
   // Al eliminar un gasto vinculado a un pago fijo (desde Gastos o en un borrado masivo), quita el abono
   // correspondiente de pagosFijosPagos. Soporta el formato nuevo (pf:catId:YYYY-MM:abonoId) y, por seguridad,
   // el formato antiguo de antes de la migración (pf:catId:YYYY-MM), en cuyo caso solo limpia la marca manual.
@@ -5971,18 +6085,26 @@
       state.pagosFijosEstado = pagosFijosEstado || {};
 
       // pagosFijosPagos es una clave nueva: si nunca existió en Firebase (null real, no solo vacía),
-      // se migra automáticamente desde el estado antiguo la primera vez y se guarda.
+      // se siembra con SEED_PF_PAGOS (el respaldo más reciente incluido en este archivo) si trae datos;
+      // si no, se migra automáticamente desde el estado antiguo (compatibilidad con versiones previas).
       const pagosFijosPagosExistente = await loadKey('pagosFijosPagos', null);
       if(pagosFijosPagosExistente === null){
-        const mig = buildPagosFijosPagosMigration(state.pagosFijosEstado, state.pagosFijosCatalogo, state.gastos);
-        state.pagosFijosPagos = mig.pagos;
-        if(mig.cambios) state.gastos = mig.gastos;
-        await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
-        if(mig.cambios) await saveKey('gastos', state.gastos, {silent:true});
+        if(SEED_PF_PAGOS && Object.keys(SEED_PF_PAGOS).length){
+          state.pagosFijosPagos = normalizePagosFijosPagos(SEED_PF_PAGOS);
+          await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
+        } else {
+          const mig = buildPagosFijosPagosMigration(state.pagosFijosEstado, state.pagosFijosCatalogo, state.gastos);
+          state.pagosFijosPagos = normalizePagosFijosPagos(mig.pagos);
+          if(mig.cambios) state.gastos = mig.gastos;
+          await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
+          if(mig.cambios) await saveKey('gastos', state.gastos, {silent:true});
+        }
       } else {
-        state.pagosFijosPagos = pagosFijosPagosExistente;
+        // Blindaje clave: pagosFijosPagosExistente puede venir con años "recortados" por Firebase
+        // (menos de 12 meses) si algún año no tenía abonos en los últimos meses. Normalizamos siempre.
+        state.pagosFijosPagos = normalizePagosFijosPagos(pagosFijosPagosExistente);
       }
-      state.pagosFijosMontos = await loadKeySeeded('pagosFijosMontos', {});
+      state.pagosFijosMontos = await loadKeySeeded('pagosFijosMontos', SEED_PF_MONTOS);
 
       state.loading = false;
     } catch (e) {
@@ -8492,10 +8614,10 @@
           // El respaldo importado puede venir del formato antiguo (sin abonos parciales) — si no trae
           // pagosFijosPagos, se migra igual que al cargar la app por primera vez.
           if(data.pagosFijosPagos && typeof data.pagosFijosPagos === 'object'){
-            state.pagosFijosPagos = data.pagosFijosPagos;
+            state.pagosFijosPagos = normalizePagosFijosPagos(data.pagosFijosPagos);
           } else {
             const mig = buildPagosFijosPagosMigration(state.pagosFijosEstado, state.pagosFijosCatalogo, state.gastos);
-            state.pagosFijosPagos = mig.pagos;
+            state.pagosFijosPagos = normalizePagosFijosPagos(mig.pagos);
             if(mig.cambios) state.gastos = mig.gastos;
           }
           state.pagosFijosMontos = (data.pagosFijosMontos && typeof data.pagosFijosMontos === 'object') ? data.pagosFijosMontos : {};
@@ -8682,7 +8804,12 @@
       const catalogo = state.pagosFijosCatalogo.find(c=>c.id===p.catId);
       const abonoId = uid('ab');
       if(!state.pagosFijosPagos[p.catId]) state.pagosFijosPagos[p.catId] = {};
-      if(!state.pagosFijosPagos[p.catId][p.year]) state.pagosFijosPagos[p.catId][p.year] = Array.from({length:12}, ()=>[]);
+      // Defensivo: si el año existe pero con menos de 12 posiciones (arreglo recortado por Firebase),
+      // lo normalizamos aquí también antes de indexar por mes, para no volver a romper con undefined.push().
+      if(!Array.isArray(state.pagosFijosPagos[p.catId][p.year]) || state.pagosFijosPagos[p.catId][p.year].length < 12){
+        const src = state.pagosFijosPagos[p.catId][p.year] || {};
+        state.pagosFijosPagos[p.catId][p.year] = Array.from({length:12}, (_,m)=> (src[m] || src[String(m)] || []));
+      }
       state.pagosFijosPagos[p.catId][p.year][p.month].push({ id: abonoId, fecha, monto });
 
       // silent:true da más reintentos (5 en vez de 3) — clave en conexiones de celular inestables — y
