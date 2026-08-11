@@ -4740,6 +4740,36 @@
     "metodo": "Tarjeta de Débito",
     "monto": 4620,
     "proveedor": "Fruttato"
+  },
+  {
+    "id": "gas_msnvm6jk_r458r",
+    "fecha": "2026-08-07",
+    "proveedor": "Crédito Banco Chile",
+    "descripcion": "Pago fijo: Crédito Banco Chile (Julio 2026)",
+    "categoria": "Créditos y Renegociaciones",
+    "monto": 914215,
+    "metodo": "Transferencia",
+    "origenPagoFijo": "pf:pf_mrl3p75v_sy64j:2026-07:ab_msnvm6ez_dorha"
+  },
+  {
+    "id": "gas_msnvmnpj_z0wof",
+    "fecha": "2026-08-03",
+    "proveedor": "Arriendo Oficina",
+    "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026)",
+    "categoria": "Arriendo y Servicios Básicos",
+    "monto": 200000,
+    "metodo": "Transferencia",
+    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvmnl0_bei1h"
+  },
+  {
+    "id": "gas_msnvw15b_etlk0",
+    "fecha": "2026-08-10",
+    "proveedor": "Arriendo Oficina",
+    "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026) — abono 2",
+    "categoria": "Arriendo y Servicios Básicos",
+    "monto": 300000,
+    "metodo": "Transferencia",
+    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvw10k_xwzv4"
   }
 ];
   const SEED_PF_CATALOGO = [
@@ -4946,7 +4976,7 @@
       "Pagado",
       "Pagado",
       "Pagado",
-      "Pendiente",
+      "",
       "",
       "",
       "",
@@ -4977,7 +5007,7 @@
       "Pagado",
       "Pagado",
       "Pagado",
-      "Pendiente",
+      "",
       "Pendiente",
       "",
       "",
@@ -5211,7 +5241,23 @@
           "id": "ab_msnv6xof_lkg0t",
           "monto": 500000
         }
-      ]
+      ],
+      [
+        {
+          "id": "ab_msnvmnl0_bei1h",
+          "fecha": "2026-08-03",
+          "monto": 200000
+        },
+        {
+          "id": "ab_msnvw10k_xwzv4",
+          "fecha": "2026-08-10",
+          "monto": 300000
+        }
+      ],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrl3p75v_sy64j": {
@@ -5257,7 +5303,19 @@
           "id": "ab_msnv6xof_jsn64",
           "monto": 830221
         }
-      ]
+      ],
+      [
+        {
+          "id": "ab_msnvm6ez_dorha",
+          "fecha": "2026-08-07",
+          "monto": 914215
+        }
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrl3rng3_en21w": {
@@ -5310,7 +5368,12 @@
           "id": "ab_msnv6xof_unje1",
           "monto": 176934
         }
-      ]
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrl4ktuo_y3kao": {
@@ -5363,7 +5426,12 @@
           "id": "ab_msnv6xof_zmttl",
           "monto": 19990
         }
-      ]
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrl9wjw6_f1mlz": {
@@ -5416,7 +5484,12 @@
           "id": "ab_msnv6xof_mmc4o",
           "monto": 9990
         }
-      ]
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrl9wqrr_14y3g": {
@@ -5469,7 +5542,12 @@
           "id": "ab_msnv6xof_e9gzn",
           "monto": 6500
         }
-      ]
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrlbwzsf_1b1jc": {
@@ -5522,30 +5600,57 @@
           "id": "ab_msnv6xof_eimdy",
           "monto": 5600
         }
-      ]
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
     ]
   },
   "pf_mrle3qdn_owk59": {
-    "2026": {
-      "6": [
+    "2026": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
         {
           "fecha": "2026-07-01",
           "id": "ab_msnv6xof_j2oei",
           "monto": 5000000
         }
-      ]
-    }
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
+    ]
   },
   "pf_mrtyf3dy_rrav7": {
-    "2025": {
-      "11": [
+    "2025": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
         {
           "fecha": "2025-12-01",
           "id": "ab_msnv6xof_1rcwp",
           "monto": 171666
         }
       ]
-    }
+    ]
   }
 };
   const SEED_PF_MONTOS = {
@@ -5557,7 +5662,7 @@
       "",
       "",
       "",
-      914000,
+      914215,
       "",
       "",
       "",
@@ -6565,7 +6670,8 @@
 
 
   // ---------------- Utilidades de orden y filtro (reutilizadas en todas las tablas) ----------------
-  const NUMERIC_KEYS = new Set(['monto','montoMensual','mesIdx','ingresos','gastos','utilidad','margen','saldo','saldoInicial','saldoFinal','deuda','pct']);
+  const NUMERIC_KEYS = new Set(['monto','montoMensual','mesIdx','ingresos','gastos','utilidad','margen','saldo','saldoInicial','saldoFinal','deuda','pct',
+    'ingresosEfectivos','gastosVariables','gastosFijos','gastosTotales','utilidadNeta','fijosPagados','impagos']);
 
   function sortRowsGeneric(rows, key, dir, getVal){
     const mult = dir === 'asc' ? 1 : -1;
@@ -7745,57 +7851,88 @@
   // ---------------- RENTABILIDAD ----------------
   function renderRentabilidad(){
     const months = getMonthlyStats(state.config.anio);
-    const ingresosAnio = months.reduce((s,m)=>s+m.ingresosVenta,0);
-    const gastosAnio = months.reduce((s,m)=>s+m.gastosNegocio,0);
+    const composicion = getComposicionMensual(state.config.anio);
+    const pf = getPagosFijosStats(state.config.anio);
+
+    // Resultado de cada mes, cerrado como ejercicio propio (no es flujo de caja):
+    // - Ingresos Efectivos: solo ventas ya cobradas (ing.estado === 'Pagado'), nunca proyectadas.
+    // - Gastos Variables: gastos de negocio ya registrados que NO están ligados a un Pago Fijo.
+    // - Gastos Fijos: el monto EXIGIBLE completo del mes (pagado o no) de los compromisos activos —
+    //   así el margen del mes refleja la obligación real, no solo lo que alcanzaste a pagar.
+    // - Gastos Fijos Pagados / Gastos Impagos del Mes: viven aparte, y SÍ se actualizan después de
+    //   cerrado el mes, a medida que se van pagando esos compromisos (al día o atrasados).
+    const filaMes = Array.from({length:12}, (_,i)=>{
+      const ingresosEfectivos = months[i].ingresosCobradosVenta;
+      const gastosVariables = composicion[i].variables;
+      const gastosFijos = pf.totalEsperado[i];
+      const gastosTotales = gastosVariables + gastosFijos;
+      const utilidadNeta = ingresosEfectivos - gastosTotales;
+      const margen = ingresosEfectivos !== 0 ? utilidadNeta / ingresosEfectivos : 0;
+      const fijosPagados = pf.totalPagado[i];
+      const impagos = pf.pendienteMes[i];
+      return { mesIdx:i, mes:MESES[i], ingresosEfectivos, gastosVariables, gastosFijos, gastosTotales, utilidadNeta, margen, fijosPagados, impagos };
+    });
+
+    const ingresosAnio = filaMes.reduce((s,r)=>s+r.ingresosEfectivos,0);
+    const gastosAnio = filaMes.reduce((s,r)=>s+r.gastosTotales,0);
     const utilidadAnio = ingresosAnio - gastosAnio;
     const margenAnio = ingresosAnio !== 0 ? utilidadAnio/ingresosAnio : 0;
+    const impagosAnio = filaMes.reduce((s,r)=>s+r.impagos,0);
 
+    // Desglose por categoría: se mantiene sobre los gastos YA REGISTRADOS (no sobre el comprometido
+    // de Pagos Fijos), igual que antes — es una vista distinta, complementaria a la tabla de resultado.
+    const gastosRegistradosAnio = months.reduce((s,m)=>s+m.gastosNegocio,0);
     const catTotals = {};
     state.config.categoriasGastos.forEach(c=> catTotals[c]=0);
     months.forEach(m=> Object.keys(m.gastosPorCategoria).forEach(cat=>{ catTotals[cat]=(catTotals[cat]||0)+m.gastosPorCategoria[cat]; }));
 
     const dm = state.detalleMes;
 
-    let mensualRows = months.map((m,i)=>({ mesIdx:i, mes:MESES[i], ingresos:m.ingresosVenta, gastos:m.gastosNegocio, utilidad:m.utilidadNeta, margen:m.margen }));
+    let mensualRows = filaMes.slice();
     const tsM = state.tables.rentMensual;
     if(tsM.search) mensualRows = mensualRows.filter(r=> r.mes.toLowerCase().includes(tsM.search.toLowerCase()));
     mensualRows = sortRowsGeneric(mensualRows, tsM.sortKey, tsM.sortDir);
 
-    let catRows = Object.entries(catTotals).map(([cat,val])=>({ categoria:cat, monto:val, pct: gastosAnio? val/gastosAnio : 0 }));
+    let catRows = Object.entries(catTotals).map(([cat,val])=>({ categoria:cat, monto:val, pct: gastosRegistradosAnio? val/gastosRegistradosAnio : 0 }));
     const tsC = state.tables.rentCategorias;
     if(tsC.search) catRows = catRows.filter(r=> r.categoria.toLowerCase().includes(tsC.search.toLowerCase()));
     catRows = sortRowsGeneric(catRows, tsC.sortKey, tsC.sortDir, (row,key)=> key==='categoria'? row.categoria : row[key]);
 
     return `
       <div class="fa-topbar">
-        <div><h1>Rentabilidad</h1><div class="fa-sub">Tu estado de resultados: ingresos por ventas, gastos y utilidad (sin financiamiento).</div></div>
+        <div><h1>Rentabilidad</h1><div class="fa-sub">Tu estado de resultados: solo ventas cobradas, gastos y utilidad de cada mes (sin financiamiento, sin flujo de caja).</div></div>
         ${yearSelect('rentabilidad')}
       </div>
 
       <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr); max-width:760px;">
-        <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos por ventas</div><div class="fa-kpi-value income money">${fmtMoneyC(ingresosAnio)}</div></div>
-        <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos totales</div><div class="fa-kpi-value expense money">${fmtMoneyC(gastosAnio)}</div></div>
+        <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos efectivos</div><div class="fa-kpi-value income money">${fmtMoneyC(ingresosAnio)}</div></div>
+        <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos totales (variables + fijos)</div><div class="fa-kpi-value expense money">${fmtMoneyC(gastosAnio)}</div></div>
         <div class="fa-kpi"><div class="fa-kpi-label">Utilidad neta</div><div class="fa-kpi-value money">${fmtMoneyC(utilidadAnio)}</div></div>
         <div class="fa-kpi"><div class="fa-kpi-label">Margen neto</div><div class="fa-kpi-value">${fmtPctC(margenAnio)}</div></div>
       </div>
-      <div class="fa-hint">No incluye créditos comerciales ni aportes de inversionistas — solo venta directa. Revisa esos movimientos en Cuenta Corriente.</div>
+      <div class="fa-hint">Ingresos efectivos = solo ventas ya cobradas (no proyectadas). Gastos Fijos = monto exigible completo del mes, esté pagado o no — así el margen refleja la obligación real. Impagos acumulados del año: <strong>${fmtMoneyC(impagosAnio)}</strong>. No incluye créditos comerciales ni aportes de inversionistas — revisa esos movimientos en Cuenta Corriente.</div>
 
       <div class="fa-card">
         <div class="fa-card-title">Resultado mensual ${state.config.anio}</div>
+        <div class="fa-section-note">Cada mes es un ejercicio cerrado (Ingresos Efectivos − Gastos Totales). Las dos últimas columnas son la excepción: siguen actualizándose después de cerrado el mes, a medida que pagas esos compromisos fijos (al día o atrasados).</div>
         ${filterBar('rentMensual', { placeholder:'Buscar mes...' })}
         <div class="fa-table-wrap">
           <table class="fa-table">
             <thead><tr>
-              ${thSort('rentMensual','mesIdx','Mes')}${thSort('rentMensual','ingresos','Ingresos',true)}${thSort('rentMensual','gastos','Gastos',true)}${thSort('rentMensual','utilidad','Utilidad neta',true)}${thSort('rentMensual','margen','Margen',true)}
+              ${thSort('rentMensual','mesIdx','Mes')}${thSort('rentMensual','ingresosEfectivos','Ingresos Efectivos',true)}${thSort('rentMensual','gastosVariables','Gastos Variables',true)}${thSort('rentMensual','gastosFijos','Gastos Fijos',true)}${thSort('rentMensual','gastosTotales','Gastos Totales',true)}${thSort('rentMensual','utilidadNeta','Utilidad Neta',true)}${thSort('rentMensual','margen','Margen %',true)}${thSort('rentMensual','fijosPagados','Fijos Pagados (hoy)',true)}${thSort('rentMensual','impagos','Impagos del Mes',true)}
             </tr></thead>
             <tbody>
               ${mensualRows.map(r=>`
                 <tr>
                   <td>${r.mes}</td>
-                  <td class="num money">${fmtMoneyC(r.ingresos)}</td>
-                  <td class="num money">${fmtMoneyC(r.gastos)}</td>
-                  <td class="num money">${fmtMoneyC(r.utilidad)}</td>
+                  <td class="num money">${fmtMoneyC(r.ingresosEfectivos)}</td>
+                  <td class="num money">${fmtMoneyC(r.gastosVariables)}</td>
+                  <td class="num money">${fmtMoneyC(r.gastosFijos)}</td>
+                  <td class="num money">${fmtMoneyC(r.gastosTotales)}</td>
+                  <td class="num money">${fmtMoneyC(r.utilidadNeta)}</td>
                   <td class="num">${fmtPctC(r.margen)}</td>
+                  <td class="num money">${fmtMoneyC(r.fijosPagados)}</td>
+                  <td class="num money" style="${r.impagos>0?'color:#A8322D; font-weight:600;':''}">${fmtMoneyC(r.impagos)}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -7804,7 +7941,7 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Gastos por categoría — total del año</div>
+        <div class="fa-card-title">Gastos por categoría — total del año (gastos ya registrados)</div>
         ${filterBar('rentCategorias', { placeholder:'Buscar categoría...' })}
         <div class="fa-table-wrap">
           <table class="fa-table">
