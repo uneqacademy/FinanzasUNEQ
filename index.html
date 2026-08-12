@@ -30,6 +30,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-functions-compat.js"></script>
 <script>
   // Configuración de Firebase (proyecto: finanzasuneq)
   const firebaseConfig = {
@@ -149,6 +150,28 @@
   .fa-kpi-value.expense{ color:var(--expense); }
 
   .fa-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:18px; margin-bottom:18px; }
+  .fa-asesor-wrap{ display:flex; flex-direction:column; height:calc(100vh - 190px); min-height:420px; }
+  .fa-asesor-chat{
+    flex:1; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    padding:16px; display:flex; flex-direction:column; gap:12px;
+  }
+  .fa-asesor-vacio{ color:var(--muted); font-size:13.5px; line-height:1.6; padding:20px 10px; text-align:center; }
+  .fa-asesor-msg{ display:flex; }
+  .fa-asesor-msg-user{ justify-content:flex-end; }
+  .fa-asesor-msg-assistant{ justify-content:flex-start; }
+  .fa-asesor-msg-bubble{
+    max-width:72%; padding:10px 14px; border-radius:14px; font-size:13.5px; line-height:1.55; white-space:normal;
+  }
+  .fa-asesor-msg-user .fa-asesor-msg-bubble{ background:var(--ink); color:#fff; border-bottom-right-radius:4px; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble{ background:#fff; border:1px solid var(--border); color:var(--ink); border-bottom-left-radius:4px; }
+  .fa-asesor-pensando{ color:var(--muted); font-style:italic; }
+  .fa-asesor-error{ color:#B3261E; font-size:12.5px; padding:6px 4px; }
+  .fa-asesor-input-row{ display:flex; gap:10px; margin-top:12px; align-items:flex-end; }
+  .fa-asesor-input-row textarea{
+    flex:1; resize:none; padding:10px 12px; border:1px solid var(--border); border-radius:10px;
+    font-family:'Inter',sans-serif; font-size:13.5px; color:var(--ink);
+  }
+  .fa-asesor-input-row button{ height:40px; }
   .fa-card-title{ font-size:14px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; justify-content:space-between; }
   .fa-charts-row{ display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:18px; }
   @media (max-width:900px){ .fa-charts-row{ grid-template-columns:1fr; } }
@@ -1283,6 +1306,33 @@
     "fecha": "2026-08-06",
     "id": "ing_msnq1j53_m353g",
     "monto": 46000
+  },
+  {
+    "categoria": "Venta Programas Online (USD)",
+    "cliente": "Hotmart",
+    "descripcion": "Descargs de USD",
+    "estado": "Pagado",
+    "fecha": "2026-08-11",
+    "id": "ing_msp56fns_ulk2c",
+    "monto": 1025704
+  },
+  {
+    "categoria": "No asociado a Servicios Prestados Directos",
+    "cliente": "Iván Martínez",
+    "descripcion": "Inversion RTV",
+    "estado": "Pagado",
+    "fecha": "2026-08-11",
+    "id": "ing_msp580zn_yhxug",
+    "monto": 1000000
+  },
+  {
+    "categoria": "No asociado a Servicios Prestados Directos",
+    "cliente": "Iván Martínez",
+    "descripcion": "Inversión RTV",
+    "estado": "Pagado",
+    "fecha": "2026-08-11",
+    "id": "ing_msp5cd53_v67wm",
+    "monto": 5000000
   }
 ];
   const SEED_GASTOS = [
@@ -4613,16 +4663,6 @@
     "proveedor": "Crédito Scotiabank"
   },
   {
-    "categoria": "Sueldos y Honorarios",
-    "descripcion": "Pago fijo: Sueldo Jacke (Agosto 2026)",
-    "fecha": "2026-08-05",
-    "id": "gas_msjbo6hy_vocld",
-    "metodo": "Transferencia",
-    "monto": 753927,
-    "origenPagoFijo": "pf:pf_mrl3g8cx_cfsf5:2026-08:ab_msjbo4hx_64l9h",
-    "proveedor": "Sueldo Jacke"
-  },
-  {
     "categoria": "Comisiones",
     "descripcion": "COM MANTENCION PLAN CUENTA E",
     "fecha": "2026-08-10",
@@ -4742,34 +4782,127 @@
     "proveedor": "Fruttato"
   },
   {
-    "id": "gas_msnvm6jk_r458r",
-    "fecha": "2026-08-07",
-    "proveedor": "Crédito Banco Chile",
-    "descripcion": "Pago fijo: Crédito Banco Chile (Julio 2026)",
     "categoria": "Créditos y Renegociaciones",
+    "descripcion": "Pago fijo: Crédito Banco Chile (Julio 2026)",
+    "fecha": "2026-08-07",
+    "id": "gas_msnvm6jk_r458r",
+    "metodo": "Transferencia",
     "monto": 914215,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_mrl3p75v_sy64j:2026-07:ab_msnvm6ez_dorha"
+    "origenPagoFijo": "pf:pf_mrl3p75v_sy64j:2026-07:ab_msnvm6ez_dorha",
+    "proveedor": "Crédito Banco Chile"
   },
   {
-    "id": "gas_msnvmnpj_z0wof",
-    "fecha": "2026-08-03",
-    "proveedor": "Arriendo Oficina",
+    "categoria": "Arriendo y Servicios Básicos",
     "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026)",
-    "categoria": "Arriendo y Servicios Básicos",
-    "monto": 200000,
+    "fecha": "2026-08-03",
+    "id": "gas_msnvmnpj_z0wof",
     "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvmnl0_bei1h"
+    "monto": 200000,
+    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvmnl0_bei1h",
+    "proveedor": "Arriendo Oficina"
   },
   {
-    "id": "gas_msnvw15b_etlk0",
-    "fecha": "2026-08-10",
-    "proveedor": "Arriendo Oficina",
-    "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026) — abono 2",
     "categoria": "Arriendo y Servicios Básicos",
-    "monto": 300000,
+    "descripcion": "Pago fijo: Arriendo Oficina (Agosto 2026) — abono 2",
+    "fecha": "2026-08-10",
+    "id": "gas_msnvw15b_etlk0",
     "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvw10k_xwzv4"
+    "monto": 300000,
+    "origenPagoFijo": "pf:pf_mrl3glii_pyo9t:2026-08:ab_msnvw10k_xwzv4",
+    "proveedor": "Arriendo Oficina"
+  },
+  {
+    "categoria": "Sueldos y Honorarios",
+    "descripcion": "Pago fijo: Sueldo Jacke (Agosto 2026)",
+    "fecha": "2026-08-05",
+    "id": "gas_msnw9yhm_kr64d",
+    "metodo": "Transferencia",
+    "monto": 753927,
+    "origenPagoFijo": "pf:pf_mrl3g8cx_cfsf5:2026-08:ab_msnw9ycs_u1jtl",
+    "proveedor": "Sueldo Jacke"
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Iván",
+    "fecha": "2026-08-10",
+    "id": "gas_mso1j08y_vebip",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe"
+  },
+  {
+    "categoria": "Sueldos y Honorarios",
+    "descripcion": "Pago fijo: Sueldo Nathy (Agosto 2026)",
+    "fecha": "2026-08-10",
+    "id": "gas_mso2hlx0_fy54g",
+    "metodo": "Transferencia",
+    "monto": 915170,
+    "origenPagoFijo": "pf:pf_mrl3fh0r_iqdlm:2026-08:ab_mso2hlsc_5yh76",
+    "proveedor": "Sueldo Nathy"
+  },
+  {
+    "categoria": "Sueldos y Honorarios",
+    "descripcion": "Pago fijo: Sueldo Maradi (Agosto 2026)",
+    "fecha": "2026-08-11",
+    "id": "gas_msoot7sn_byze0",
+    "metodo": "Transferencia",
+    "monto": 418659,
+    "origenPagoFijo": "pf:pf_mrl3lj51_buxrs:2026-08:ab_msoot7na_1ddxp",
+    "proveedor": "Sueldo Maradi"
+  },
+  {
+    "categoria": "Alimentación y Snacks",
+    "descripcion": "Snack Maca",
+    "fecha": "2026-08-11",
+    "id": "gas_mspa98hg_xyscv",
+    "metodo": "Tarjeta de Débito",
+    "monto": 4620,
+    "proveedor": "Frutrsto"
+  },
+  {
+    "categoria": "Transporte, Estacionamientos y Traslados",
+    "descripcion": "Bencina",
+    "fecha": "2026-08-11",
+    "id": "gas_mspa9nxh_z9859",
+    "metodo": "Tarjeta de Débito",
+    "monto": 10000,
+    "proveedor": "Maca"
+  },
+  {
+    "categoria": "Comisiones",
+    "descripcion": "COMIS OPR 47604519",
+    "fecha": "2026-08-11",
+    "id": "gas_mspaas5k_la3kw",
+    "metodo": "Transferencia",
+    "monto": 27260,
+    "proveedor": "Banco Itaú"
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Ivan",
+    "fecha": "2026-08-11",
+    "id": "gas_mspabn6t_fflur",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe"
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Ivan",
+    "fecha": "2026-08-11",
+    "id": "gas_mspabz4p_owkgh",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe"
+  },
+  {
+    "categoria": "Gasto no asociado a Venta Directa",
+    "descripcion": "ADS Ivan",
+    "fecha": "2026-08-11",
+    "id": "gas_mspacb01_eewv0",
+    "metodo": "Transferencia",
+    "monto": 1000000,
+    "proveedor": "Felipe"
   }
 ];
   const SEED_PF_CATALOGO = [
@@ -4779,7 +4912,7 @@
     "fechaInicio": "2026-08-05",
     "id": "pf_mrl3fh0r_iqdlm",
     "montoMensual": 1000000,
-    "vigenteHasta": "2026-10-05"
+    "vigenteHasta": "2027-08-05"
   },
   {
     "categoria": "Sueldos y Honorarios",
@@ -4787,7 +4920,7 @@
     "fechaInicio": "2026-08-05",
     "id": "pf_mrl3g8cx_cfsf5",
     "montoMensual": 800000,
-    "vigenteHasta": "2026-10-05"
+    "vigenteHasta": "2027-08-05"
   },
   {
     "categoria": "Arriendo y Servicios Básicos",
@@ -4802,8 +4935,8 @@
     "concepto": "Sueldo Maradi",
     "fechaInicio": "2026-08-05",
     "id": "pf_mrl3lj51_buxrs",
-    "montoMensual": 350000,
-    "vigenteHasta": "2026-09-05"
+    "montoMensual": 420000,
+    "vigenteHasta": "2027-08-05"
   },
   {
     "categoria": "Créditos y Renegociaciones",
@@ -4944,7 +5077,7 @@
       "",
       "",
       "",
-      "Pendiente",
+      "",
       "",
       "",
       "",
@@ -4992,7 +5125,7 @@
       "",
       "",
       "",
-      "Pendiente",
+      "",
       "",
       "",
       "",
@@ -5191,6 +5324,50 @@
   }
 };
   const SEED_PF_PAGOS = {
+  "pf_mrl3fh0r_iqdlm": {
+    "2026": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "fecha": "2026-08-10",
+          "id": "ab_mso2hlsc_5yh76",
+          "monto": 915170
+        }
+      ],
+      [],
+      [],
+      [],
+      []
+    ]
+  },
+  "pf_mrl3g8cx_cfsf5": {
+    "2026": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "fecha": "2026-08-05",
+          "id": "ab_msnw9ycs_u1jtl",
+          "monto": 753927
+        }
+      ],
+      [],
+      [],
+      [],
+      []
+    ]
+  },
   "pf_mrl3glii_pyo9t": {
     "2026": [
       [
@@ -5244,14 +5421,36 @@
       ],
       [
         {
-          "id": "ab_msnvmnl0_bei1h",
           "fecha": "2026-08-03",
+          "id": "ab_msnvmnl0_bei1h",
           "monto": 200000
         },
         {
-          "id": "ab_msnvw10k_xwzv4",
           "fecha": "2026-08-10",
+          "id": "ab_msnvw10k_xwzv4",
           "monto": 300000
+        }
+      ],
+      [],
+      [],
+      [],
+      []
+    ]
+  },
+  "pf_mrl3lj51_buxrs": {
+    "2026": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "fecha": "2026-08-11",
+          "id": "ab_msoot7na_1ddxp",
+          "monto": 418659
         }
       ],
       [],
@@ -5306,8 +5505,8 @@
       ],
       [
         {
-          "id": "ab_msnvm6ez_dorha",
           "fecha": "2026-08-07",
+          "id": "ab_msnvm6ez_dorha",
           "monto": 914215
         }
       ],
@@ -5654,6 +5853,54 @@
   }
 };
   const SEED_PF_MONTOS = {
+  "pf_mrl3fh0r_iqdlm": {
+    "2026": [
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      915170,
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  "pf_mrl3g8cx_cfsf5": {
+    "2026": [
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      753927,
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  "pf_mrl3lj51_buxrs": {
+    "2026": [
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      418659,
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
   "pf_mrl3p75v_sy64j": {
     "2026": [
       "",
@@ -5688,6 +5935,10 @@
     readOnly: false,
     loginError: null,
     activeTab: 'resumen',
+    asesorChat: [],          // [{role:'user'|'assistant', text}] — solo para mostrar en pantalla
+    asesorHistorialAPI: [],  // historial en formato Anthropic, se reenvía a la función para dar contexto
+    asesorCargando: false,
+    asesorError: null,
     config: null,
     ingresos: [],
     gastos: [],
@@ -6876,6 +7127,40 @@
     `;
   }
 
+  // ---------------- ASESOR IA ----------------
+  function renderAsesorIA(){
+    const mensajes = state.asesorChat;
+    return `
+      <div class="fa-topbar">
+        <div>
+          <h1>Asesor IA</h1>
+          <div class="fa-sub">Pregúntale por tus finanzas — consulta tus datos reales en tiempo real.</div>
+        </div>
+        ${mensajes.length ? `<button class="fa-btn fa-btn-ghost" data-action="asesor-limpiar">Limpiar conversación</button>` : ''}
+      </div>
+      <div class="fa-asesor-wrap">
+        <div class="fa-asesor-chat" id="fa-asesor-chat">
+          ${mensajes.length === 0 ? `
+            <div class="fa-asesor-vacio">
+              Pregúntale al asesor sobre tus finanzas — ej. "¿Cómo va la rentabilidad este mes comparada con el anterior?"
+              o "¿Qué pagos fijos están pendientes?". Consulta tus datos reales en tiempo real.
+            </div>
+          ` : mensajes.map(m => `
+            <div class="fa-asesor-msg fa-asesor-msg-${m.role}">
+              <div class="fa-asesor-msg-bubble">${escapeHtml(m.text).replace(/\n/g,'<br>')}</div>
+            </div>
+          `).join('')}
+          ${state.asesorCargando ? `<div class="fa-asesor-msg fa-asesor-msg-assistant"><div class="fa-asesor-msg-bubble fa-asesor-pensando">Pensando…</div></div>` : ''}
+          ${state.asesorError ? `<div class="fa-asesor-error">${escapeHtml(state.asesorError)}</div>` : ''}
+        </div>
+        <div class="fa-asesor-input-row">
+          <textarea id="fa-asesor-input" rows="2" placeholder="Escribe tu pregunta… (Enter para enviar, Shift+Enter para salto de línea)" ${state.asesorCargando ? 'disabled' : ''}></textarea>
+          <button class="fa-btn fa-btn-primary" data-action="asesor-enviar" ${state.asesorCargando ? 'disabled' : ''}>Enviar</button>
+        </div>
+      </div>
+    `;
+  }
+
   function renderSidebar(){
     const tabs = [
       {id:'resumen', label:'Resumen', icon:'&#9673;'},
@@ -6886,6 +7171,7 @@
       {id:'cuentacorriente', label:'Cuenta Corriente', icon:'&#127974;'},
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'rentabilidad', label:'Rentabilidad', icon:'&#9636;'},
+      ...(state.role !== 'viewer' ? [{id:'asesor', label:'Asesor IA', icon:'&#129302;'}] : []),
       {id:'config', label:'Configuración', icon:'&#9881;'}
     ];
     return `
@@ -6918,6 +7204,7 @@
       case 'cuentacorriente': return renderCuentaCorriente();
       case 'flujo': return renderFlujo();
       case 'rentabilidad': return renderRentabilidad();
+      case 'asesor': return renderAsesorIA();
       case 'config': return renderConfig();
       default: return '';
     }
@@ -8782,6 +9069,39 @@
       state.selected.gastos.clear();
       render();
     }
+    else if(action === 'asesor-enviar'){
+      const input = document.getElementById('fa-asesor-input');
+      const pregunta = (input && input.value || '').trim();
+      if(!pregunta || state.asesorCargando) return;
+      state.asesorChat.push({role:'user', text: pregunta});
+      state.asesorCargando = true;
+      state.asesorError = null;
+      render();
+      try{
+        const llamarAsesor = firebase.functions().httpsCallable('asesorIA');
+        const resp = await llamarAsesor({ pregunta, historial: state.asesorHistorialAPI });
+        state.asesorChat.push({role:'assistant', text: resp.data.respuesta});
+        state.asesorHistorialAPI = resp.data.historial;
+      } catch(err){
+        console.error('Error del asesor IA', err);
+        const msgs = {
+          'permission-denied': 'No tienes permiso para usar el asesor IA.',
+          'unauthenticated': 'Tu sesión expiró — vuelve a iniciar sesión.',
+        };
+        state.asesorError = msgs[err.code] || 'No se pudo obtener respuesta del asesor. Intenta de nuevo.';
+      } finally {
+        state.asesorCargando = false;
+        render();
+        const el = document.getElementById('fa-asesor-chat');
+        if(el) el.scrollTop = el.scrollHeight;
+      }
+    }
+    else if(action === 'asesor-limpiar'){
+      state.asesorChat = [];
+      state.asesorHistorialAPI = [];
+      state.asesorError = null;
+      render();
+    }
     else if(action === 'edit-ingreso'){
       state.editingIngresoId = btn.dataset.id;
       render();
@@ -9319,6 +9639,12 @@
 
   root.addEventListener('keydown', (e)=>{
     if(e.key !== 'Enter') return;
+    if(e.target.id === 'fa-asesor-input' && !e.shiftKey){
+      e.preventDefault();
+      const btn = root.querySelector('[data-action="asesor-enviar"]');
+      if(btn) btn.click();
+      return;
+    }
     const input = e.target.closest('[data-form] input[name="search"]');
     if(!input) return;
     e.preventDefault();
