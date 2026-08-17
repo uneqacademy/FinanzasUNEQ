@@ -424,14 +424,15 @@
 
 <script>
 (function(){
-  const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos","No asociado a Servicios Prestados Directos"];
+  const CAT_INGRESOS_DEFAULT = ["Venta Programas Online (USD)","Venta Programas Online (CLP)","Mentorías Personalizadas (CLP)","SponsorShip","Capacitaciones","Charlas","Otros Ingresos","Otros No considerados en flujo"];
   const CAT_GASTOS_DEFAULT = ["Sueldos y Honorarios","Arriendo y Servicios Básicos","Software y Herramientas","Marketing y Ventas","Servicios Profesionales (Contable/Legal)","Impuestos y Contribuciones","Comisiones","Gratificaciones","Bonos","Equipamiento","Capacitaciones y Cursos","Créditos y Renegociaciones","Otros Gastos","Gasto no asociado a Venta Directa"];
   const METODOS_DEFAULT = ["Transferencia","Tarjeta de Débito","Tarjeta de Crédito","Efectivo","Cheque"];
 
   // Categorías "canónicas" de no-venta: cualquier ingreso o gasto registrado con estas categorías exactas
   // solo se considera en Cuenta Corriente (saldo real) — nunca en Resumen, Flujo de Caja, Rentabilidad ni
   // Fijos vs Variables. Todas las demás categorías cuentan en todos los cálculos financieros.
-  const CAT_INGRESO_NO_VENTA = "No asociado a Servicios Prestados Directos";
+  const CAT_INGRESO_NO_VENTA = "Otros No considerados en flujo";
+  const CAT_INGRESO_NO_VENTA_ANTERIOR = "No asociado a Servicios Prestados Directos"; // nombre viejo, para migrar datos existentes
   const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
   // Pago del estado de cuenta de la tarjeta de crédito: mueve plata real de Cuenta Corriente (por eso SÍ debe
   // contar en Flujo de Caja) pero NO es un gasto nuevo del negocio — la compra ya se contó en Rentabilidad y
@@ -448,6 +449,12 @@
   // Retiro de socios: mismo tratamiento que créditos en cuanto a exclusión/presencia (fuera de Rentabilidad,
   // presente en Flujo/Cuenta Corriente), pero sin desglose — es todo o nada, nunca cuenta como gasto operacional.
   const CAT_GASTO_RETIRO_SOCIOS = "Retiro Socios";
+  // Ingresos por crédito comercial o aporte de inversionista: NO son venta (no cuentan en Rentabilidad), pero
+  // SÍ son plata real que entra al banco — van en categoriasNoVenta (excluidos de Rentabilidad) y ADEMÁS en
+  // categoriasIngresosSoloFlujo (siguen sumando en Flujo de Caja y Cuenta Corriente). A diferencia de "No
+  // asociado a Servicios Prestados Directos", que se queda solo en Cuenta Corriente, fuera de Flujo también.
+  const CAT_INGRESO_CREDITO_COMERCIAL = "Crédito Comercial";
+  const CAT_INGRESO_APORTE_INVERSIONISTA = "Aporte Inversionista";
 
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
   // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
@@ -481,20 +488,32 @@
     if(!config.categoriasGastosSoloFlujo.includes(CAT_PF_CREDITOS)){ config.categoriasGastosSoloFlujo.push(CAT_PF_CREDITOS); changed = true; }
     if(!config.categoriasGastosNoVenta.includes(CAT_GASTO_RETIRO_SOCIOS)){ config.categoriasGastosNoVenta.push(CAT_GASTO_RETIRO_SOCIOS); changed = true; }
     if(!config.categoriasGastosSoloFlujo.includes(CAT_GASTO_RETIRO_SOCIOS)){ config.categoriasGastosSoloFlujo.push(CAT_GASTO_RETIRO_SOCIOS); changed = true; }
+    // Crédito Comercial y Aporte Inversionista: siempre no-venta (fuera de Rentabilidad), pero siempre
+    // presentes en Flujo de Caja y Cuenta Corriente — mismo refuerzo automático que los gastos de arriba.
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasIngresos.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasIngresos.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasNoVenta.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasNoVenta.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo) config.categoriasIngresosSoloFlujo = [];
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
     return changed;
   }
 
-  // Fusiona un duplicado accidental de categoría (ej. "Retiros Socios" vs "Retiro Socios") en gastos, Pagos
-  // Fijos y las listas de categorías — renombra todo lo que use el nombre viejo al nombre bueno. Devuelve true
-  // si modificó algo (para saber qué guardar). Corre en cada carga; si ya no queda ningún rastro, no hace nada.
+  // Fusiona un duplicado accidental de categoría (ej. "Retiros Socios" vs "Retiro Socios") o renombra una
+  // categoría existente (ingresos o gastos), en los datos y en las listas de categorías — todo lo que use el
+  // nombre viejo pasa al nombre bueno. Devuelve true si modificó algo (para saber qué guardar). Corre en cada
+  // carga; si ya no queda ningún rastro del nombre viejo, no hace nada.
   function mergeCategoriaDuplicada(state, desde, hacia){
     let changed = false;
     state.gastos.forEach(g=>{ if(g.categoria === desde){ g.categoria = hacia; changed = true; } });
+    state.ingresos.forEach(i=>{ if(i.categoria === desde){ i.categoria = hacia; changed = true; } });
     state.pagosFijosCatalogo.forEach(c=>{ if(c.categoria === desde){ c.categoria = hacia; changed = true; } });
     const cfg = state.config;
-    ['categoriasGastos','categoriasGastosNoVenta','categoriasGastosSoloFlujo'].forEach(list=>{
+    ['categoriasGastos','categoriasGastosNoVenta','categoriasGastosSoloFlujo','categoriasIngresos','categoriasNoVenta','categoriasIngresosSoloFlujo'].forEach(list=>{
       if(cfg[list] && cfg[list].includes(desde)){
         cfg[list] = cfg[list].filter(c=>c!==desde);
+        if(!cfg[list].includes(hacia)) cfg[list].push(hacia);
         changed = true;
       }
     });
@@ -540,10 +559,10 @@
     "Crédito Comercial",
     "Aporte Inversionista",
     "Servicios de Agencia",
-    "No asociado a Servicios Prestados Directos"
+    "Otros No considerados en flujo"
   ],
   "categoriasNoVenta": [
-    "No asociado a Servicios Prestados Directos"
+    "Otros No considerados en flujo"
   ],
   "metodosPago": [
     "Transferencia",
@@ -792,7 +811,7 @@
     "monto": 920042
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -801,7 +820,7 @@
     "monto": 300000
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -810,7 +829,7 @@
     "monto": 4700000
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Vivian Gostling",
     "descripcion": "Aporte Inversionista (SOS)",
     "estado": "Pagado",
@@ -1323,7 +1342,7 @@
     "monto": 1111171
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Iván Martínez",
     "descripcion": "ADS",
     "estado": "Pagado",
@@ -1332,7 +1351,7 @@
     "monto": 3000000
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Iván Martínez",
     "descripcion": "ADS",
     "estado": "Pagado",
@@ -1341,7 +1360,7 @@
     "monto": 5000000
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Iván Matínez",
     "descripcion": "ADS",
     "estado": "Pagado",
@@ -1368,7 +1387,7 @@
     "monto": 1025704
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Iván Martínez",
     "descripcion": "Inversion RTV",
     "estado": "Pagado",
@@ -1377,7 +1396,7 @@
     "monto": 1000000
   },
   {
-    "categoria": "No asociado a Servicios Prestados Directos",
+    "categoria": "Otros No considerados en flujo",
     "cliente": "Iván Martínez",
     "descripcion": "Inversión RTV",
     "estado": "Pagado",
@@ -6518,9 +6537,13 @@
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
       // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
+      // Renombre de categoría de ingreso ("No asociado a Servicios Prestados Directos" -> "Otros No
+      // considerados en flujo", más claro) — mismo mecanismo, aplicado a ingresos.
       const categoriaDuplicadaCambio = mergeCategoriaDuplicada(state, 'Retiros Socios', CAT_GASTO_RETIRO_SOCIOS);
-      if(categoriaDuplicadaCambio){
+      const categoriaRenombradaCambio = mergeCategoriaDuplicada(state, CAT_INGRESO_NO_VENTA_ANTERIOR, CAT_INGRESO_NO_VENTA);
+      if(categoriaDuplicadaCambio || categoriaRenombradaCambio){
         await Promise.all([
+          saveKey('ingresos', state.ingresos, {silent:true}),
           saveKey('gastos', state.gastos, {silent:true}),
           saveKey('pagosFijosCatalogo', state.pagosFijosCatalogo, {silent:true}),
           saveKey('config', state.config, {silent:true})
@@ -6612,6 +6635,15 @@
     return !noVenta.includes(ing.categoria);
   }
 
+  // Un ingreso cuenta para Flujo de Caja si es venta directa, O si está en categoriasIngresosSoloFlujo (hoy
+  // Crédito Comercial y Aporte Inversionista): no es venta, pero sí es plata real que entra al banco. El resto
+  // de los no-venta (ej. "Otros No considerados en flujo") se queda solo en Cuenta Corriente.
+  function esIngresoFlujo(ing){
+    if(esIngresoVenta(ing)) return true;
+    const soloFlujo = state.config.categoriasIngresosSoloFlujo || [];
+    return soloFlujo.includes(ing.categoria);
+  }
+
   // Un gasto cuenta para Rentabilidad, Flujo de Caja, Resumen y Fijos vs Variables salvo que su categoría
   // sea la categoría canónica "no asociada a venta directa" — igual lógica que esIngresoVenta, pero para gastos.
   function esGastoNegocio(g){
@@ -6645,7 +6677,7 @@
 
   function getMonthlyStats(year){
     const months = Array.from({length:12}, (_,i)=>({
-      mes:i, ingresosCobrados:0, ingresosTotales:0, ingresosVenta:0, ingresosNoVenta:0, ingresosCobradosVenta:0,
+      mes:i, ingresosCobrados:0, ingresosTotales:0, ingresosVenta:0, ingresosNoVenta:0, ingresosCobradosVenta:0, ingresosCobradosFlujo:0,
       gastosPagados:0, gastosNegocio:0, gastosFlujo:0, gastosPorCategoria:{}
     }));
     state.config.categoriasGastos.forEach(cat=> months.forEach(m=> m.gastosPorCategoria[cat]=0));
@@ -6662,6 +6694,9 @@
       if(ing.estado === 'Pagado'){
         months[m].ingresosCobrados += monto;
         if(venta) months[m].ingresosCobradosVenta += monto;
+        // ingresosCobradosFlujo es la vista para Flujo de Caja: venta + créditos/aportes de inversionista
+        // (categoriasIngresosSoloFlujo) — plata real que entra al banco, aunque no sea venta.
+        if(esIngresoFlujo(ing)) months[m].ingresosCobradosFlujo += monto;
       }
     });
 
@@ -6697,7 +6732,7 @@
       m.saldoFinal = saldo + m.ingresosCobrados - m.gastosPagados;
       saldo = m.saldoFinal;
 
-      m.resultadoOperativo = m.ingresosCobradosVenta - m.gastosFlujo;
+      m.resultadoOperativo = m.ingresosCobradosFlujo - m.gastosFlujo;
       m.operativoAcumInicial = acumOperativo;
       acumOperativo += m.resultadoOperativo;
       m.operativoAcumFinal = acumOperativo;
@@ -7130,11 +7165,11 @@
         </tbody>
       </table>
 
-      <div style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:16px; font-weight:700; margin-bottom:10px;">Flujo de Caja Operativo (ventas cobradas, sin financiamiento)</div>
+      <div style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:16px; font-weight:700; margin-bottom:10px;">Flujo de Caja (liquidez real, incluye créditos y aportes de inversionistas)</div>
       <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:30px;">
         <thead><tr style="background:#14213D; color:#fff;">
           <th style="padding:7px 9px; text-align:left;">Mes</th>
-          <th style="padding:7px 9px; text-align:right;">(+) Ventas Cobradas</th>
+          <th style="padding:7px 9px; text-align:right;">(+) Ingresos Cobrados</th>
           <th style="padding:7px 9px; text-align:right;">(-) Gastos Pagados</th>
           <th style="padding:7px 9px; text-align:right;">(=) Resultado del Mes</th>
           <th style="padding:7px 9px; text-align:right;">Acumulado del Período</th>
@@ -7142,8 +7177,8 @@
         <tbody>
           ${data.periodo.map((m,i)=>`<tr style="border-bottom:1px solid #EEEFF2;">
             <td style="padding:7px 9px;">${MESES[data.mesDesde+i]}</td>
-            <td style="padding:7px 9px; text-align:right; color:#1C7C54;">${fmtMoney(m.ingresosCobradosVenta)}</td>
-            <td style="padding:7px 9px; text-align:right; color:#A8322D;">${fmtMoney(m.gastosNegocio)}</td>
+            <td style="padding:7px 9px; text-align:right; color:#1C7C54;">${fmtMoney(m.ingresosCobradosFlujo)}</td>
+            <td style="padding:7px 9px; text-align:right; color:#A8322D;">${fmtMoney(m.gastosFlujo)}</td>
             <td style="padding:7px 9px; text-align:right;">${fmtMoney(m.resultadoOperativo)}</td>
             <td style="padding:7px 9px; text-align:right; font-weight:700;">${fmtMoney(m.operativoAcumFinal)}</td>
           </tr>`).join('')}
@@ -8565,18 +8600,18 @@
   // ---------------- FLUJO DE CAJA ----------------
   function renderFlujo(){
     const months = getMonthlyStats(state.config.anio);
-    const totalIngresos = months.reduce((s,m)=>s+m.ingresosCobradosVenta,0);
+    const totalIngresos = months.reduce((s,m)=>s+m.ingresosCobradosFlujo,0);
     const totalGastos = months.reduce((s,m)=>s+m.gastosFlujo,0);
     const acumFinAnio = months[11].operativoAcumFinal;
 
-    let rows = months.map((m,i)=>({ mesIdx:i, mes:MESES[i], ingresos:m.ingresosCobradosVenta, gastos:m.gastosFlujo, utilidad:m.resultadoOperativo, saldo:m.operativoAcumFinal }));
+    let rows = months.map((m,i)=>({ mesIdx:i, mes:MESES[i], ingresos:m.ingresosCobradosFlujo, gastos:m.gastosFlujo, utilidad:m.resultadoOperativo, saldo:m.operativoAcumFinal }));
     const ts = state.tables.flujoCaja;
     if(ts.search) rows = rows.filter(r=> r.mes.toLowerCase().includes(ts.search.toLowerCase()));
     rows = sortRowsGeneric(rows, ts.sortKey, ts.sortDir);
 
     return `
       <div class="fa-topbar">
-        <div><h1>Flujo de Caja</h1><div class="fa-sub">Cómo entra y sale la plata del negocio, mes a mes — solo ventas directas, sin financiamiento.</div></div>
+        <div><h1>Flujo de Caja</h1><div class="fa-sub">Cómo entra y sale la plata del negocio, mes a mes — liquidez real, incluye créditos y aportes de inversionistas.</div></div>
         ${yearSelect('flujo')}
       </div>
       <div class="fa-card">
@@ -8584,7 +8619,7 @@
         <div class="fa-table-wrap">
           <table class="fa-table">
             <thead><tr>
-              ${thSort('flujoCaja','mesIdx','Mes')}${thSort('flujoCaja','ingresos','(+) Ventas cobradas',true)}${thSort('flujoCaja','gastos','(-) Gastos pagados',true)}${thSort('flujoCaja','utilidad','(=) Resultado del mes',true)}${thSort('flujoCaja','saldo','Acumulado del año',true)}
+              ${thSort('flujoCaja','mesIdx','Mes')}${thSort('flujoCaja','ingresos','(+) Ingresos cobrados',true)}${thSort('flujoCaja','gastos','(-) Gastos pagados',true)}${thSort('flujoCaja','utilidad','(=) Resultado del mes',true)}${thSort('flujoCaja','saldo','Acumulado del año',true)}
             </tr></thead>
             <tbody>
               ${rows.map(r=>`
@@ -8606,7 +8641,7 @@
             </tbody>
           </table>
         </div>
-        <div class="fa-hint">Los ingresos aquí solo son ventas directas (excluye créditos y aportes de inversionistas) y cuentan cuando están marcados como "Pagado". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito (esos pagos no se cuentan dos veces: la compra ya sumó gasto cuando se hizo, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" es el resultado operativo acumulado, no tu saldo bancario. Para el saldo real de tu cuenta (incluyendo financiamiento), revisa la pestaña Cuenta Corriente.</div>
+        <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" es el resultado operativo acumulado, no tu saldo bancario. Para el saldo real de tu cuenta, revisa la pestaña Cuenta Corriente.</div>
       </div>
     `;
   }
@@ -8789,7 +8824,7 @@
 
       <div class="fa-card">
         <div class="fa-card-title">¿Cuáles ingresos son venta directa?</div>
-        <div class="fa-section-note">Desmarca las categorías que NO son venta (créditos, aportes de inversionistas, etc). Esos ingresos solo se contarán en Cuenta Corriente — no en Resumen, Flujo de Caja, Rentabilidad ni Fijos vs Variables.</div>
+        <div class="fa-section-note">Desmarca las categorías que NO son venta (créditos, aportes de inversionistas, etc). Esos ingresos no se cuentan en Rentabilidad ni Fijos vs Variables — pero algunos sí siguen en Flujo de Caja, según el detalle abajo.</div>
         <div class="fa-chip-group">
           ${state.config.categoriasIngresos.map(c=>{
             const esVenta = !(state.config.categoriasNoVenta||[]).includes(c);
@@ -8799,6 +8834,7 @@
             </label>`;
           }).join('')}
         </div>
+        <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}" y "${CAT_INGRESO_APORTE_INVERSIONISTA}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
       </div>
 
       <div class="fa-card">
@@ -8963,14 +8999,14 @@
       ];
       XLSX.utils.book_append_sheet(wb, buildSheet(pfRows, [30,12,12,12,12,12,12,12,12,12,12,12,14]), 'Pagos Fijos');
 
-      // --- Flujo de Caja (operativo, solo ventas) ---
+      // --- Flujo de Caja (liquidez real, incluye créditos y aportes de inversionistas) ---
       const fcRows = [
-        ['Flujo de Caja Operativo — solo ventas directas, sin financiamiento'],
+        ['Flujo de Caja — liquidez real, incluye créditos y aportes de inversionistas'],
         [],
-        ['Mes','(+) Ventas Cobradas','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Año']
+        ['Mes','(+) Ingresos Cobrados','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Año']
       ];
-      months.forEach((m,i)=> fcRows.push([MESES[i], M(m.ingresosCobradosVenta), M(m.gastosNegocio), M(m.resultadoOperativo), M(m.operativoAcumFinal)]));
-      fcRows.push(['Total Año', M(months.reduce((s,m)=>s+m.ingresosCobradosVenta,0)), M(months.reduce((s,m)=>s+m.gastosNegocio,0)), M(months.reduce((s,m)=>s+m.resultadoOperativo,0)), M(months[11].operativoAcumFinal)]);
+      months.forEach((m,i)=> fcRows.push([MESES[i], M(m.ingresosCobradosFlujo), M(m.gastosFlujo), M(m.resultadoOperativo), M(m.operativoAcumFinal)]));
+      fcRows.push(['Total Año', M(months.reduce((s,m)=>s+m.ingresosCobradosFlujo,0)), M(months.reduce((s,m)=>s+m.gastosFlujo,0)), M(months.reduce((s,m)=>s+m.resultadoOperativo,0)), M(months[11].operativoAcumFinal)]);
       XLSX.utils.book_append_sheet(wb, buildSheet(fcRows, [16,18,16,18,18]), 'Flujo de Caja');
 
       // --- Rentabilidad ---
@@ -9029,9 +9065,9 @@
       ];
       data.periodo.forEach((m,i)=> rows.push([MESES[data.mesDesde+i], m.ingresosVenta, m.gastosNegocio, m.utilidadNeta, (m.margen*100).toFixed(1)+'%']));
       rows.push([]);
-      rows.push(['Flujo de Caja Operativo (ventas cobradas, sin financiamiento)']);
-      rows.push(['Mes','(+) Ventas Cobradas','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Período']);
-      data.periodo.forEach((m,i)=> rows.push([MESES[data.mesDesde+i], m.ingresosCobradosVenta, m.gastosNegocio, m.resultadoOperativo, m.operativoAcumFinal]));
+      rows.push(['Flujo de Caja (liquidez real, incluye créditos y aportes de inversionistas)']);
+      rows.push(['Mes','(+) Ingresos Cobrados','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Período']);
+      data.periodo.forEach((m,i)=> rows.push([MESES[data.mesDesde+i], m.ingresosCobradosFlujo, m.gastosFlujo, m.resultadoOperativo, m.operativoAcumFinal]));
       rows.push([]);
       rows.push(['Gastos por categoría']);
       rows.push(['Categoría','Monto','% del período']);
@@ -9062,8 +9098,8 @@
       ];
       XLSX.utils.book_append_sheet(wb, buildSheet(resRows, [16,16,16,14,16,16]), 'Resumen');
 
-      const fcRows = [['Mes','(+) Ventas Cobradas','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Período']];
-      data.periodo.forEach((m,i)=> fcRows.push([MESES[data.mesDesde+i], M(m.ingresosCobradosVenta), M(m.gastosNegocio), M(m.resultadoOperativo), M(m.operativoAcumFinal)]));
+      const fcRows = [['Mes','(+) Ingresos Cobrados','(-) Gastos Pagados','(=) Resultado del Mes','Acumulado del Período']];
+      data.periodo.forEach((m,i)=> fcRows.push([MESES[data.mesDesde+i], M(m.ingresosCobradosFlujo), M(m.gastosFlujo), M(m.resultadoOperativo), M(m.operativoAcumFinal)]));
       XLSX.utils.book_append_sheet(wb, buildSheet(fcRows, [16,18,16,18,18]), 'Flujo de Caja');
 
       const rentRows = [['Mes','Ingresos (Ventas)','Gastos','Utilidad Neta','Margen %']];
@@ -9531,6 +9567,7 @@
           state.pagosFijosMontos = (data.pagosFijosMontos && typeof data.pagosFijosMontos === 'object') ? data.pagosFijosMontos : {};
           // Igual que al cargar la app: fusiona el duplicado accidental de categoría si el respaldo lo trae.
           mergeCategoriaDuplicada(state, 'Retiros Socios', CAT_GASTO_RETIRO_SOCIOS);
+          mergeCategoriaDuplicada(state, CAT_INGRESO_NO_VENTA_ANTERIOR, CAT_INGRESO_NO_VENTA);
 
           await saveKey('config', state.config);
           await saveKey('ingresos', state.ingresos);
