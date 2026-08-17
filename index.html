@@ -6725,8 +6725,10 @@
     // "Solo Cuenta Corriente") — es la plata real que entra y sale del banco. Vive aquí para reutilizar el
     // mismo cálculo mes a mes que ya existía.
     let saldo = Number(state.config.saldoInicial)||0;
-    // Flujo operativo del negocio: solo ventas cobradas menos gastos de negocio — parte siempre en 0 (no es saldo bancario).
-    let acumOperativo = 0;
+    // Flujo de Caja parte del mismo saldo inicial real que Cuenta Corriente — así "Acumulado del año" muestra
+    // cuánta plata tienes de verdad, no solo el neto de movimientos del año. Sigue sin ser saldo bancario 1:1
+    // porque excluye la categoría "Otros No considerados en flujo" (que sí cuenta en Cuenta Corriente).
+    let acumOperativo = Number(state.config.saldoInicial)||0;
     months.forEach(m=>{
       m.saldoInicial = saldo;
       m.saldoFinal = saldo + m.ingresosCobrados - m.gastosPagados;
@@ -8641,7 +8643,7 @@
             </tbody>
           </table>
         </div>
-        <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" es el resultado operativo acumulado, no tu saldo bancario. Para el saldo real de tu cuenta, revisa la pestaña Cuenta Corriente.</div>
+        <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" parte de tu saldo inicial (el mismo de Cuenta Corriente) y va sumando el resultado de cada mes — muy parecido al saldo de Cuenta Corriente, pero no idéntico, porque sigue sin incluir la categoría "${CAT_INGRESO_NO_VENTA}".</div>
       </div>
     `;
   }
