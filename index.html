@@ -433,20 +433,71 @@
   // Fijos vs Variables. Todas las demás categorías cuentan en todos los cálculos financieros.
   const CAT_INGRESO_NO_VENTA = "No asociado a Servicios Prestados Directos";
   const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
+  // Pago del estado de cuenta de la tarjeta de crédito: mueve plata real de Cuenta Corriente (por eso SÍ debe
+  // contar en Flujo de Caja) pero NO es un gasto nuevo del negocio — la compra ya se contó en Rentabilidad y
+  // Fijos vs Variables el día que se hizo con la tarjeta. Por eso va en categoriasGastosNoVenta (se excluye de
+  // Rentabilidad/Composición como cualquier no-venta) y ADEMÁS en categoriasGastosSoloFlujo, que hace que
+  // esGastoFlujo() lo vuelva a sumar en Flujo de Caja aunque no cuente para el resultado del negocio.
+  const CAT_GASTO_PAGO_TARJETA = "Pago Tarjeta de Crédito";
+  // Créditos y renegociaciones (bancarios/comerciales): SIEMPRE fuera de Rentabilidad y Fijos vs Variables por
+  // defecto (categoriasGastosNoVenta) pero SIEMPRE presente en Cuenta Corriente y Flujo de Caja
+  // (categoriasGastosSoloFlujo) — es deuda real que sale del banco, no gasto operacional. La excepción es el
+  // desglose interés/capital: cuando un abono de esta categoría trae ese desglose, el interés SÍ entra a
+  // Rentabilidad (ver montoNegocioGasto) — el capital nunca entra, esté o no desglosado.
+  const CAT_PF_CREDITOS = "Créditos y Renegociaciones";
+  // Retiro de socios: mismo tratamiento que créditos en cuanto a exclusión/presencia (fuera de Rentabilidad,
+  // presente en Flujo/Cuenta Corriente), pero sin desglose — es todo o nada, nunca cuenta como gasto operacional.
+  const CAT_GASTO_RETIRO_SOCIOS = "Retiro Socios";
 
-  // Se asegura de que las categorías canónicas de no-venta existan en las listas de categorías y estén
-  // marcadas como no-venta, sin tocar ninguna otra personalización que el usuario ya tenga (otras categorías
-  // que haya desmarcado manualmente se respetan). Devuelve true si modificó algo (para saber si hay que guardar).
+  // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
+  // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
+  function esCreditoCatalogo(catalogo){
+    if(!catalogo) return false;
+    return !!catalogo.esCredito || catalogo.categoria === CAT_PF_CREDITOS;
+  }
+
+  // Se asegura de que las categorías canónicas de no-venta (y la de pago de tarjeta) existan en las listas de
+  // categorías y estén marcadas correctamente, sin tocar ninguna otra personalización que el usuario ya tenga
+  // (otras categorías que haya desmarcado manualmente se respetan). Devuelve true si modificó algo (para saber
+  // si hay que guardar).
   function ensureCategoriasNoVenta(config){
     let changed = false;
     if(!config.categoriasIngresos) config.categoriasIngresos = [];
     if(!config.categoriasGastos) config.categoriasGastos = [];
     if(!config.categoriasIngresos.includes(CAT_INGRESO_NO_VENTA)){ config.categoriasIngresos.push(CAT_INGRESO_NO_VENTA); changed = true; }
     if(!config.categoriasGastos.includes(CAT_GASTO_NO_VENTA)){ config.categoriasGastos.push(CAT_GASTO_NO_VENTA); changed = true; }
+    if(!config.categoriasGastos.includes(CAT_GASTO_PAGO_TARJETA)){ config.categoriasGastos.push(CAT_GASTO_PAGO_TARJETA); changed = true; }
     if(!config.categoriasNoVenta) config.categoriasNoVenta = [];
     if(!config.categoriasNoVenta.includes(CAT_INGRESO_NO_VENTA)){ config.categoriasNoVenta.push(CAT_INGRESO_NO_VENTA); changed = true; }
     if(!config.categoriasGastosNoVenta) config.categoriasGastosNoVenta = [];
     if(!config.categoriasGastosNoVenta.includes(CAT_GASTO_NO_VENTA)){ config.categoriasGastosNoVenta.push(CAT_GASTO_NO_VENTA); changed = true; }
+    if(!config.categoriasGastosNoVenta.includes(CAT_GASTO_PAGO_TARJETA)){ config.categoriasGastosNoVenta.push(CAT_GASTO_PAGO_TARJETA); changed = true; }
+    if(!config.categoriasGastosSoloFlujo) config.categoriasGastosSoloFlujo = [];
+    if(!config.categoriasGastosSoloFlujo.includes(CAT_GASTO_PAGO_TARJETA)){ config.categoriasGastosSoloFlujo.push(CAT_GASTO_PAGO_TARJETA); changed = true; }
+    // Créditos y Renegociaciones y Retiro Socios: siempre fuera de Rentabilidad/Fijos vs Variables, siempre
+    // presentes en Cuenta Corriente/Flujo de Caja. Se refuerza en cada carga — si alguien las desmarca por
+    // error en Configuración, vuelven a quedar bien la próxima vez que se abre la app.
+    if(!config.categoriasGastosNoVenta.includes(CAT_PF_CREDITOS)){ config.categoriasGastosNoVenta.push(CAT_PF_CREDITOS); changed = true; }
+    if(!config.categoriasGastosSoloFlujo.includes(CAT_PF_CREDITOS)){ config.categoriasGastosSoloFlujo.push(CAT_PF_CREDITOS); changed = true; }
+    if(!config.categoriasGastosNoVenta.includes(CAT_GASTO_RETIRO_SOCIOS)){ config.categoriasGastosNoVenta.push(CAT_GASTO_RETIRO_SOCIOS); changed = true; }
+    if(!config.categoriasGastosSoloFlujo.includes(CAT_GASTO_RETIRO_SOCIOS)){ config.categoriasGastosSoloFlujo.push(CAT_GASTO_RETIRO_SOCIOS); changed = true; }
+    return changed;
+  }
+
+  // Fusiona un duplicado accidental de categoría (ej. "Retiros Socios" vs "Retiro Socios") en gastos, Pagos
+  // Fijos y las listas de categorías — renombra todo lo que use el nombre viejo al nombre bueno. Devuelve true
+  // si modificó algo (para saber qué guardar). Corre en cada carga; si ya no queda ningún rastro, no hace nada.
+  function mergeCategoriaDuplicada(state, desde, hacia){
+    let changed = false;
+    state.gastos.forEach(g=>{ if(g.categoria === desde){ g.categoria = hacia; changed = true; } });
+    state.pagosFijosCatalogo.forEach(c=>{ if(c.categoria === desde){ c.categoria = hacia; changed = true; } });
+    const cfg = state.config;
+    ['categoriasGastos','categoriasGastosNoVenta','categoriasGastosSoloFlujo'].forEach(list=>{
+      if(cfg[list] && cfg[list].includes(desde)){
+        cfg[list] = cfg[list].filter(c=>c!==desde);
+        changed = true;
+      }
+    });
     return changed;
   }
 
@@ -5942,6 +5993,8 @@
     config: null,
     ingresos: [],
     gastos: [],
+    ingresosUSD: [],
+    gastosUSD: [],
     pagosFijosCatalogo: [],
     pagosFijosEstado: {},
     pagosFijosPagos: {},   // { [catId]: { [year]: [ [abonos mes 0], ... [abonos mes 11] ] } } — abonos parciales con fecha
@@ -5949,6 +6002,9 @@
     editingIngresoId: null,
     editingGastoId: null,
     editingPFId: null,
+    editingUSDMovId: null,
+    editingUSDMovTipo: null, // 'Ingreso' | 'Gasto' — para saber en qué arreglo buscar/guardar el movimiento en edición
+    usdForm: { tipo: 'Ingreso' }, // tipo seleccionado en el formulario de "Agregar movimiento" de Cuenta USD (no persiste)
     detalleMes: new Date().getMonth(),
     mesCortePF: new Date().getMonth(),
     confirmDialog: null, // { message, action, data, confirmLabel }
@@ -5969,7 +6025,8 @@
       pfEstado: { sortKey:'concepto', sortDir:'asc', search:'' },
       pfDeuda: { sortKey:'concepto', sortDir:'asc', search:'' },
       composicion: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', metodo:'', mes:'', tipo:'' },
-      cuentaCorriente: { sortKey:'fecha', sortDir:'desc', search:'', mes:'' }
+      cuentaCorriente: { sortKey:'fecha', sortDir:'desc', search:'', mes:'' },
+      cuentaUSD: { sortKey:'fecha', sortDir:'desc', search:'', mes:'', tipo:'' }
     }
   };
 
@@ -6100,6 +6157,18 @@
     return Number(n) < 0 ? `<span style="color:var(--expense)">${text}</span>` : text;
   }
 
+  // Igual que fmtMoney/fmtMoneyC, pero para la Cuenta USD: prefijo "US$" y 2 decimales (los movimientos en
+  // dólares suelen traer centavos, a diferencia de los montos en pesos).
+  function fmtMoneyUSD(n){
+    const v = Number(n)||0;
+    const sign = v < 0 ? '-' : '';
+    return sign + 'US$' + Math.abs(v).toLocaleString('es-CL', {minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+  function fmtMoneyUSDC(n){
+    const text = fmtMoneyUSD(n);
+    return Number(n) < 0 ? `<span style="color:var(--expense)">${text}</span>` : text;
+  }
+
   function fmtPct(n){
     if (!isFinite(n)) n = 0;
     return (n*100).toLocaleString('es-CL', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
@@ -6127,11 +6196,12 @@
 
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
-    'submit-ingreso','submit-gasto','submit-pf','submit-config',
+    'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
-    'save-monto-exigible-pf','add-abono-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
+    'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file'
   ]);
 
@@ -6421,11 +6491,14 @@
       const config = await loadKeySeeded('config', SEED_CONFIG);
       const ingresos = await loadKeySeeded('ingresos', SEED_INGRESOS);
       const gastos = await loadKeySeeded('gastos', SEED_GASTOS);
+      const ingresosUSD = await loadKey('ingresosUSD', []);
+      const gastosUSD = await loadKey('gastosUSD', []);
       const pagosFijosCatalogo = await loadKeySeeded('pagosFijosCatalogo', SEED_PF_CATALOGO);
       const pagosFijosEstado = await loadKeySeeded('pagosFijosEstado', SEED_PF_ESTADO);
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
+        saldoInicialUSD: 0,
         categoriasIngresos: CAT_INGRESOS_DEFAULT.slice(),
         categoriasGastos: CAT_GASTOS_DEFAULT.slice(),
         metodosPago: METODOS_DEFAULT.slice(),
@@ -6433,12 +6506,26 @@
       };
       if (!state.config.metodosPago) state.config.metodosPago = METODOS_DEFAULT.slice();
       if (!state.config.categoriasNoVenta) state.config.categoriasNoVenta = [];
+      if (state.config.saldoInicialUSD === undefined) state.config.saldoInicialUSD = 0;
       const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
       if(categoriasNoVentaCambiaron) await saveKey('config', state.config, {silent:true});
       state.ingresos = ingresos || [];
       state.gastos = gastos || [];
+      state.ingresosUSD = ingresosUSD || [];
+      state.gastosUSD = gastosUSD || [];
       state.pagosFijosCatalogo = pagosFijosCatalogo || [];
       state.pagosFijosEstado = pagosFijosEstado || {};
+
+      // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
+      // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
+      const categoriaDuplicadaCambio = mergeCategoriaDuplicada(state, 'Retiros Socios', CAT_GASTO_RETIRO_SOCIOS);
+      if(categoriaDuplicadaCambio){
+        await Promise.all([
+          saveKey('gastos', state.gastos, {silent:true}),
+          saveKey('pagosFijosCatalogo', state.pagosFijosCatalogo, {silent:true}),
+          saveKey('config', state.config, {silent:true})
+        ]);
+      }
 
       // pagosFijosPagos es una clave nueva: si nunca existió en Firebase (null real, no solo vacía),
       // se siembra con SEED_PF_PAGOS (el respaldo más reciente incluido en este archivo) si trae datos;
@@ -6532,10 +6619,34 @@
     return !noVenta.includes(g.categoria);
   }
 
+  // Monto de un gasto que cuenta para el resultado del negocio (Rentabilidad, Fijos vs Variables).
+  // - Si el gasto trae desglose interés/capital (abono de un compromiso marcado como crédito), SIEMPRE se usa
+  //   el interés — sin importar si la categoría está marcada "no venta". Así una categoría puede estar fuera
+  //   de Rentabilidad por defecto (ej. Créditos y Renegociaciones) y aun así dejar pasar el interés cuando
+  //   corresponde. El capital nunca cuenta como gasto operacional, esté o no desglosado.
+  // - Si no trae desglose, se usa el monto completo si la categoría es de venta, o 0 si es no-venta.
+  function montoNegocioGasto(g){
+    if(g.interes !== undefined && g.interes !== null && g.interes !== ''){
+      return Number(g.interes)||0;
+    }
+    return esGastoNegocio(g) ? (Number(g.monto)||0) : 0;
+  }
+
+  // Un gasto cuenta para Flujo de Caja (movimiento real de caja del negocio) si es un gasto de negocio normal,
+  // O si está en categoriasGastosSoloFlujo (hoy solo "Pago Tarjeta de Crédito"): no es un gasto nuevo — ya se
+  // contó como gasto de negocio cuando se hizo la compra — pero sí es plata real que salió del banco. El resto
+  // de las categorías no-venta (financiamiento, como devoluciones a inversionistas) siguen fuera de Flujo,
+  // igual que hoy, porque tampoco son parte del flujo operativo del negocio.
+  function esGastoFlujo(g){
+    if(esGastoNegocio(g)) return true;
+    const soloFlujo = state.config.categoriasGastosSoloFlujo || [];
+    return soloFlujo.includes(g.categoria);
+  }
+
   function getMonthlyStats(year){
     const months = Array.from({length:12}, (_,i)=>({
       mes:i, ingresosCobrados:0, ingresosTotales:0, ingresosVenta:0, ingresosNoVenta:0, ingresosCobradosVenta:0,
-      gastosPagados:0, gastosNegocio:0, gastosPorCategoria:{}
+      gastosPagados:0, gastosNegocio:0, gastosFlujo:0, gastosPorCategoria:{}
     }));
     state.config.categoriasGastos.forEach(cat=> months.forEach(m=> m.gastosPorCategoria[cat]=0));
 
@@ -6561,12 +6672,17 @@
       const m = d.getMonth();
       const monto = Number(g.monto)||0;
       months[m].gastosPagados += monto;
-      // Los gastos "Solo Cuenta Corriente" cuentan para el saldo real del banco (arriba) pero no para
-      // el negocio (Rentabilidad, Flujo de Caja, Resumen, Fijos vs Variables) — no están asociados a venta.
-      if(esGastoNegocio(g)){
-        months[m].gastosNegocio += monto;
-        if(months[m].gastosPorCategoria[g.categoria] === undefined) months[m].gastosPorCategoria[g.categoria]=0;
-        months[m].gastosPorCategoria[g.categoria] += monto;
+      // montoNegocioGasto() ya decide todo: monto completo si es venta, 0 si es no-venta, o solo el interés
+      // si el gasto trae desglose interés/capital (aunque la categoría sea no-venta, ej. créditos).
+      const montoNeg = montoNegocioGasto(g);
+      months[m].gastosNegocio += montoNeg;
+      if(months[m].gastosPorCategoria[g.categoria] === undefined) months[m].gastosPorCategoria[g.categoria]=0;
+      months[m].gastosPorCategoria[g.categoria] += montoNeg;
+      // gastosFlujo es una vista aparte para Flujo de Caja: además de los gastos de negocio, incluye los
+      // "solo flujo" (pago de tarjeta, créditos, retiros de socios) que sí mueven el banco aunque no sean
+      // gasto nuevo del negocio (o solo lo sean parcialmente, como el interés de un crédito).
+      if(esGastoFlujo(g)){
+        months[m].gastosFlujo += monto;
       }
     });
 
@@ -6581,7 +6697,7 @@
       m.saldoFinal = saldo + m.ingresosCobrados - m.gastosPagados;
       saldo = m.saldoFinal;
 
-      m.resultadoOperativo = m.ingresosCobradosVenta - m.gastosNegocio;
+      m.resultadoOperativo = m.ingresosCobradosVenta - m.gastosFlujo;
       m.operativoAcumInicial = acumOperativo;
       acumOperativo += m.resultadoOperativo;
       m.operativoAcumFinal = acumOperativo;
@@ -6625,6 +6741,59 @@
     return movs;
   }
 
+  // ---- Cuenta USD ----
+  // Registro simple, aparte de todo lo demás: no tiene concepto de "venta"/"no-venta", no alimenta Rentabilidad,
+  // Flujo de Caja ni ningún otro cálculo en pesos. Solo lleva el orden de los movimientos en dólares.
+  function getSaldoActualUSD(){
+    const ingresos = state.ingresosUSD.reduce((s,i)=>s+(Number(i.monto)||0),0);
+    const gastos = state.gastosUSD.reduce((s,g)=>s+(Number(g.monto)||0),0);
+    return (Number(state.config.saldoInicialUSD)||0) + ingresos - gastos;
+  }
+
+  // Libro de movimientos de Cuenta USD del año: mismo formato que getMovimientosCuentaCorriente (fecha, tipo,
+  // nombre, categoría, monto, saldo corrido), pero a partir del saldo inicial propio de esta cuenta.
+  function getMovimientosCuentaUSD(anio){
+    const movs = [];
+    state.ingresosUSD.forEach(ing=>{
+      if(!ing.fecha) return;
+      if(new Date(ing.fecha+'T00:00:00').getFullYear() !== anio) return;
+      movs.push({ id: ing.id, fecha: ing.fecha, tipo:'Ingreso', nombre: ing.nombre||'', desc: ing.descripcion||'', categoria: ing.categoria||'', monto: Number(ing.monto)||0 });
+    });
+    state.gastosUSD.forEach(g=>{
+      if(!g.fecha) return;
+      if(new Date(g.fecha+'T00:00:00').getFullYear() !== anio) return;
+      movs.push({ id: g.id, fecha: g.fecha, tipo:'Gasto', nombre: g.nombre||'', desc: g.descripcion||'', categoria: g.categoria||'', monto: -(Number(g.monto)||0) });
+    });
+    movs.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || a.tipo.localeCompare(b.tipo));
+    let saldo = Number(state.config.saldoInicialUSD)||0;
+    movs.forEach(m=>{ saldo += m.monto; m.saldo = saldo; });
+    return movs;
+  }
+
+  // ---- Tarjeta de Crédito ----
+  // Deuda actual de la tarjeta: todas las compras hechas con metodo "Tarjeta de Crédito" (histórico completo,
+  // no solo el año activo) menos todos los pagos registrados a la tarjeta (categoría CAT_GASTO_PAGO_TARJETA).
+  // No se resetea por año, igual que el saldo real de Cuenta Corriente — es deuda que se arrastra.
+  function getSaldoTarjeta(){
+    const compras = state.gastos
+      .filter(g => g.metodo === 'Tarjeta de Crédito' && g.categoria !== CAT_GASTO_PAGO_TARJETA)
+      .reduce((s,g)=> s + (Number(g.monto)||0), 0);
+    const pagos = state.gastos
+      .filter(g => g.categoria === CAT_GASTO_PAGO_TARJETA)
+      .reduce((s,g)=> s + (Number(g.monto)||0), 0);
+    return compras - pagos;
+  }
+
+  // Movimientos de tarjeta del año: compras (metodo Tarjeta de Crédito) + pagos del estado de cuenta
+  // (categoría Pago Tarjeta de Crédito), en orden cronológico. Vista informativa, no afecta otros cálculos.
+  function getMovimientosTarjeta(anio){
+    return state.gastos
+      .filter(g => g.fecha && new Date(g.fecha+'T00:00:00').getFullYear() === anio)
+      .filter(g => g.metodo === 'Tarjeta de Crédito' || g.categoria === CAT_GASTO_PAGO_TARJETA)
+      .map(g => ({ ...g, tipoMov: g.categoria === CAT_GASTO_PAGO_TARJETA ? 'Pago' : 'Compra' }))
+      .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+  }
+
   // ---- Pagos Fijos: abonos parciales y monto exigible ajustado por mes ----
   function getPagosDelMes(catId, year, month){
     const arr = state.pagosFijosPagos[catId] && state.pagosFijosPagos[catId][year];
@@ -6633,6 +6802,13 @@
 
   function getTotalPagadoMes(catId, year, month){
     return getPagosDelMes(catId, year, month).reduce((s,p)=> s + (Number(p.monto)||0), 0);
+  }
+
+  // Suma solo la parte de interés de los abonos de un mes (0 si el abono no tiene desglose interés/capital).
+  // Se usa para compromisos marcados "esCredito": el interés es el único componente que cuenta como gasto
+  // operacional en Rentabilidad, a diferencia del monto exigible completo que se usa para el resto de compromisos.
+  function getInteresPagadoMes(catId, year, month){
+    return getPagosDelMes(catId, year, month).reduce((s,p)=> s + (p.interes !== undefined ? (Number(p.interes)||0) : 0), 0);
   }
 
   // El monto exigible de un mes es el ajustado manualmente (ej. + interés por atraso) si existe,
@@ -6676,6 +6852,59 @@
     return getEstadoVigenciaPF(catalogo, year, month) === 'activo';
   }
 
+  // Crea un abono para un Pago Fijo (con desglose interés/capital opcional, para compromisos de crédito) y el
+  // gasto reflejo correspondiente en Gastos — mismo flujo que usan "Agregar abono" y "Marcar como pagado".
+  // Devuelve true si quedó todo guardado; false si hubo que revertir por un error de guardado (ya avisa con toast).
+  async function crearAbonoPF(p, {fecha, monto, interes, capital}){
+    const catalogo = state.pagosFijosCatalogo.find(c=>c.id===p.catId);
+    const abonoId = uid('ab');
+    if(!state.pagosFijosPagos[p.catId]) state.pagosFijosPagos[p.catId] = {};
+    // Defensivo: si el año existe pero con menos de 12 posiciones (arreglo recortado por Firebase),
+    // lo normalizamos aquí también antes de indexar por mes, para no volver a romper con undefined.push().
+    if(!Array.isArray(state.pagosFijosPagos[p.catId][p.year]) || state.pagosFijosPagos[p.catId][p.year].length < 12){
+      const src = state.pagosFijosPagos[p.catId][p.year] || {};
+      state.pagosFijosPagos[p.catId][p.year] = Array.from({length:12}, (_,m)=> (src[m] || src[String(m)] || []));
+    }
+    const abono = { id: abonoId, fecha, monto };
+    if(interes !== undefined){ abono.interes = interes; abono.capital = capital; }
+    state.pagosFijosPagos[p.catId][p.year][p.month].push(abono);
+
+    // silent:true da más reintentos (5 en vez de 3) — clave en conexiones de celular inestables — y
+    // deja que seamos nosotros quienes avisemos, no el toast genérico de saveKey.
+    const guardadoOk = await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
+    if(!guardadoOk){
+      // No quedó guardado en Firebase: revertimos el cambio local para no mostrar un abono "fantasma"
+      // y NO creamos el gasto asociado (eso es lo que causaba que apareciera en Gastos pero no en Pagos
+      // Fijos, mostrando más deuda de la real). No re-renderizamos para no borrar lo que escribiste.
+      state.pagosFijosPagos[p.catId][p.year][p.month] = state.pagosFijosPagos[p.catId][p.year][p.month].filter(a=>a.id!==abonoId);
+      showToast('No se pudo guardar el abono — revisa tu conexión e inténtalo de nuevo. No se registró en Gastos.');
+      return false;
+    }
+
+    const abonosDelMes = getPagosDelMes(p.catId, p.year, p.month).length;
+    const gasto = {
+      id: uid('gas'),
+      fecha,
+      proveedor: catalogo ? catalogo.concepto : '',
+      descripcion: `Pago fijo: ${catalogo?catalogo.concepto:''} (${MESES[p.month]} ${p.year})${abonosDelMes>1?` — abono ${abonosDelMes}`:''}`,
+      categoria: catalogo ? catalogo.categoria : (state.config.categoriasGastos[0]||''),
+      monto,
+      metodo: state.config.metodosPago[0]||'',
+      origenPagoFijo: `pf:${p.catId}:${p.year}-${String(p.month+1).padStart(2,'0')}:${abonoId}`
+    };
+    if(interes !== undefined){ gasto.interes = interes; gasto.capital = capital; }
+    state.gastos.push(gasto);
+    const gastoGuardadoOk = await saveKey('gastos', state.gastos, {silent:true});
+    if(!gastoGuardadoOk){
+      // El abono sí quedó guardado en Pagos Fijos (ya no está "perdido"), pero el gasto reflejo no.
+      // Avisamos para que reintente sabiendo que la deuda ya está bien contabilizada.
+      showToast('El abono quedó guardado en Pagos Fijos, pero no se pudo registrar en Gastos — revisa tu conexión.');
+      render();
+      return false;
+    }
+    return true;
+  }
+
   function getPagosFijosStats(year){
     const items = state.pagosFijosCatalogo.map(cat=>{
       const montoBase = Number(cat.montoMensual)||0;
@@ -6705,6 +6934,40 @@
     });
     const pendienteMes = totalEsperado.map((v,m)=> v - totalPagado[m]);
     return { items, totalEsperado, totalPagado, pendienteMes, totalDeuda };
+  }
+
+  // Igual que getPagosFijosStats, pero ajustado para Rentabilidad/Fijos vs Variables:
+  // - Compromisos con desglose interés/capital (esCreditoCatalogo: check manual o categoría Créditos y
+  //   Renegociaciones) SIEMPRE aportan, pero solo el interés efectivamente pagado ese mes — nunca el capital,
+  //   sin importar si la categoría está marcada no-venta.
+  // - Compromisos sin desglose y con categoría no-venta (ej. Devolución Inversionista, Retiro Socios) quedan
+  //   totalmente fuera — no aportan nada.
+  // - El resto aporta el monto exigible completo, como siempre.
+  // Resumen, la pestaña Pagos Fijos y Utilidad Real siguen usando getPagosFijosStats sin filtrar, porque ahí
+  // sí corresponde ver la deuda/obligación completa.
+  function getPagosFijosStatsVenta(year){
+    const full = getPagosFijosStats(year);
+    const totalEsperado = Array(12).fill(0);
+    const totalPagado = Array(12).fill(0);
+    const items = [];
+    full.items.forEach(it=>{
+      const tieneDesglose = esCreditoCatalogo(it.catalogo);
+      const esVenta = esGastoNegocio({categoria: it.catalogo.categoria});
+      if(!tieneDesglose && !esVenta) return; // totalmente fuera de Rentabilidad, no aporta nada
+      items.push(it);
+      for(let m=0; m<12; m++){
+        if(tieneDesglose){
+          const interesMes = getInteresPagadoMes(it.catalogo.id, year, m);
+          totalEsperado[m] += interesMes;
+          totalPagado[m] += interesMes;
+        } else {
+          totalEsperado[m] += it.montosPorMes[m];
+          totalPagado[m] += Math.min(it.abonadoPorMes[m], it.montosPorMes[m]);
+        }
+      }
+    });
+    const pendienteMes = totalEsperado.map((v,m)=> v - totalPagado[m]);
+    return { items, totalEsperado, totalPagado, pendienteMes };
   }
 
   // Utilidad/Margen "real" ACUMULADA HASTA EL MES DE CORTE (no incluye meses futuros, que aún no son deuda).
@@ -6737,11 +7000,11 @@
     const months = Array.from({length:12}, ()=> ({ fijos:0, variables:0 }));
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
-      if(!esGastoNegocio(g)) return;
       const d = new Date(g.fecha+'T00:00:00');
       if(d.getFullYear() !== anio) return;
+      const monto = montoNegocioGasto(g);
+      if(monto === 0) return; // no aporta nada a Rentabilidad, no lo contamos ni como fijo ni como variable
       const m = d.getMonth();
-      const monto = Number(g.monto)||0;
       if(g.origenPagoFijo) months[m].fijos += monto;
       else months[m].variables += monto;
     });
@@ -6754,7 +7017,7 @@
 
   // Matriz de Categoría x Mes, filtrable por tipo ('fijos' | 'variables' | 'todos') — para ver $ o % de cada categoría mes a mes
   function getCategoriaMensual(anio, tipo){
-    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===anio && esGastoNegocio(g));
+    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===anio && montoNegocioGasto(g) !== 0);
     const filtrados = tipo==='todos' ? gastosAnio : gastosAnio.filter(g=> tipo==='fijos' ? !!g.origenPagoFijo : !g.origenPagoFijo);
 
     const matrix = {};
@@ -6763,7 +7026,7 @@
     filtrados.forEach(g=>{
       const d = new Date(g.fecha+'T00:00:00');
       const m = d.getMonth();
-      const monto = Number(g.monto)||0;
+      const monto = montoNegocioGasto(g);
       if(!matrix[g.categoria]) matrix[g.categoria] = Array(12).fill(0);
       matrix[g.categoria][m] += monto;
       totalPorMes[m] += monto;
@@ -7063,6 +7326,7 @@
     if(!p) return '';
     const catalogo = state.pagosFijosCatalogo.find(c=>c.id===p.catId);
     if(!catalogo) return '';
+    const esCredito = esCreditoCatalogo(catalogo);
     const exigibleBase = Number(catalogo.montoMensual)||0;
     const exigibleActual = getMontoExigiblePF(p.catId, catalogo, p.year, p.month);
     const abonos = getPagosDelMes(p.catId, p.year, p.month).slice().sort((a,b)=>(a.fecha||'').localeCompare(b.fecha||''));
@@ -7073,7 +7337,7 @@
     return `
       <div class="fa-modal-overlay" data-action="close-pf-month">
         <div class="fa-modal fa-modal-wide" data-action="confirm-noop">
-          <div class="fa-modal-title">${escapeHtml(catalogo.concepto)} — ${MESES[p.month]} ${p.year}</div>
+          <div class="fa-modal-title">${escapeHtml(catalogo.concepto)} — ${MESES[p.month]} ${p.year}${esCredito?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">Crédito</span>':''}</div>
 
           <div class="fa-field" style="margin-bottom:14px;">
             <label>Monto exigible este mes</label>
@@ -7094,11 +7358,12 @@
           ${abonos.length === 0 ? `<div class="fa-hint" style="margin-top:0;">Todavía no hay abonos este mes.</div>` : `
           <div class="fa-table-wrap" style="margin-bottom:8px;">
           <table class="fa-table">
-            <thead><tr><th>Fecha</th><th class="num">Monto</th><th></th></tr></thead>
+            <thead><tr><th>Fecha</th>${esCredito?'<th class="num">Interés</th><th class="num">Capital</th>':''}<th class="num">Monto</th><th></th></tr></thead>
             <tbody>
               ${abonos.map(a=>`
                 <tr>
                   <td>${fmtDate(a.fecha)}</td>
+                  ${esCredito?`<td class="num money">${fmtMoneyC(a.interes||0)}</td><td class="num money">${fmtMoneyC(a.capital||0)}</td>`:''}
                   <td class="num money">${fmtMoneyC(a.monto)}</td>
                   <td><button type="button" class="fa-icon-btn danger" data-action="delete-abono-pf" data-abono-id="${a.id}">Eliminar</button></td>
                 </tr>
@@ -7107,11 +7372,22 @@
           </table>
           </div>`}
 
+          ${esCredito ? `
+          <div class="fa-form-grid" style="grid-template-columns:1fr 1fr 1fr auto; align-items:end; margin-bottom:4px;">
+            <div class="fa-field"><label>Fecha del abono</label><input type="date" id="fa-pf-abono-fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Interés</label><input type="number" id="fa-pf-abono-interes" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Capital</label><input type="number" id="fa-pf-abono-capital" min="0" step="1" placeholder="0"></div>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="add-abono-pf">Agregar abono</button>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">Solo el interés cuenta como gasto operacional (Rentabilidad, Fijos vs Variables). El capital cuenta en Pagos Fijos, Flujo de Caja y Cuenta Corriente, pero no reduce tu utilidad — es abono a la deuda.</div>
+          ` : `
           <div class="fa-form-grid" style="grid-template-columns:1.2fr 1fr auto; align-items:end; margin-bottom:4px;">
             <div class="fa-field"><label>Fecha del abono</label><input type="date" id="fa-pf-abono-fecha" value="${todayISO()}"></div>
             <div class="fa-field"><label>Monto</label><input type="number" id="fa-pf-abono-monto" min="0" step="1" placeholder="${restante>0?restante:0}"></div>
             <button type="button" class="fa-btn fa-btn-primary" data-action="add-abono-pf">Agregar abono</button>
           </div>
+          ${restante>0 ? `<button type="button" class="fa-btn fa-btn-ghost" style="margin-top:8px;" data-action="marcar-pagado-pf">✓ Marcar como pagado (${fmtMoneyC(restante)}, hoy)</button>` : ''}
+          `}
 
           ${abonos.length===0 ? `
           <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:12px;">
@@ -7166,9 +7442,11 @@
       {id:'resumen', label:'Resumen', icon:'&#9673;'},
       {id:'ingresos', label:'Ingresos', icon:'&#8593;'},
       {id:'gastos', label:'Gastos', icon:'&#8595;'},
+      {id:'tarjeta', label:'Tarjeta de Crédito', icon:'&#128179;'},
       {id:'pagosfijos', label:'Pagos Fijos', icon:'&#8987;'},
       {id:'composicion', label:'Fijos vs Variables', icon:'&#9682;'},
       {id:'cuentacorriente', label:'Cuenta Corriente', icon:'&#127974;'},
+      {id:'cuentausd', label:'Cuenta USD', icon:'&#128181;'},
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'rentabilidad', label:'Rentabilidad', icon:'&#9636;'},
       ...(state.role !== 'viewer' ? [{id:'asesor', label:'Asesor IA', icon:'&#129302;'}] : []),
@@ -7199,9 +7477,11 @@
       case 'resumen': return renderResumen();
       case 'ingresos': return renderIngresos();
       case 'gastos': return renderGastos();
+      case 'tarjeta': return renderTarjeta();
       case 'pagosfijos': return renderPagosFijos();
       case 'composicion': return renderComposicion();
       case 'cuentacorriente': return renderCuentaCorriente();
+      case 'cuentausd': return renderCuentaUSD();
       case 'flujo': return renderFlujo();
       case 'rentabilidad': return renderRentabilidad();
       case 'asesor': return renderAsesorIA();
@@ -7226,6 +7506,7 @@
     const utilidadAnio = ingresosAnio - gastosAnio;
     const margenAnio = ingresosAnio !== 0 ? utilidadAnio/ingresosAnio : 0;
     const saldoActual = getSaldoActual();
+    const saldoActualUSD = getSaldoActualUSD();
     const pf = getPagosFijosStats(state.config.anio);
     const deudaPF = pf.totalDeuda[state.mesCortePF] || 0;
 
@@ -7262,6 +7543,10 @@
         <div class="fa-kpi expense">
           <div class="fa-kpi-label">Deuda pagos fijos</div>
           <div class="fa-kpi-value expense money">${fmtMoneyC(deudaPF)}</div>
+        </div>
+        <div class="fa-kpi">
+          <div class="fa-kpi-label">Saldo Cuenta USD</div>
+          <div class="fa-kpi-value money">${fmtMoneyUSDC(saldoActualUSD)}</div>
         </div>
       </div>
       <div class="fa-hint" style="margin-top:-10px;">Ingresos, Utilidad y Margen solo consideran ventas directas (no incluyen créditos ni aportes de inversionistas — este año esos suman ${fmtMoneyC(ingresosNoVentaAnio)}). El Saldo Cuenta Corriente sí incluye todo. Detalle completo en la pestaña Cuenta Corriente.</div>
@@ -7619,7 +7904,7 @@
                   <td class="fa-checkbox-col"><input type="checkbox" data-action="toggle-select-gasto" data-id="${g.id}" ${state.selected.gastos.has(g.id)?'checked':''}></td>
                   <td>${fmtDate(g.fecha)}</td>
                   <td>${escapeHtml(g.proveedor)||'—'}</td>
-                  <td>${escapeHtml(g.descripcion)||'—'}${g.origenPagoFijo?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">🔗 Pago fijo</span>':''}${!esGastoNegocio(g)?' <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">🏦 Solo Cta. Cte.</span>':''}</td>
+                  <td>${escapeHtml(g.descripcion)||'—'}${g.origenPagoFijo?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">🔗 Pago fijo</span>':''}${g.categoria===CAT_GASTO_PAGO_TARJETA?' <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">💳 Pago tarjeta</span>':(!esGastoNegocio(g)?' <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">🏦 Solo Cta. Cte.</span>':'')}</td>
                   <td>${escapeHtml(g.categoria)}</td>
                   <td class="num money">${fmtMoneyC(g.monto)}</td>
                   <td>${escapeHtml(g.metodo)||'—'}</td>
@@ -7904,7 +8189,7 @@
               ${rows.map(r=>`
                 <tr>
                   <td>${fmtDate(r.fecha)}</td>
-                  <td><span class="fa-badge ${r.tipo==='Ingreso'?'pagado':'pendiente'}">${r.tipo}</span>${r.tipo==='Ingreso' ? (r.venta? '' : ` <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">No-venta</span>`) : (r.soloCuentaCorriente ? ` <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">Solo Cta. Cte.</span>` : '')}</td>
+                  <td><span class="fa-badge ${r.tipo==='Ingreso'?'pagado':'pendiente'}">${r.tipo}</span>${r.tipo==='Ingreso' ? (r.venta? '' : ` <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">No-venta</span>`) : (r.categoria===CAT_GASTO_PAGO_TARJETA ? ` <span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">💳 Pago tarjeta</span>` : (r.soloCuentaCorriente ? ` <span class="fa-badge" style="background:#F3F4F6;color:var(--ink-soft);">Solo Cta. Cte.</span>` : ''))}</td>
                   <td>${escapeHtml(r.nombre)||'—'}${r.desc ? `<div class="fa-hint" style="margin:0">${escapeHtml(r.desc)}</div>` : ''}</td>
                   <td>${escapeHtml(r.categoria)||'—'}</td>
                   <td class="num money" style="color:${r.monto>=0?'var(--income)':'var(--expense)'}">${r.monto>=0?'+':''}${fmtMoneyC(r.monto)}</td>
@@ -7917,6 +8202,133 @@
                 <td colspan="4" style="text-align:right; font-weight:700;">Neto del filtro (${rows.length} movimiento${rows.length===1?'':'s'}):</td>
                 <td class="num money" style="font-weight:700;">${fmtMoneyC(rowsNeto)}</td>
                 <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>`}
+      </div>
+    `;
+  }
+
+  // ---------------- CUENTA USD ----------------
+  function renderCuentaUSD(){
+    const anio = state.config.anio;
+    const saldoActual = getSaldoActualUSD();
+    const movsAnio = getMovimientosCuentaUSD(anio);
+    const saldoCierreAnio = movsAnio.length ? movsAnio[movsAnio.length-1].saldo : (Number(state.config.saldoInicialUSD)||0);
+
+    const editingId = state.editingUSDMovId;
+    const editingTipo = state.editingUSDMovTipo;
+    const editing = editingId ? (editingTipo==='Ingreso' ? state.ingresosUSD : state.gastosUSD).find(m=>m.id===editingId) : null;
+    const formTipo = editing ? editingTipo : state.usdForm.tipo;
+    const catOptions = formTipo === 'Ingreso' ? state.config.categoriasIngresos : state.config.categoriasGastos;
+
+    const ts = state.tables.cuentaUSD;
+    let rows = movsAnio.slice();
+    if(ts.mes) rows = rows.filter(r=> MESES[new Date(r.fecha+'T00:00:00').getMonth()] === ts.mes);
+    if(ts.tipo) rows = rows.filter(r=> r.tipo === ts.tipo);
+    if(ts.search){
+      const q = ts.search.toLowerCase();
+      rows = rows.filter(r=> (r.nombre||'').toLowerCase().includes(q) || (r.desc||'').toLowerCase().includes(q) || (r.categoria||'').toLowerCase().includes(q));
+    }
+    rows = sortRowsGeneric(rows, ts.sortKey, ts.sortDir);
+
+    const rowsIngresos = rows.filter(r=>r.tipo==='Ingreso').reduce((s,r)=>s+r.monto,0);
+    const rowsGastos = rows.filter(r=>r.tipo==='Gasto').reduce((s,r)=>s-r.monto,0);
+    const rowsNeto = rowsIngresos - rowsGastos;
+
+    const totalIngresosAnio = movsAnio.filter(m=>m.tipo==='Ingreso').reduce((s,m)=>s+m.monto,0);
+    const totalGastosAnio = movsAnio.filter(m=>m.tipo==='Gasto').reduce((s,m)=>s-m.monto,0);
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Cuenta USD</h1><div class="fa-sub">Registro simple de movimientos en dólares — no afecta Rentabilidad, Flujo de Caja ni Cuenta Corriente en pesos.</div></div>
+        ${yearSelect('cuentausd')}
+      </div>
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr); max-width:900px;">
+        <div class="fa-kpi"><div class="fa-kpi-label">Saldo actual (a hoy)</div><div class="fa-kpi-value money">${fmtMoneyUSDC(saldoActual)}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Saldo al cierre de ${anio}</div><div class="fa-kpi-value money">${fmtMoneyUSDC(saldoCierreAnio)}</div></div>
+        <div class="fa-kpi income"><div class="fa-kpi-label">Total ingresos ${anio}</div><div class="fa-kpi-value income money">${fmtMoneyUSDC(totalIngresosAnio)}</div></div>
+        <div class="fa-kpi expense"><div class="fa-kpi-label">Total gastos ${anio}</div><div class="fa-kpi-value expense money">${fmtMoneyUSDC(totalGastosAnio)}</div></div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Saldo inicial de esta cuenta</div>
+        <div class="fa-section-note">Registra aquí la plata que ya tenías en esta cuenta antes de empezar a llevarla en la app (no se resetea por año — es el punto de partida único de esta cuenta).</div>
+        <div style="display:flex; gap:8px; max-width:320px;">
+          <input type="number" id="fa-usd-saldo-inicial" min="0" step="0.01" value="${Number(state.config.saldoInicialUSD)||0}" style="flex:1; padding:8px 9px; border:1px solid var(--border); border-radius:7px; font-size:13px;">
+          <button type="button" class="fa-btn fa-btn-ghost" data-action="save-saldo-inicial-usd">Guardar</button>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">${editing? 'Editar movimiento' : 'Agregar movimiento'}</div>
+        <div data-form="usd-mov">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Tipo</label>
+              <select name="tipo" data-action="change-usd-form-tipo" ${editing?'disabled':''}>
+                <option value="Ingreso" ${formTipo==='Ingreso'?'selected':''}>Ingreso</option>
+                <option value="Gasto" ${formTipo==='Gasto'?'selected':''}>Gasto</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editing? editing.fecha : todayISO()}"></div>
+            <div class="fa-field"><label>Nombre (cliente / proveedor)</label><input type="text" name="nombre" placeholder="Nombre" value="${editing? escapeHtml(editing.nombre):''}"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Descripción" value="${editing? escapeHtml(editing.descripcion):''}"></div>
+            <div class="fa-field"><label>Categoría</label>
+              <select name="categoria">${catOptions.map(c=>`<option ${editing && editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Monto (USD)</label><input type="number" name="monto" min="0" step="0.01" placeholder="0" value="${editing? editing.monto:''}"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-usd-mov">${editing? 'Guardar cambios':'Agregar movimiento'}</button>
+            ${editing? `<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-usd-mov">Cancelar</button>` : ''}
+          </div>
+          ${editing? `<div class="fa-hint">El Tipo no se puede cambiar mientras editas — elimina el movimiento y créalo de nuevo si te equivocaste entre Ingreso y Gasto.</div>` : ''}
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Movimientos — ${anio}</div>
+        ${filterBar('cuentaUSD', { placeholder:'Buscar nombre, descripción o categoría...', selects:[
+          { field:'mes', allLabel:'Todos los meses', options: MESES },
+          { field:'tipo', allLabel:'Ingresos y Gastos', options: ['Ingreso','Gasto'] }
+        ] })}
+        <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:640px; margin-bottom:12px;">
+          <div class="fa-kpi income"><div class="fa-kpi-label">Ingresos (filtro)</div><div class="fa-kpi-value income money">${fmtMoneyUSDC(rowsIngresos)}</div></div>
+          <div class="fa-kpi expense"><div class="fa-kpi-label">Gastos (filtro)</div><div class="fa-kpi-value expense money">${fmtMoneyUSDC(rowsGastos)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Neto (filtro)</div><div class="fa-kpi-value money">${fmtMoneyUSDC(rowsNeto)}</div></div>
+        </div>
+        ${rows.length === 0 ? `<div class="fa-empty">No hay movimientos con estos filtros.</div>` : `
+        <div class="fa-filter-count">Mostrando ${rows.length} de ${movsAnio.length}</div>
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr>
+              ${thSort('cuentaUSD','fecha','Fecha')}${thSort('cuentaUSD','tipo','Tipo')}${thSort('cuentaUSD','nombre','Cliente / Proveedor')}${thSort('cuentaUSD','categoria','Categoría')}${thSort('cuentaUSD','monto','Monto',true)}${thSort('cuentaUSD','saldo','Saldo',true)}<th></th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r=>`
+                <tr>
+                  <td>${fmtDate(r.fecha)}</td>
+                  <td><span class="fa-badge ${r.tipo==='Ingreso'?'pagado':'pendiente'}">${r.tipo}</span></td>
+                  <td>${escapeHtml(r.nombre)||'—'}${r.desc ? `<div class="fa-hint" style="margin:0">${escapeHtml(r.desc)}</div>` : ''}</td>
+                  <td>${escapeHtml(r.categoria)||'—'}</td>
+                  <td class="num money" style="color:${r.monto>=0?'var(--income)':'var(--expense)'}">${r.monto>=0?'+':''}${fmtMoneyUSD(r.monto)}</td>
+                  <td class="num money" style="font-weight:700">${fmtMoneyUSD(r.saldo)}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="edit-usd-mov" data-id="${r.id}" data-tipo="${r.tipo}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-usd-mov" data-id="${r.id}" data-tipo="${r.tipo}">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="4" style="text-align:right; font-weight:700;">Neto del filtro (${rows.length} movimiento${rows.length===1?'':'s'}):</td>
+                <td class="num money" style="font-weight:700;">${fmtMoneyUSD(rowsNeto)}</td>
+                <td colspan="2"></td>
               </tr>
             </tfoot>
           </table>
@@ -7955,6 +8367,10 @@
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pf">${editing? 'Guardar cambios':'Agregar compromiso'}</button>
             ${editing? `<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-pf">Cancelar</button>` : ''}
           </div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:10px;">
+            <input type="checkbox" name="esCredito" ${editing && editing.esCredito ? 'checked':''}>
+            Es un crédito (permite desglosar interés y capital en cada abono — solo el interés cuenta como gasto operacional en Rentabilidad y Fijos vs Variables; el capital solo cuenta en Pagos Fijos, Flujo de Caja y Cuenta Corriente)
+          </label>
           <div class="fa-hint">Deja "Fecha de inicio" y "Vigente hasta" vacías si el compromiso no tiene fechas límite. Fuera de ese rango, el mes deja de contarse como pendiente. El "Monto mensual" es la base — puedes ajustarlo para un mes puntual (ej. intereses por atraso) haciendo clic en ese mes.</div>
         </div>
       </div>
@@ -8086,14 +8502,74 @@
     `;
   }
 
+  // ---------------- TARJETA DE CRÉDITO ----------------
+  function renderTarjeta(){
+    const saldo = getSaldoTarjeta();
+    const movs = getMovimientosTarjeta(state.config.anio);
+    const compras = movs.filter(m=>m.tipoMov==='Compra');
+    const pagos = movs.filter(m=>m.tipoMov==='Pago');
+    const totalComprasAnio = compras.reduce((s,m)=>s+(Number(m.monto)||0),0);
+    const totalPagosAnio = pagos.reduce((s,m)=>s+(Number(m.monto)||0),0);
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Tarjeta de Crédito</h1><div class="fa-sub">Compras hechas con la tarjeta y pagos del estado de cuenta.</div></div>
+        ${yearSelect('tarjeta')}
+      </div>
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:720px;">
+        <div class="fa-kpi expense"><div class="fa-kpi-label">Deuda actual (histórico completo)</div><div class="fa-kpi-value expense money">${fmtMoneyC(saldo)}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Compras ${state.config.anio}</div><div class="fa-kpi-value money">${fmtMoneyC(totalComprasAnio)}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Pagos a la tarjeta ${state.config.anio}</div><div class="fa-kpi-value money">${fmtMoneyC(totalPagosAnio)}</div></div>
+      </div>
+      <div class="fa-hint">Las compras con tarjeta ya cuentan como gasto de negocio el día que se hacen (Rentabilidad, Fijos vs Variables). Los pagos del estado de cuenta solo mueven tu Cuenta Corriente y Flujo de Caja — no se cuentan de nuevo como gasto, para no duplicar.</div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Registrar pago a la tarjeta</div>
+        <div class="fa-section-note">Cuando pagues el estado de cuenta (total o parcial) desde tu Cuenta Corriente, regístralo aquí.</div>
+        <div data-form="pago-tarjeta">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Descripción (opcional)</label><input type="text" name="descripcion" placeholder="Ej: Pago total estado de cuenta agosto"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-tarjeta">Registrar pago</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Movimientos ${state.config.anio} (${movs.length})</div>
+        ${movs.length === 0 ? `<div class="fa-empty">Sin movimientos de tarjeta en ${state.config.anio}.</div>` : `
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr><th>Fecha</th><th>Tipo</th><th>Proveedor / Descripción</th><th>Categoría</th><th class="num">Monto</th></tr></thead>
+            <tbody>
+              ${movs.map(m=>`
+                <tr>
+                  <td>${fmtDate(m.fecha)}</td>
+                  <td>${m.tipoMov==='Pago' ? '<span class="fa-badge" style="background:#EEF0FF;color:var(--ink-soft);">💳 Pago</span>' : 'Compra'}</td>
+                  <td>${escapeHtml(m.proveedor||m.descripcion||'')||'—'}</td>
+                  <td>${escapeHtml(m.categoria)}</td>
+                  <td class="num money" style="${m.tipoMov==='Pago'?'color:var(--income)':'color:var(--expense)'}">${m.tipoMov==='Pago'?'− ':''}${fmtMoneyC(m.monto)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>`}
+      </div>
+    `;
+  }
+
   // ---------------- FLUJO DE CAJA ----------------
   function renderFlujo(){
     const months = getMonthlyStats(state.config.anio);
     const totalIngresos = months.reduce((s,m)=>s+m.ingresosCobradosVenta,0);
-    const totalGastos = months.reduce((s,m)=>s+m.gastosNegocio,0);
+    const totalGastos = months.reduce((s,m)=>s+m.gastosFlujo,0);
     const acumFinAnio = months[11].operativoAcumFinal;
 
-    let rows = months.map((m,i)=>({ mesIdx:i, mes:MESES[i], ingresos:m.ingresosCobradosVenta, gastos:m.gastosNegocio, utilidad:m.resultadoOperativo, saldo:m.operativoAcumFinal }));
+    let rows = months.map((m,i)=>({ mesIdx:i, mes:MESES[i], ingresos:m.ingresosCobradosVenta, gastos:m.gastosFlujo, utilidad:m.resultadoOperativo, saldo:m.operativoAcumFinal }));
     const ts = state.tables.flujoCaja;
     if(ts.search) rows = rows.filter(r=> r.mes.toLowerCase().includes(ts.search.toLowerCase()));
     rows = sortRowsGeneric(rows, ts.sortKey, ts.sortDir);
@@ -8130,7 +8606,7 @@
             </tbody>
           </table>
         </div>
-        <div class="fa-hint">Los ingresos aquí solo son ventas directas (excluye créditos y aportes de inversionistas) y cuentan cuando están marcados como "Pagado". El "Acumulado del año" es el resultado operativo acumulado, no tu saldo bancario. Para el saldo real de tu cuenta (incluyendo financiamiento), revisa la pestaña Cuenta Corriente.</div>
+        <div class="fa-hint">Los ingresos aquí solo son ventas directas (excluye créditos y aportes de inversionistas) y cuentan cuando están marcados como "Pagado". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito (esos pagos no se cuentan dos veces: la compra ya sumó gasto cuando se hizo, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" es el resultado operativo acumulado, no tu saldo bancario. Para el saldo real de tu cuenta (incluyendo financiamiento), revisa la pestaña Cuenta Corriente.</div>
       </div>
     `;
   }
@@ -8139,7 +8615,7 @@
   function renderRentabilidad(){
     const months = getMonthlyStats(state.config.anio);
     const composicion = getComposicionMensual(state.config.anio);
-    const pf = getPagosFijosStats(state.config.anio);
+    const pf = getPagosFijosStatsVenta(state.config.anio);
 
     // Resultado de cada mes, cerrado como ejercicio propio (no es flujo de caja):
     // - Ingresos Efectivos: solo ventas ya cobradas (ing.estado === 'Pagado'), nunca proyectadas.
@@ -8348,6 +8824,7 @@
             </label>`;
           }).join('')}
         </div>
+        <div class="fa-hint">Tres categorías aparecen desmarcadas a propósito, y se mantienen así aunque las marques (se corrigen solas al recargar): "${CAT_GASTO_PAGO_TARJETA}" — son pagos que ya se contaron como gasto cuando compraste con la tarjeta, no deben sumar de nuevo. "${CAT_PF_CREDITOS}" y "${CAT_GASTO_RETIRO_SOCIOS}" — nunca son gasto operacional del negocio (deuda o retiro, no gasto), salvo el interés de los créditos, que sí cuenta si registras el abono con desglose interés/capital. Las tres siguen apareciendo en Flujo de Caja y Cuenta Corriente porque son plata real que sale del banco.</div>
       </div>
 
       <div class="fa-card">
@@ -8951,6 +9428,13 @@
         }
         render();
       }
+      else if(cd.action === 'do-delete-usd-mov'){
+        const arrKey = cd.data.tipo === 'Ingreso' ? 'ingresosUSD' : 'gastosUSD';
+        state[arrKey] = state[arrKey].filter(m=>m.id!==cd.data.id);
+        await saveKey(arrKey, state[arrKey]);
+        showToast('Movimiento eliminado');
+        render();
+      }
       else if(cd.action === 'do-delete-pf'){
         state.pagosFijosCatalogo = state.pagosFijosCatalogo.filter(c=>c.id!==cd.data);
         delete state.pagosFijosEstado[cd.data];
@@ -9045,6 +9529,8 @@
             if(mig.cambios) state.gastos = mig.gastos;
           }
           state.pagosFijosMontos = (data.pagosFijosMontos && typeof data.pagosFijosMontos === 'object') ? data.pagosFijosMontos : {};
+          // Igual que al cargar la app: fusiona el duplicado accidental de categoría si el respaldo lo trae.
+          mergeCategoriaDuplicada(state, 'Retiros Socios', CAT_GASTO_RETIRO_SOCIOS);
 
           await saveKey('config', state.config);
           await saveKey('ingresos', state.ingresos);
@@ -9143,6 +9629,27 @@
     }
     else if(action === 'cancel-edit-gasto'){
       state.editingGastoId = null; render();
+    }
+    else if(action === 'edit-usd-mov'){
+      state.editingUSDMovId = btn.dataset.id;
+      state.editingUSDMovTipo = btn.dataset.tipo;
+      render();
+      const card = root.querySelector('.fa-card');
+      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+    else if(action === 'cancel-edit-usd-mov'){
+      state.editingUSDMovId = null;
+      state.editingUSDMovTipo = null;
+      render();
+    }
+    else if(action === 'delete-usd-mov'){
+      state.confirmDialog = {
+        message: '¿Eliminar este movimiento de la Cuenta USD? Esta acción no se puede deshacer.',
+        action: 'do-delete-usd-mov',
+        data: { id: btn.dataset.id, tipo: btn.dataset.tipo },
+        confirmLabel: 'Eliminar'
+      };
+      render();
     }
     else if(action === 'delete-gasto'){
       state.confirmDialog = {
@@ -9252,56 +9759,40 @@
     else if(action === 'add-abono-pf'){
       const p = state.pfMonthPanel;
       if(!p) return;
-      const fechaInput = document.getElementById('fa-pf-abono-fecha');
-      const montoInput = document.getElementById('fa-pf-abono-monto');
-      const fecha = fechaInput ? fechaInput.value : '';
-      const monto = montoInput ? Number(montoInput.value)||0 : 0;
-      if(!fecha){ showToast('Elige una fecha para el abono.'); return; }
-      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
       const catalogo = state.pagosFijosCatalogo.find(c=>c.id===p.catId);
-      const abonoId = uid('ab');
-      if(!state.pagosFijosPagos[p.catId]) state.pagosFijosPagos[p.catId] = {};
-      // Defensivo: si el año existe pero con menos de 12 posiciones (arreglo recortado por Firebase),
-      // lo normalizamos aquí también antes de indexar por mes, para no volver a romper con undefined.push().
-      if(!Array.isArray(state.pagosFijosPagos[p.catId][p.year]) || state.pagosFijosPagos[p.catId][p.year].length < 12){
-        const src = state.pagosFijosPagos[p.catId][p.year] || {};
-        state.pagosFijosPagos[p.catId][p.year] = Array.from({length:12}, (_,m)=> (src[m] || src[String(m)] || []));
-      }
-      state.pagosFijosPagos[p.catId][p.year][p.month].push({ id: abonoId, fecha, monto });
+      const esCredito = esCreditoCatalogo(catalogo);
+      const fechaInput = document.getElementById('fa-pf-abono-fecha');
+      const fecha = fechaInput ? fechaInput.value : '';
+      if(!fecha){ showToast('Elige una fecha para el abono.'); return; }
 
-      // silent:true da más reintentos (5 en vez de 3) — clave en conexiones de celular inestables — y
-      // deja que seamos nosotros quienes avisemos, no el toast genérico de saveKey.
-      const guardadoOk = await saveKey('pagosFijosPagos', state.pagosFijosPagos, {silent:true});
-      if(!guardadoOk){
-        // No quedó guardado en Firebase: revertimos el cambio local para no mostrar un abono "fantasma"
-        // y NO creamos el gasto asociado (eso es lo que causaba que apareciera en Gastos pero no en Pagos
-        // Fijos, mostrando más deuda de la real). No re-renderizamos para no borrar lo que escribiste.
-        state.pagosFijosPagos[p.catId][p.year][p.month] = state.pagosFijosPagos[p.catId][p.year][p.month].filter(a=>a.id!==abonoId);
-        showToast('No se pudo guardar el abono — revisa tu conexión e inténtalo de nuevo. No se registró en Gastos.');
+      if(esCredito){
+        const interesInput = document.getElementById('fa-pf-abono-interes');
+        const capitalInput = document.getElementById('fa-pf-abono-capital');
+        const interes = interesInput ? Number(interesInput.value)||0 : 0;
+        const capital = capitalInput ? Number(capitalInput.value)||0 : 0;
+        const monto = interes + capital;
+        if(monto <= 0){ showToast('Ingresa un interés y/o capital mayor a 0.'); return; }
+        const ok = await crearAbonoPF(p, { fecha, monto, interes, capital });
+        if(ok){ showToast('Abono registrado — se agregó a Gastos (solo el interés cuenta en Rentabilidad)'); render(); }
         return;
       }
 
-      const abonosDelMes = getPagosDelMes(p.catId, p.year, p.month).length;
-      state.gastos.push({
-        id: uid('gas'),
-        fecha,
-        proveedor: catalogo ? catalogo.concepto : '',
-        descripcion: `Pago fijo: ${catalogo?catalogo.concepto:''} (${MESES[p.month]} ${p.year})${abonosDelMes>1?` — abono ${abonosDelMes}`:''}`,
-        categoria: catalogo ? catalogo.categoria : (state.config.categoriasGastos[0]||''),
-        monto,
-        metodo: state.config.metodosPago[0]||'',
-        origenPagoFijo: `pf:${p.catId}:${p.year}-${String(p.month+1).padStart(2,'0')}:${abonoId}`
-      });
-      const gastoGuardadoOk = await saveKey('gastos', state.gastos, {silent:true});
-      if(!gastoGuardadoOk){
-        // El abono sí quedó guardado en Pagos Fijos (ya no está "perdido"), pero el gasto reflejo no.
-        // Avisamos para que reintente sabiendo que la deuda ya está bien contabilizada.
-        showToast('El abono quedó guardado en Pagos Fijos, pero no se pudo registrar en Gastos — revisa tu conexión.');
-        render();
-        return;
-      }
-      showToast('Abono registrado — se agregó a Gastos');
-      render();
+      const montoInput = document.getElementById('fa-pf-abono-monto');
+      const monto = montoInput ? Number(montoInput.value)||0 : 0;
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      const ok = await crearAbonoPF(p, { fecha, monto });
+      if(ok){ showToast('Abono registrado — se agregó a Gastos'); render(); }
+    }
+    else if(action === 'marcar-pagado-pf'){
+      const p = state.pfMonthPanel;
+      if(!p) return;
+      const catalogo = state.pagosFijosCatalogo.find(c=>c.id===p.catId);
+      const exigibleActual = getMontoExigiblePF(p.catId, catalogo, p.year, p.month);
+      const totalAbonado = getTotalPagadoMes(p.catId, p.year, p.month);
+      const restante = Math.max(exigibleActual - totalAbonado, 0);
+      if(restante <= 0){ showToast('Este mes ya está pagado.'); return; }
+      const ok = await crearAbonoPF(p, { fecha: todayISO(), monto: restante });
+      if(ok){ showToast('Marcado como pagado'); render(); }
     }
     else if(action === 'delete-abono-pf'){
       const p = state.pfMonthPanel;
@@ -9426,6 +9917,56 @@
       showToast('Gasto guardado');
       render();
     }
+    else if(action === 'submit-pago-tarjeta'){
+      const data = readFields(btn.closest('[data-form="pago-tarjeta"]'));
+      if(!data.fecha){ showToast('Elige una fecha para el pago.'); return; }
+      const monto = Number(data.monto)||0;
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      const gasto = {
+        id: uid('gas'),
+        fecha: data.fecha,
+        proveedor: 'Pago Tarjeta de Crédito',
+        descripcion: data.descripcion || '',
+        categoria: CAT_GASTO_PAGO_TARJETA,
+        monto,
+        metodo: 'Transferencia'
+      };
+      state.gastos.push(gasto);
+      await saveKey('gastos', state.gastos);
+      showToast('Pago a la tarjeta registrado');
+      render();
+    }
+    else if(action === 'submit-usd-mov'){
+      const data = readFields(btn.closest('[data-form="usd-mov"]'));
+      if(!data.fecha){ showToast('Elige una fecha para el movimiento.'); return; }
+      const monto = Number(data.monto)||0;
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      const editingId = state.editingUSDMovId;
+      const editingTipo = state.editingUSDMovTipo;
+      const tipo = editingId ? editingTipo : data.tipo; // el tipo no se puede cambiar mientras se edita
+      const arrKey = tipo === 'Ingreso' ? 'ingresosUSD' : 'gastosUSD';
+      const record = { fecha: data.fecha, nombre: data.nombre||'', descripcion: data.descripcion||'', categoria: data.categoria||'', monto };
+
+      if(editingId){
+        const idx = state[arrKey].findIndex(m=>m.id===editingId);
+        if(idx>-1) state[arrKey][idx] = {...state[arrKey][idx], ...record};
+        state.editingUSDMovId = null;
+        state.editingUSDMovTipo = null;
+      } else {
+        record.id = uid('usd');
+        state[arrKey].push(record);
+      }
+      await saveKey(arrKey, state[arrKey]);
+      showToast('Movimiento guardado');
+      render();
+    }
+    else if(action === 'save-saldo-inicial-usd'){
+      const input = document.getElementById('fa-usd-saldo-inicial');
+      state.config.saldoInicialUSD = input ? Number(input.value)||0 : 0;
+      await saveKey('config', state.config);
+      showToast('Saldo inicial actualizado');
+      render();
+    }
     else if(action === 'submit-pf'){
       const data = readFields(btn.closest('[data-form="pf"]'));
       if(!data.concepto || !data.concepto.trim()){ showToast('Escribe un nombre para el compromiso (Concepto).'); return; }
@@ -9539,6 +10080,10 @@
     else if(action === 'change-anio'){
       state.config.anio = Number(el.value);
       await saveKey('config', state.config);
+      render();
+    }
+    else if(action === 'change-usd-form-tipo'){
+      state.usdForm.tipo = el.value;
       render();
     }
     else if(action === 'change-informe-desde'){
