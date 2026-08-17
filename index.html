@@ -455,6 +455,9 @@
   // asociado a Servicios Prestados Directos", que se queda solo en Cuenta Corriente, fuera de Flujo también.
   const CAT_INGRESO_CREDITO_COMERCIAL = "Crédito Comercial";
   const CAT_INGRESO_APORTE_INVERSIONISTA = "Aporte Inversionista";
+  // Otros Ingresos: mismo tratamiento — no es venta (fuera de Rentabilidad y Fijos vs Variables), pero sí es
+  // plata real que entra al banco (dentro de Flujo de Caja y Cuenta Corriente).
+  const CAT_INGRESO_OTROS = "Otros Ingresos";
 
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
   // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
@@ -497,6 +500,10 @@
     if(!config.categoriasIngresosSoloFlujo) config.categoriasIngresosSoloFlujo = [];
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
+    // Otros Ingresos: mismo refuerzo — no venta, pero sí presente en Flujo de Caja y Cuenta Corriente.
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_OTROS)){ config.categoriasIngresos.push(CAT_INGRESO_OTROS); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_OTROS)){ config.categoriasNoVenta.push(CAT_INGRESO_OTROS); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_OTROS)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_OTROS); changed = true; }
     return changed;
   }
 
@@ -8836,7 +8843,7 @@
             </label>`;
           }).join('')}
         </div>
-        <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}" y "${CAT_INGRESO_APORTE_INVERSIONISTA}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
+        <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}", "${CAT_INGRESO_APORTE_INVERSIONISTA}" y "${CAT_INGRESO_OTROS}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
       </div>
 
       <div class="fa-card">
