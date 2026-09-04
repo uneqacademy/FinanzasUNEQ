@@ -661,6 +661,53 @@
     return meses;
   }
 
+  // ---- Dashboard (Módulo 1): agregadores de solo lectura — nada de esto guarda datos, solo lee de lo que
+  // ya existe en Tesorería, Estado de Resultados y Gestión de Deudas. ----
+
+  // % de deuda total reducida, considerando TODAS las deudas alguna vez registradas (activas + liquidadas)
+  // contra el monto original — así una deuda ya liquidada sigue aportando al progreso histórico.
+  function getProgresoBolaDeNieveGlobal(){
+    const todas = state.deudas.inventario;
+    const montoOriginalTotal = todas.reduce((s,d)=> s+(Number(d.montoOriginal)||0), 0);
+    const saldoActualTotal = todas.filter(d=>d.activa).reduce((s,d)=> s+getSaldoDeuda(d.id), 0);
+    const pct = montoOriginalTotal>0 ? (montoOriginalTotal - saldoActualTotal)/montoOriginalTotal : 0;
+    return { montoOriginalTotal, saldoActualTotal, pct };
+  }
+
+  // La deuda activa con el vencimiento más próximo — el "próximo pago crítico" a vigilar.
+  function getProximoPagoCritico(){
+    const activas = state.deudas.inventario.filter(d=>d.activa && d.fechaVencimiento);
+    if(activas.length===0) return null;
+    return activas.slice().sort((a,b)=>(a.fechaVencimiento||'').localeCompare(b.fechaVencimiento||''))[0];
+  }
+
+  // Uso de tarjetas/líneas de crédito (deudas revolventes, identificadas por categoría): saldo usado vs. cupo
+  // total. Si una deuda no tiene cupo definido, usa su monto original como aproximación del cupo.
+  function getUsoCreditoRevolvente(){
+    const revolventes = state.deudas.inventario.filter(d=> d.activa && (d.categoria==='Tarjeta de Crédito' || d.categoria==='Línea de Crédito'));
+    let saldoTotal = 0, cupoTotal = 0;
+    revolventes.forEach(d=>{
+      saldoTotal += getSaldoDeuda(d.id);
+      cupoTotal += Number(d.cupo) || Number(d.montoOriginal) || 0;
+    });
+    const pct = cupoTotal>0 ? saldoTotal/cupoTotal : 0;
+    return { saldoTotal, cupoTotal, pct, cantidad: revolventes.length };
+  }
+
+  // Runway: cuántos meses puede sobrevivir la empresa con el saldo actual de Operación, si las ventas caen a
+  // cero — usando el promedio de Gastos Operacionales de los meses ya transcurridos del año activo.
+  function getRunway(){
+    const saldoOperacion = getSaldoBoveda('operacion');
+    const anio = state.config.anio;
+    const hoy = new Date();
+    const mesActualIdx = (anio === hoy.getFullYear()) ? hoy.getMonth() : 11;
+    const meses = getEstadoResultadosMensual(anio).slice(0, mesActualIdx+1).filter(m=>m.gastosOperacionales>0);
+    const promedioGastosOp = meses.length>0 ? meses.reduce((s,m)=>s+m.gastosOperacionales,0)/meses.length : 0;
+    const runwayMeses = promedioGastosOp>0 ? saldoOperacion/promedioGastosOp : null;
+    return { saldoOperacion, promedioGastosOp, runwayMeses };
+  }
+
+
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
   // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
   function esCreditoCatalogo(catalogo){
@@ -1268,6 +1315,7 @@
       "tasaInteres": 2.5,
       "tasaInteresPeriodo": "mensual",
       "cuotaMinima": 300000,
+      "cupo": 3500000,
       "fechaVencimiento": "2026-04-05",
       "categoria": "Tarjeta de Crédito",
       "fechaCreacion": "2026-01-05",
@@ -3542,7 +3590,119 @@
     `;
   }
 
-  // ---------------- ESTADO DE RESULTADOS (Módulo 3, base devengada) ----------------
+  // ---------------- DASHBOARD (Módulo 1) — SOLO LECTURA, alimentado por Módulos 2/3/4/5 ----------------
+  function renderDashboard(){
+    const saldos = getSaldosTodasBovedas();
+    const anio = state.config.anio;
+    const hoy = new Date();
+    const mesActualIdx = (anio === hoy.getFullYear()) ? hoy.getMonth() : 11;
+    const mesActual = getEstadoResultadosMensual(anio)[mesActualIdx];
+    const meta = Number(state.config.metaMensualIngresos) || 0;
+    const pctMeta = meta>0 ? Math.min(mesActual.ingresosDevengados/meta, 1) : 0;
+    const equilibrioCubierto = mesActual.puntoEquilibrio!==null && mesActual.ingresosDevengados >= mesActual.puntoEquilibrio;
+
+    const bolaDeNieve = getProgresoBolaDeNieveGlobal();
+    const proximoPago = getProximoPagoCritico();
+    const usoCredito = getUsoCreditoRevolvente();
+    const runway = getRunway();
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Dashboard</h1><div class="fa-sub">Solo lectura — alimentado automáticamente por Distribución, Estado de Resultados, Tesorería y Deudas.</div></div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">🫁 El Oxígeno — Posición de Liquidez</div>
+        <div style="border:2px solid var(--income); border-radius:14px; padding:22px; background:#F0FFF4; margin-bottom:14px; text-align:center;">
+          <div style="font-size:13px; font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em;">Operación (OpEx) — único dinero disponible para gastar</div>
+          <div style="font-size:44px; font-weight:800; color:var(--income); margin-top:6px;">${fmtMoneyC(saldos.operacion)}</div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px;">
+          <div style="border:1.5px solid var(--border); border-radius:12px; padding:14px; text-align:center; background:#F8F9FA;">
+            <div style="font-size:20px;">🔒</div>
+            <div style="font-size:12px; font-weight:700; color:var(--ink-soft); margin:4px 0;">Impuestos</div>
+            <div style="font-size:18px; font-weight:800;">${fmtMoneyC(saldos.impuestos)}</div>
+          </div>
+          <div style="border:1.5px solid var(--border); border-radius:12px; padding:14px; text-align:center; background:#F8F9FA;">
+            <div style="font-size:20px;">🔒</div>
+            <div style="font-size:12px; font-weight:700; color:var(--ink-soft); margin:4px 0;">Sueldo Dueños</div>
+            <div style="font-size:18px; font-weight:800;">${fmtMoneyC(saldos.sueldoDuenos)}</div>
+          </div>
+          <div style="border:1.5px solid var(--border); border-radius:12px; padding:14px; text-align:center; background:#F8F9FA;">
+            <div style="font-size:20px;">🔒</div>
+            <div style="font-size:12px; font-weight:700; color:var(--ink-soft); margin:4px 0;">Ganancia</div>
+            <div style="font-size:18px; font-weight:800;">${fmtMoneyC(saldos.ganancia)}</div>
+          </div>
+        </div>
+        <div class="fa-hint">Estas 3 son "cofres blindados" — dinero acumulado que no se toca para gastos del día a día.</div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">🌡️ El Termómetro Operativo — ${MESES[mesActualIdx]}</div>
+        <div style="border:2px solid ${mesActual.utilidadOperativa>=0?'var(--income)':'var(--expense)'}; border-radius:14px; padding:18px; background:${mesActual.utilidadOperativa>=0?'#F0FFF4':'#FFF5F5'}; text-align:center; margin-bottom:14px;">
+          <div style="font-size:13px; font-weight:700; color:var(--ink-soft); text-transform:uppercase;">Utilidad Operativa</div>
+          <div style="font-size:34px; font-weight:800; color:${mesActual.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${mesActual.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoneyC(mesActual.utilidadOperativa)}</div>
+        </div>
+        <div style="margin-bottom:10px;">
+          <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700; color:var(--ink-soft); margin-bottom:4px;">
+            <span>Ingresos Devengados</span><span>Meta: ${meta>0?fmtMoney(meta):'sin definir'}</span>
+          </div>
+          <div style="background:#F1F2F4; border-radius:6px; height:14px; overflow:hidden;">
+            <div style="background:var(--income); height:100%; width:${(pctMeta*100).toFixed(0)}%;"></div>
+          </div>
+          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoney(mesActual.ingresosDevengados)}${meta>0?` de ${fmtMoney(meta)} (${(pctMeta*100).toFixed(0)}%)`:' — define una meta mensual en Configuración para comparar'}</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; background:${equilibrioCubierto?'#F0FFF4':'#FFF9EC'}; border:1px solid ${equilibrioCubierto?'var(--income)':'#E8B84B'};">
+          <span style="font-size:20px;">${equilibrioCubierto?'✅':'⏳'}</span>
+          <span style="font-size:13px; font-weight:600;">${equilibrioCubierto ? 'Punto de equilibrio cubierto — ya facturaste lo suficiente para pagar los gastos fijos del equipo este mes.' : (mesActual.puntoEquilibrio!==null ? `Faltan ${fmtMoney(mesActual.puntoEquilibrio - mesActual.ingresosDevengados)} para cubrir el punto de equilibrio de este mes.` : 'Aún no hay suficiente información para calcular el punto de equilibrio.')}</span>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">🚨 Alerta de Fugas — Deuda</div>
+        <div style="margin-bottom:14px;">
+          <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700; color:var(--ink-soft); margin-bottom:4px;">
+            <span>Bola de Nieve — deuda total reducida</span><span>${(bolaDeNieve.pct*100).toFixed(0)}%</span>
+          </div>
+          <div style="background:#F1F2F4; border-radius:6px; height:14px; overflow:hidden;">
+            <div style="background:var(--income); height:100%; width:${(bolaDeNieve.pct*100).toFixed(0)}%;"></div>
+          </div>
+        </div>
+        ${proximoPago ? `
+        <div style="padding:12px 14px; border-radius:10px; background:#F8F9FA; border:1px solid var(--border); margin-bottom:14px;">
+          <div style="font-size:12px; font-weight:700; color:var(--ink-soft);">⏰ Próximo pago crítico</div>
+          <div style="font-size:15px; font-weight:700; margin-top:2px;">${escapeHtml(proximoPago.nombre)} — ${fmtMoney(proximoPago.cuotaMinima)} el ${fmtDate(proximoPago.fechaVencimiento)}</div>
+        </div>
+        ` : `<div class="fa-hint">Sin pagos de deuda próximos registrados.</div>`}
+        ${usoCredito.cupoTotal>0 ? `
+        <div>
+          <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700; color:var(--ink-soft); margin-bottom:4px;">
+            <span>Uso de Tarjeta/Línea de Crédito</span><span style="color:${usoCredito.pct>0.5?'var(--expense)':'var(--ink-soft)'};">${(usoCredito.pct*100).toFixed(0)}%</span>
+          </div>
+          <div style="background:#F1F2F4; border-radius:6px; height:14px; overflow:hidden;">
+            <div style="background:${usoCredito.pct>0.5?'var(--expense)':'var(--income)'}; height:100%; width:${Math.min(usoCredito.pct*100,100).toFixed(0)}%;"></div>
+          </div>
+          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoney(usoCredito.saldoTotal)} usado de ${fmtMoney(usoCredito.cupoTotal)} de cupo${usoCredito.pct>0.5?' — sobre el 50%, ojo con esto':''}</div>
+        </div>
+        ` : `<div class="fa-hint">Sin tarjetas o líneas de crédito activas registradas.</div>`}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">🛫 Runway — Días de Supervivencia</div>
+        <div style="text-align:center; padding:14px;">
+          <div style="font-size:44px; font-weight:800; color:${runway.runwayMeses===null?'var(--ink-soft)':(runway.runwayMeses<2?'var(--expense)':'var(--income)')};">
+            ${runway.runwayMeses===null ? '—' : `${runway.runwayMeses.toFixed(1)} meses`}
+          </div>
+          <div class="fa-hint" style="margin-top:6px;">
+            ${runway.runwayMeses===null
+              ? 'Aún no hay suficientes Gastos Operacionales registrados para estimar el runway.'
+              : `Con ${fmtMoney(runway.saldoOperacion)} en Operación y un promedio de ${fmtMoney(runway.promedioGastosOp)} en Gastos Operacionales mensuales, así de lejos llegarías si las ventas cayeran a $0 hoy mismo.`}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   function renderEstadoResultados(){
     const anio = state.config.anio;
     const meses = getEstadoResultadosMensual(anio);
@@ -3782,6 +3942,7 @@
             <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0"></div>
             <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento"></div>
             <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito"></div>
+            <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica"></div>
           </div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Agregar deuda</button>
@@ -4001,7 +4162,7 @@
 
   function renderTab(){
     switch(state.activeTab){
-      case 'dashboard': return renderProximamente('Dashboard', 'Vista general de tu negocio — la diseñamos juntos primero.');
+      case 'dashboard': return renderDashboard();
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderEstadoResultados();
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
@@ -5427,7 +5588,9 @@
         <div data-form="config">
           <div class="fa-form-grid" style="grid-template-columns:1fr; max-width:320px;">
             <div class="fa-field"><label>Saldo inicial de caja (1 de enero del año activo)</label><input type="number" name="saldoInicial" value="${state.config.saldoInicial}"></div>
+            <div class="fa-field"><label>Meta de Ingresos Devengados Mensual</label><input type="number" name="metaMensualIngresos" value="${state.config.metaMensualIngresos||0}"></div>
           </div>
+          <div class="fa-hint">La meta mensual se usa en el Dashboard para comparar Ingresos Devengados vs. Meta — no se pide en el Dashboard porque es de solo lectura.</div>
           <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-config">Guardar cambios</button></div>
         </div>
       </div>
@@ -6384,6 +6547,7 @@
         cuotaMinima,
         fechaVencimiento: data.fechaVencimiento || '',
         categoria: data.categoria || '',
+        cupo: Number(data.cupo) || null, // solo relevante para tarjetas/líneas de crédito — si no se define, el Dashboard usa montoOriginal como aproximación
         fechaCreacion: todayISO(),
         activa: true
       };
@@ -6905,6 +7069,7 @@
       const data = readFields(btn.closest('[data-form="config"]'));
       state.config.anio = Number(data.anio) || state.config.anio;
       state.config.saldoInicial = Number(data.saldoInicial) || 0;
+      state.config.metaMensualIngresos = Number(data.metaMensualIngresos) || 0;
       await saveKey('config', state.config);
       showToast('Configuración guardada');
       render();
