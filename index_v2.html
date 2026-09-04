@@ -459,6 +459,21 @@
   // plata real que entra al banco (dentro de Flujo de Caja y Cuenta Corriente).
   const CAT_INGRESO_OTROS = "Otros Ingresos";
 
+  // ---- Tesorería: las 5 "bóvedas" (cuentas reales) del Módulo 4 ----
+  // "recepcion" es puente: todo ingreso Pagado cae ahí automáticamente, y debe volver a $0 cada vez que se
+  // ejecuta una distribución hacia las otras 4. Nada se paga directo desde recepcion — los gastos siempre
+  // se pagan desde una de las otras 4 bóvedas (se pide al registrar el gasto).
+  const BOVEDAS = [
+    { id:'recepcion',   label:'Ingresos (Recepción)', puente:true },
+    { id:'operacion',   label:'Operación (OpEx)' },
+    { id:'sueldoDuenos', label:'Sueldo de Dueños' },
+    { id:'impuestos',   label:'Impuestos' },
+    { id:'ganancia',    label:'Ganancia' }
+  ];
+  const BOVEDAS_PAGABLES = BOVEDAS.filter(b=> !b.puente); // las 4 desde donde sí se puede pagar un gasto
+  // Porcentajes sugeridos por defecto para la distribución (editables en el momento, y configurables después).
+  const DISTRIBUCION_DEFAULT = { operacion:60, sueldoDuenos:20, impuestos:15, ganancia:5 };
+
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
   // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
   function esCreditoCatalogo(catalogo){
@@ -761,6 +776,18 @@
   }
 ];
   const SEED_PF_ESTADO = {};
+  // Movimientos de Tesorería que reflejan los ingresos de ejemplo YA marcados "Pagado" y "venta" (demo01,
+  // demo02, demo04 — no incluye demo03 por Pendiente, ni demo05/demo06 por ser no-venta), para que Recepción
+  // no aparezca en $0 la primera vez que se abre la vista, sin necesidad de tocar nada.
+  const SEED_TESORERIA = {
+    "saldosIniciales": { "recepcion": 0, "operacion": 0, "sueldoDuenos": 0, "impuestos": 0, "ganancia": 0 },
+    "movimientos": [
+      { "id":"tes_v2_demo01", "fecha":"2026-01-05", "boveda":"recepcion", "tipo":"entrada", "monto":890000, "descripcion":"Venta programa BEGIN — ejemplo", "origen":"ingreso:ing_v2_demo01" },
+      { "id":"tes_v2_demo02", "fecha":"2026-01-14", "boveda":"recepcion", "tipo":"entrada", "monto":450000, "descripcion":"Mentoría 1:1 — ejemplo", "origen":"ingreso:ing_v2_demo02" },
+      { "id":"tes_v2_demo03", "fecha":"2026-02-03", "boveda":"recepcion", "tipo":"entrada", "monto":950000, "descripcion":"Venta programa NEXT — ejemplo", "origen":"ingreso:ing_v2_demo04" }
+    ]
+  };
+
   const SEED_PF_PAGOS = {
   "pf_mrl3fh0r_iqdlm": {
     "2026": [
@@ -1392,6 +1419,11 @@
     editingUSDMovId: null,
     editingUSDMovTipo: null, // 'Ingreso' | 'Gasto' — para saber en qué arreglo buscar/guardar el movimiento en edición
     usdForm: { tipo: 'Ingreso' }, // tipo seleccionado en el formulario de "Agregar movimiento" de Cuenta USD (no persiste)
+    // Tesorería (Módulo 4): saldosIniciales es el punto de partida de cada bóveda (como saldoInicial de
+    // Cuenta Corriente, pero uno por bóveda). movimientos es un solo libro con todas las entradas/salidas de
+    // las 5 bóvedas, cada uno etiquetado con su origen (ingreso, distribución o gasto) para poder rastrearlo.
+    tesoreria: { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] },
+    distribucionForm: null, // { pctOperacion, pctSueldoDuenos, pctImpuestos, pctGanancia } — solo mientras el modal está abierto
     detalleMes: new Date().getMonth(),
     mesCortePF: new Date().getMonth(),
     confirmDialog: null, // { message, action, data, confirmLabel }
@@ -1402,6 +1434,7 @@
     selected: { ingresos: new Set(), gastos: new Set() },
     informe: { mesDesde: 0, mesHasta: 11 },
     composicionVista: { tipo: 'fijos', modo: 'monto' },
+    moduloFlujoVista: 'flujo', // 'flujo' | 'tesoreria' — sub-vista dentro del Módulo 4
     tables: {
       ingresos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', estado:'', mes:'' },
       gastos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', metodo:'', mes:'', tipo:'' },
@@ -1584,7 +1617,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -1886,6 +1919,7 @@
       const gastosUSD = await loadKey('gastosUSD', []);
       const pagosFijosCatalogo = await loadKeySeeded('pagosFijosCatalogo', SEED_PF_CATALOGO);
       const pagosFijosEstado = await loadKeySeeded('pagosFijosEstado', SEED_PF_ESTADO);
+      const tesoreria = await loadKeySeeded('tesoreria', SEED_TESORERIA);
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -1898,6 +1932,7 @@
       if (!state.config.metodosPago) state.config.metodosPago = METODOS_DEFAULT.slice();
       if (!state.config.categoriasNoVenta) state.config.categoriasNoVenta = [];
       if (state.config.saldoInicialUSD === undefined) state.config.saldoInicialUSD = 0;
+      if (!state.config.distribucionPorcentajes) state.config.distribucionPorcentajes = {...DISTRIBUCION_DEFAULT};
       const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
       if(categoriasNoVentaCambiaron) await saveKey('config', state.config, {silent:true});
       state.ingresos = ingresos || [];
@@ -1906,6 +1941,9 @@
       state.gastosUSD = gastosUSD || [];
       state.pagosFijosCatalogo = pagosFijosCatalogo || [];
       state.pagosFijosEstado = pagosFijosEstado || {};
+      state.tesoreria = tesoreria || { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] };
+      if(!state.tesoreria.saldosIniciales) state.tesoreria.saldosIniciales = { recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 };
+      if(!state.tesoreria.movimientos) state.tesoreria.movimientos = [];
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
       // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
@@ -2178,6 +2216,103 @@
     movs.forEach(m=>{ saldo += m.monto; m.saldo = saldo; });
     return movs;
   }
+
+  // ---- Tesorería (Módulo 4): las 5 bóvedas ----
+  // Saldo histórico completo de una bóveda (no se resetea por año — igual que Cuenta Corriente/USD).
+  function getSaldoBoveda(bovedaId){
+    const saldoIni = Number((state.tesoreria.saldosIniciales||{})[bovedaId]) || 0;
+    return state.tesoreria.movimientos
+      .filter(m=> m.boveda === bovedaId)
+      .reduce((s,m)=> s + (m.tipo === 'salida' ? -(Number(m.monto)||0) : (Number(m.monto)||0)), saldoIni);
+  }
+
+  // Saldo de todas las bóvedas a la vez, como { recepcion: 123, operacion: 456, ... } — evita recorrer el
+  // libro de movimientos una vez por bóveda cuando se necesitan todos los saldos juntos (ej. Dashboard).
+  function getSaldosTodasBovedas(){
+    const saldos = {};
+    BOVEDAS.forEach(b=> saldos[b.id] = Number((state.tesoreria.saldosIniciales||{})[b.id]) || 0);
+    state.tesoreria.movimientos.forEach(m=>{
+      const delta = (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
+      saldos[m.boveda] = (saldos[m.boveda]||0) + delta;
+    });
+    return saldos;
+  }
+
+  // Movimientos de una bóveda en orden cronológico, con saldo corrido — igual patrón que Cuenta USD.
+  function getMovimientosBoveda(bovedaId){
+    const saldoIni = Number((state.tesoreria.saldosIniciales||{})[bovedaId]) || 0;
+    const movs = state.tesoreria.movimientos
+      .filter(m=> m.boveda === bovedaId)
+      .slice()
+      .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    let saldo = saldoIni;
+    return movs.map(m=>{
+      saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
+      return { ...m, saldo };
+    });
+  }
+
+  // Mantiene sincronizado el movimiento de Tesorería (bóveda Recepción) que corresponde a un ingreso: lo crea,
+  // actualiza o elimina según si el ingreso es venta directa y está "Pagado". Se llama después de cualquier
+  // creación o edición de un ingreso — idempotente, nunca duplica ni deja movimientos huérfanos. Los ingresos
+  // no-venta (créditos, aportes, otros) NO caen a Tesorería automáticamente todavía — ver nota en el resumen.
+  function syncTesoreriaIngreso(ingreso){
+    const origen = `ingreso:${ingreso.id}`;
+    const idx = state.tesoreria.movimientos.findIndex(m=> m.origen === origen);
+    const debeEstar = ingreso.estado === 'Pagado' && esIngresoVenta(ingreso);
+    if(debeEstar){
+      const mov = {
+        id: idx>-1 ? state.tesoreria.movimientos[idx].id : uid('tes'),
+        fecha: ingreso.fecha,
+        boveda: 'recepcion',
+        tipo: 'entrada',
+        monto: Number(ingreso.monto)||0,
+        descripcion: ingreso.descripcion || ingreso.cliente || '',
+        origen
+      };
+      if(idx>-1) state.tesoreria.movimientos[idx] = mov;
+      else state.tesoreria.movimientos.push(mov);
+    } else if(idx>-1){
+      state.tesoreria.movimientos.splice(idx,1);
+    }
+  }
+
+  // Quita el movimiento de Tesorería asociado a un ingreso (al borrarlo). No falla si nunca cayó a Recepción
+  // (ej. era no-venta o estaba Pendiente) — simplemente no encuentra nada que quitar.
+  function removeTesoreriaIngreso(ingresoId){
+    const origen = `ingreso:${ingresoId}`;
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
+  }
+
+  // Mantiene sincronizada la salida de Tesorería que corresponde a un gasto: la crea o actualiza según la
+  // bóveda elegida en el formulario. Si el gasto no tiene bóveda (datos viejos, de antes de este campo), no
+  // hace nada — no se puede descontar de una bóveda que no se indicó.
+  function syncTesoreriaGasto(gasto){
+    const origen = `gasto:${gasto.id}`;
+    const idx = state.tesoreria.movimientos.findIndex(m=> m.origen === origen);
+    if(!gasto.boveda){
+      if(idx>-1) state.tesoreria.movimientos.splice(idx,1);
+      return;
+    }
+    const mov = {
+      id: idx>-1 ? state.tesoreria.movimientos[idx].id : uid('tes'),
+      fecha: gasto.fecha,
+      boveda: gasto.boveda,
+      tipo: 'salida',
+      monto: Number(gasto.monto)||0,
+      descripcion: gasto.descripcion || gasto.proveedor || '',
+      origen
+    };
+    if(idx>-1) state.tesoreria.movimientos[idx] = mov;
+    else state.tesoreria.movimientos.push(mov);
+  }
+
+  // Quita la salida de Tesorería asociada a un gasto (al borrarlo).
+  function removeTesoreriaGasto(gastoId){
+    const origen = `gasto:${gastoId}`;
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
+  }
+
 
   // ---- Tarjeta de Crédito ----
   // Deuda actual de la tarjeta: todas las compras hechas con metodo "Tarjeta de Crédito" (histórico completo,
@@ -2895,7 +3030,7 @@
       case 'dashboard': return renderProximamente('Dashboard', 'Vista general de tu negocio — la diseñamos juntos primero.');
       case 'ingresosdist': return renderProximamente('Ingresos y Distribución', 'Ingresos y cómo se reparten — la diseñamos juntos primero.');
       case 'estadoresultados': return renderProximamente('Estado de Resultados', 'Rentabilidad del negocio — la diseñamos juntos primero.');
-      case 'flujo': return renderFlujo();
+      case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
       case 'deudas': return renderProximamente('Gestión de Deudas', 'Pagos Fijos, créditos y tarjeta — la diseñamos juntos primero.');
       case 'config': return renderConfig();
       default: return '';
@@ -3270,7 +3405,14 @@
             <div class="fa-field"><label>Método de pago</label>
               <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editing && editing.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
             </div>
+            <div class="fa-field"><label>Bóveda de origen (Tesorería)</label>
+              <select name="boveda">
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editing && editing.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
           </div>
+          <div class="fa-hint" style="margin-top:4px;">V2 — Tesorería: todo gasto se paga desde una de las 4 bóvedas (nunca desde Recepción). Al guardar, se descuenta automáticamente de esa bóveda.</div>
           <div class="fa-hint" style="margin-top:4px;">Si este gasto no está asociado a una venta directa (ej. ajustes internos, transferencias), elige la categoría "${CAT_GASTO_NO_VENTA}" — solo se usará para cuadrar el saldo real de Cuenta Corriente, no contará en Flujo de Caja, Rentabilidad ni Fijos vs Variables.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">${editing? 'Guardar cambios':'Agregar gasto'}</button>
@@ -3975,6 +4117,16 @@
   }
 
   // ---------------- FLUJO DE CAJA ----------------
+  // Sub-pestañas del Módulo 4 (Flujo de Caja y Tesorería) — mismo módulo, dos vistas.
+  function moduloFlujoTabs(){
+    return `
+      <div style="display:flex; gap:8px; margin-bottom:16px;">
+        <button type="button" class="fa-btn ${state.moduloFlujoVista!=='tesoreria'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujo">Flujo de Caja</button>
+        <button type="button" class="fa-btn ${state.moduloFlujoVista==='tesoreria'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="tesoreria">Tesorería (5 bóvedas)</button>
+      </div>
+    `;
+  }
+
   function renderFlujo(){
     const months = getMonthlyStats(state.config.anio);
     const totalIngresos = months.reduce((s,m)=>s+m.ingresosCobradosFlujo,0);
@@ -3991,6 +4143,7 @@
         <div><h1>Flujo de Caja</h1><div class="fa-sub">Cómo entra y sale la plata del negocio, mes a mes — liquidez real, incluye créditos y aportes de inversionistas.</div></div>
         ${yearSelect('flujo')}
       </div>
+      ${moduloFlujoTabs()}
       <div class="fa-card">
         ${filterBar('flujoCaja', { placeholder:'Buscar mes...' })}
         <div class="fa-table-wrap">
@@ -4019,6 +4172,79 @@
           </table>
         </div>
         <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" parte de tu saldo inicial (el mismo de Cuenta Corriente) y va sumando el resultado de cada mes — muy parecido al saldo de Cuenta Corriente, pero no idéntico, porque sigue sin incluir la categoría "${CAT_INGRESO_NO_VENTA}".</div>
+      </div>
+    `;
+  }
+
+  // ---------------- TESORERÍA (Módulo 4) ----------------
+  function renderTesoreria(){
+    const saldos = getSaldosTodasBovedas();
+    const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Tesorería</h1><div class="fa-sub">Las 5 bóvedas de tu negocio — dónde vive la plata y para qué es cada una.</div></div>
+      </div>
+      ${moduloFlujoTabs()}
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(5,1fr); max-width:1100px;">
+        ${BOVEDAS.map(b=>`
+          <div class="fa-kpi">
+            <div class="fa-kpi-label">${escapeHtml(b.label)}</div>
+            <div class="fa-kpi-value money">${fmtMoneyC(saldos[b.id]||0)}</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="fa-hint">Recepción es puente: ahí cae automáticamente cada ingreso de venta directa marcado "Pagado". No se paga nada desde ahí — cuando quieras repartirlo, usa "Distribuir" abajo.</div>
+
+      ${(saldos.recepcion||0) > 0 ? `
+      <div class="fa-card">
+        <div class="fa-card-title">Distribuir Recepción</div>
+        <div class="fa-section-note">Tienes ${fmtMoneyC(saldos.recepcion)} esperando en Recepción. Ajusta los porcentajes si quieres (deben sumar 100%) y confirma para repartirlo entre las otras 4 bóvedas.</div>
+        <div data-form="distribucion">
+          <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
+            ${BOVEDAS_PAGABLES.map(b=>`
+              <div class="fa-field"><label>${escapeHtml(b.label)} (%)</label>
+                <input type="number" name="pct_${b.id}" min="0" max="100" step="1" value="${pct[b.id]||0}">
+              </div>
+            `).join('')}
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="ejecutar-distribucion">Distribuir ${fmtMoneyC(saldos.recepcion)}</button>
+          </div>
+        </div>
+      </div>
+      ` : `
+      <div class="fa-card"><div class="fa-empty">Recepción está en $0 — no hay nada pendiente de distribuir. Aparece plata ahí apenas marques un ingreso de venta como "Pagado".</div></div>
+      `}
+
+      <div class="fa-card">
+        <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
+        ${BOVEDAS.map(b=>{
+          const movs = getMovimientosBoveda(b.id).slice().reverse().slice(0,8);
+          return `
+            <div style="margin-bottom:20px;">
+              <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${escapeHtml(b.label)}</div>
+              ${movs.length===0 ? `<div class="fa-hint" style="margin:0 0 4px 0;">Sin movimientos.</div>` : `
+              <div class="fa-table-wrap">
+                <table class="fa-table">
+                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead>
+                  <tbody>
+                    ${movs.map(m=>`
+                      <tr>
+                        <td>${fmtDate(m.fecha)}</td>
+                        <td>${m.tipo==='entrada'?'Entrada':'Salida'}</td>
+                        <td>${escapeHtml(m.descripcion||'')}</td>
+                        <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoney(m.monto)}</td>
+                        <td class="num money" style="font-weight:700;">${fmtMoney(m.saldo)}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>`}
+            </div>
+          `;
+        }).join('')}
       </div>
     `;
   }
@@ -4825,6 +5051,9 @@
       else if(cd.action === 'do-delete-ingreso'){
         state.ingresos = state.ingresos.filter(i=>i.id!==cd.data);
         await saveKey('ingresos', state.ingresos);
+        // V2 — Tesorería: si ese ingreso había caído a Recepción, se quita el movimiento también.
+        removeTesoreriaIngreso(cd.data);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
         showToast('Ingreso eliminado');
         render();
       }
@@ -4832,6 +5061,9 @@
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
         state.gastos = state.gastos.filter(g=>g.id!==cd.data);
         await saveKey('gastos', state.gastos);
+        // V2 — Tesorería: si ese gasto tenía una salida de bóveda asociada, se quita también.
+        removeTesoreriaGasto(cd.data);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
         if(gastoAEliminar && gastoAEliminar.origenPagoFijo){
           unlinkGastoFromPF(gastoAEliminar);
           await Promise.all([saveKey('pagosFijosPagos', state.pagosFijosPagos), saveKey('pagosFijosEstado', state.pagosFijosEstado)]);
@@ -4967,6 +5199,46 @@
       state.editingPFId = null;
       state.selected.ingresos.clear();
       state.selected.gastos.clear();
+      render();
+    }
+    else if(action === 'switch-modulo-flujo-vista'){
+      state.moduloFlujoVista = btn.dataset.vista;
+      render();
+    }
+    else if(action === 'ejecutar-distribucion'){
+      const saldos = getSaldosTodasBovedas();
+      const totalRecepcion = saldos.recepcion || 0;
+      if(totalRecepcion <= 0){ showToast('Recepción está en $0 — no hay nada que distribuir.'); return; }
+      const form = btn.closest('[data-form="distribucion"]');
+      const pcts = {};
+      let sumaPct = 0;
+      BOVEDAS_PAGABLES.forEach(b=>{
+        const input = form.querySelector(`[name="pct_${b.id}"]`);
+        const v = input ? Number(input.value)||0 : 0;
+        pcts[b.id] = v;
+        sumaPct += v;
+      });
+      if(Math.round(sumaPct) !== 100){ showToast(`Los porcentajes deben sumar 100% — hoy suman ${sumaPct}%.`); return; }
+      const fecha = todayISO();
+      const distId = uid('dist');
+      // 1 salida completa desde Recepción...
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha, boveda:'recepcion', tipo:'salida', monto: totalRecepcion,
+        descripcion:'Distribución hacia Operación / Sueldo Dueños / Impuestos / Ganancia', origen:`distribucion:${distId}`
+      });
+      // ...repartida en hasta 4 entradas, una por bóveda (se omiten las de $0 para no ensuciar el libro).
+      BOVEDAS_PAGABLES.forEach(b=>{
+        const monto = Math.round(totalRecepcion * (pcts[b.id]/100));
+        if(monto <= 0) return;
+        state.tesoreria.movimientos.push({
+          id: uid('tes'), fecha, boveda: b.id, tipo:'entrada', monto,
+          descripcion:`Distribución desde Recepción (${pcts[b.id]}%)`, origen:`distribucion:${distId}`
+        });
+      });
+      state.config.distribucionPorcentajes = pcts; // se recuerda para la próxima vez
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+      await saveKey('config', state.config, {silent:true});
+      showToast('Distribución realizada — Recepción quedó en $0');
       render();
     }
     else if(action === 'asesor-enviar'){
@@ -5302,15 +5574,24 @@
       if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      let ingresoFinal;
       if(state.editingIngresoId){
         const idx = state.ingresos.findIndex(i=>i.id===state.editingIngresoId);
-        if(idx>-1) state.ingresos[idx] = {...state.ingresos[idx], ...data};
+        if(idx>-1){ state.ingresos[idx] = {...state.ingresos[idx], ...data}; ingresoFinal = state.ingresos[idx]; }
         state.editingIngresoId = null;
       } else {
         data.id = uid('ing');
         state.ingresos.push(data);
+        ingresoFinal = data;
       }
       await saveKey('ingresos', state.ingresos);
+      // V2 — Tesorería: si el ingreso es venta directa y está "Pagado", cae automáticamente a la bóveda
+      // Recepción. Si se edita y deja de cumplir esa condición (vuelve a Pendiente, o cambia a no-venta),
+      // el movimiento se quita solo — nunca queda un ingreso duplicado ni un movimiento huérfano.
+      if(ingresoFinal){
+        syncTesoreriaIngreso(ingresoFinal);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+      }
       showToast('Ingreso guardado');
       render();
     }
@@ -5319,15 +5600,23 @@
       if(!data.fecha){ showToast('Elige una fecha para el gasto.'); return; }
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+      let gastoFinal;
       if(state.editingGastoId){
         const idx = state.gastos.findIndex(g=>g.id===state.editingGastoId);
-        if(idx>-1) state.gastos[idx] = {...state.gastos[idx], ...data};
+        if(idx>-1){ state.gastos[idx] = {...state.gastos[idx], ...data}; gastoFinal = state.gastos[idx]; }
         state.editingGastoId = null;
       } else {
         data.id = uid('gas');
         state.gastos.push(data);
+        gastoFinal = data;
       }
       await saveKey('gastos', state.gastos);
+      // V2 — Tesorería: el gasto se descuenta de la bóveda elegida (crea/actualiza la salida correspondiente).
+      if(gastoFinal){
+        syncTesoreriaGasto(gastoFinal);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+      }
       showToast('Gasto guardado');
       render();
     }
