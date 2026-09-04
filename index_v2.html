@@ -474,6 +474,32 @@
   // Porcentajes sugeridos por defecto para la distribución (editables en el momento, y configurables después).
   const DISTRIBUCION_DEFAULT = { operacion:60, sueldoDuenos:20, impuestos:15, ganancia:5 };
 
+  // Dropdown ESTRICTO de "Origen del Ingreso" para Ingresos y Distribución (V2, metodología Profit First).
+  // A propósito NO es editable desde Configuración como las demás categorías — es fijo, para que el registro
+  // de ingresos quede siempre consistente y comparable entre meses.
+  const ORIGENES_INGRESO_PF = [
+    "Academia - Cursos Autogestionados",
+    "Academia - Mentorías",
+    "Agencia - Fee de Servicio",
+    "Agencia - Comisiones por Éxito",
+    "Otros Ingresos"
+  ];
+
+  // Reparte un monto entero en las 4 bóvedas pagables según %. Redondea sueldoDuenos/impuestos/ganancia con
+  // Math.round, y hace que Operación absorba lo que sobre — así la suma de las 4 SIEMPRE calza exacto con
+  // el monto original, nunca se pierde ni sobra un peso por acumulación de redondeos independientes.
+  function repartirMontoPF(monto, pct){
+    const montos = {};
+    let acumulado = 0;
+    ['sueldoDuenos','impuestos','ganancia'].forEach(id=>{
+      const m = Math.round(monto * ((pct[id]||0)/100));
+      montos[id] = m;
+      acumulado += m;
+    });
+    montos.operacion = monto - acumulado;
+    return montos;
+  }
+
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
   // categoría es la de créditos y renegociaciones (siempre se trata como crédito ahí, sin necesitar el check).
   function esCreditoCatalogo(catalogo){
@@ -515,10 +541,11 @@
     if(!config.categoriasIngresosSoloFlujo) config.categoriasIngresosSoloFlujo = [];
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
-    // Otros Ingresos: mismo refuerzo — no venta, pero sí presente en Flujo de Caja y Cuenta Corriente.
-    if(!config.categoriasIngresos.includes(CAT_INGRESO_OTROS)){ config.categoriasIngresos.push(CAT_INGRESO_OTROS); changed = true; }
-    if(!config.categoriasNoVenta.includes(CAT_INGRESO_OTROS)){ config.categoriasNoVenta.push(CAT_INGRESO_OTROS); changed = true; }
-    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_OTROS)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_OTROS); changed = true; }
+    // "Otros Ingresos" DEJÓ de ser no-venta: en Ingresos y Distribución (V2) es una de las 5 categorías
+    // oficiales del embudo Profit First — es venta real, no financiamiento. Se saca de las listas de
+    // exclusión si quedó ahí de una versión anterior (self-healing en la otra dirección).
+    if(config.categoriasNoVenta.includes(CAT_INGRESO_OTROS)){ config.categoriasNoVenta = config.categoriasNoVenta.filter(c=>c!==CAT_INGRESO_OTROS); changed = true; }
+    if(config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_OTROS)){ config.categoriasIngresosSoloFlujo = config.categoriasIngresosSoloFlujo.filter(c=>c!==CAT_INGRESO_OTROS); changed = true; }
     return changed;
   }
 
@@ -571,9 +598,10 @@
     "Pago Tarjeta de Crédito"
   ],
   "categoriasIngresos": [
-    "Venta Programas Online (CLP)",
-    "Mentorías Personalizadas (CLP)",
-    "Capacitaciones",
+    "Academia - Cursos Autogestionados",
+    "Academia - Mentorías",
+    "Agencia - Fee de Servicio",
+    "Agencia - Comisiones por Éxito",
     "Otros Ingresos",
     "Crédito Comercial",
     "Aporte Inversionista",
@@ -582,13 +610,11 @@
   "categoriasNoVenta": [
     "Otros No considerados en flujo",
     "Crédito Comercial",
-    "Aporte Inversionista",
-    "Otros Ingresos"
+    "Aporte Inversionista"
   ],
   "categoriasIngresosSoloFlujo": [
     "Crédito Comercial",
-    "Aporte Inversionista",
-    "Otros Ingresos"
+    "Aporte Inversionista"
   ],
   "metodosPago": [
     "Transferencia",
@@ -598,44 +624,95 @@
     "Cheque"
   ],
   "saldoInicial": 3000000,
-  "saldoInicialUSD": 500
+  "saldoInicialUSD": 500,
+  "distribucionPorcentajes": {
+    "operacion": 60,
+    "sueldoDuenos": 20,
+    "impuestos": 15,
+    "ganancia": 5
+  }
 };
   const SEED_INGRESOS = [
   {
     "id": "ing_v2_demo01",
     "fecha": "2026-01-05",
-    "categoria": "Venta Programas Online (CLP)",
+    "categoria": "Academia - Cursos Autogestionados",
     "cliente": "Cliente Ejemplo A",
     "descripcion": "Venta programa BEGIN — ejemplo",
     "estado": "Pagado",
-    "monto": 890000
+    "monto": 890000,
+    "distribucion": {
+      "porcentajes": {
+        "operacion": 60,
+        "sueldoDuenos": 20,
+        "impuestos": 15,
+        "ganancia": 5
+      },
+      "montos": {
+        "operacion": 534000,
+        "sueldoDuenos": 178000,
+        "impuestos": 133500,
+        "ganancia": 44500
+      },
+      "confirmadoEl": "2026-01-05T10:00:00.000Z"
+    }
   },
   {
     "id": "ing_v2_demo02",
     "fecha": "2026-01-14",
-    "categoria": "Mentorías Personalizadas (CLP)",
+    "categoria": "Academia - Mentorías",
     "cliente": "Cliente Ejemplo B",
     "descripcion": "Mentoría 1:1 — ejemplo",
     "estado": "Pagado",
-    "monto": 450000
+    "monto": 450000,
+    "distribucion": {
+      "porcentajes": {
+        "operacion": 60,
+        "sueldoDuenos": 20,
+        "impuestos": 15,
+        "ganancia": 5
+      },
+      "montos": {
+        "operacion": 270000,
+        "sueldoDuenos": 90000,
+        "impuestos": 67500,
+        "ganancia": 22500
+      },
+      "confirmadoEl": "2026-01-14T10:00:00.000Z"
+    }
   },
   {
     "id": "ing_v2_demo03",
     "fecha": "2026-01-22",
-    "categoria": "Capacitaciones",
+    "categoria": "Agencia - Fee de Servicio",
     "cliente": "Empresa Ejemplo C",
-    "descripcion": "Capacitación in-company — ejemplo",
+    "descripcion": "Fee mensual de servicio — ejemplo",
     "estado": "Pendiente",
     "monto": 1200000
   },
   {
     "id": "ing_v2_demo04",
     "fecha": "2026-02-03",
-    "categoria": "Venta Programas Online (CLP)",
+    "categoria": "Academia - Cursos Autogestionados",
     "cliente": "Cliente Ejemplo D",
     "descripcion": "Venta programa NEXT — ejemplo",
     "estado": "Pagado",
-    "monto": 950000
+    "monto": 950000,
+    "distribucion": {
+      "porcentajes": {
+        "operacion": 60,
+        "sueldoDuenos": 20,
+        "impuestos": 15,
+        "ganancia": 5
+      },
+      "montos": {
+        "operacion": 570000,
+        "sueldoDuenos": 190000,
+        "impuestos": 142500,
+        "ganancia": 47500
+      },
+      "confirmadoEl": "2026-02-03T10:00:00.000Z"
+    }
   },
   {
     "id": "ing_v2_demo05",
@@ -644,14 +721,29 @@
     "cliente": "Cliente Ejemplo E",
     "descripcion": "Ingreso menor — ejemplo",
     "estado": "Pagado",
-    "monto": 120000
+    "monto": 120000,
+    "distribucion": {
+      "porcentajes": {
+        "operacion": 60,
+        "sueldoDuenos": 20,
+        "impuestos": 15,
+        "ganancia": 5
+      },
+      "montos": {
+        "operacion": 72000,
+        "sueldoDuenos": 24000,
+        "impuestos": 18000,
+        "ganancia": 6000
+      },
+      "confirmadoEl": "2026-02-11T10:00:00.000Z"
+    }
   },
   {
     "id": "ing_v2_demo06",
     "fecha": "2026-02-18",
     "categoria": "Aporte Inversionista",
     "cliente": "Inversionista Ejemplo",
-    "descripcion": "Aporte de capital — ejemplo",
+    "descripcion": "Aporte de capital — ejemplo (aún no pasa por el embudo, pendiente de definir)",
     "estado": "Pagado",
     "monto": 2000000
   }
@@ -780,13 +872,232 @@
   // demo02, demo04 — no incluye demo03 por Pendiente, ni demo05/demo06 por ser no-venta), para que Recepción
   // no aparezca en $0 la primera vez que se abre la vista, sin necesidad de tocar nada.
   const SEED_TESORERIA = {
-    "saldosIniciales": { "recepcion": 0, "operacion": 0, "sueldoDuenos": 0, "impuestos": 0, "ganancia": 0 },
-    "movimientos": [
-      { "id":"tes_v2_demo01", "fecha":"2026-01-05", "boveda":"recepcion", "tipo":"entrada", "monto":890000, "descripcion":"Venta programa BEGIN — ejemplo", "origen":"ingreso:ing_v2_demo01" },
-      { "id":"tes_v2_demo02", "fecha":"2026-01-14", "boveda":"recepcion", "tipo":"entrada", "monto":450000, "descripcion":"Mentoría 1:1 — ejemplo", "origen":"ingreso:ing_v2_demo02" },
-      { "id":"tes_v2_demo03", "fecha":"2026-02-03", "boveda":"recepcion", "tipo":"entrada", "monto":950000, "descripcion":"Venta programa NEXT — ejemplo", "origen":"ingreso:ing_v2_demo04" }
-    ]
-  };
+  "saldosIniciales": {
+    "recepcion": 0,
+    "operacion": 0,
+    "sueldoDuenos": 0,
+    "impuestos": 0,
+    "ganancia": 0
+  },
+  "movimientos": [
+    {
+      "id": "tes_v2_e01",
+      "fecha": "2026-01-05",
+      "boveda": "recepcion",
+      "tipo": "entrada",
+      "monto": 890000,
+      "descripcion": "Venta programa BEGIN — ejemplo",
+      "origen": "ingreso:ing_v2_demo01"
+    },
+    {
+      "id": "tes_v2_s01",
+      "fecha": "2026-01-05",
+      "boveda": "recepcion",
+      "tipo": "salida",
+      "monto": 890000,
+      "descripcion": "Distribución Profit First",
+      "origen": "distribucion:dist_v2_demo01"
+    },
+    {
+      "id": "tes_v2_operacion01",
+      "fecha": "2026-01-05",
+      "boveda": "operacion",
+      "tipo": "entrada",
+      "monto": 534000,
+      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo01"
+    },
+    {
+      "id": "tes_v2_sueldoDuenos01",
+      "fecha": "2026-01-05",
+      "boveda": "sueldoDuenos",
+      "tipo": "entrada",
+      "monto": 178000,
+      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo01"
+    },
+    {
+      "id": "tes_v2_impuestos01",
+      "fecha": "2026-01-05",
+      "boveda": "impuestos",
+      "tipo": "entrada",
+      "monto": 133500,
+      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo01"
+    },
+    {
+      "id": "tes_v2_ganancia01",
+      "fecha": "2026-01-05",
+      "boveda": "ganancia",
+      "tipo": "entrada",
+      "monto": 44500,
+      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo01"
+    },
+    {
+      "id": "tes_v2_e02",
+      "fecha": "2026-01-14",
+      "boveda": "recepcion",
+      "tipo": "entrada",
+      "monto": 450000,
+      "descripcion": "Mentoría 1:1 — ejemplo",
+      "origen": "ingreso:ing_v2_demo02"
+    },
+    {
+      "id": "tes_v2_s02",
+      "fecha": "2026-01-14",
+      "boveda": "recepcion",
+      "tipo": "salida",
+      "monto": 450000,
+      "descripcion": "Distribución Profit First",
+      "origen": "distribucion:dist_v2_demo02"
+    },
+    {
+      "id": "tes_v2_operacion02",
+      "fecha": "2026-01-14",
+      "boveda": "operacion",
+      "tipo": "entrada",
+      "monto": 270000,
+      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo02"
+    },
+    {
+      "id": "tes_v2_sueldoDuenos02",
+      "fecha": "2026-01-14",
+      "boveda": "sueldoDuenos",
+      "tipo": "entrada",
+      "monto": 90000,
+      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo02"
+    },
+    {
+      "id": "tes_v2_impuestos02",
+      "fecha": "2026-01-14",
+      "boveda": "impuestos",
+      "tipo": "entrada",
+      "monto": 67500,
+      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo02"
+    },
+    {
+      "id": "tes_v2_ganancia02",
+      "fecha": "2026-01-14",
+      "boveda": "ganancia",
+      "tipo": "entrada",
+      "monto": 22500,
+      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo02"
+    },
+    {
+      "id": "tes_v2_e03",
+      "fecha": "2026-02-03",
+      "boveda": "recepcion",
+      "tipo": "entrada",
+      "monto": 950000,
+      "descripcion": "Venta programa NEXT — ejemplo",
+      "origen": "ingreso:ing_v2_demo04"
+    },
+    {
+      "id": "tes_v2_s03",
+      "fecha": "2026-02-03",
+      "boveda": "recepcion",
+      "tipo": "salida",
+      "monto": 950000,
+      "descripcion": "Distribución Profit First",
+      "origen": "distribucion:dist_v2_demo03"
+    },
+    {
+      "id": "tes_v2_operacion03",
+      "fecha": "2026-02-03",
+      "boveda": "operacion",
+      "tipo": "entrada",
+      "monto": 570000,
+      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo03"
+    },
+    {
+      "id": "tes_v2_sueldoDuenos03",
+      "fecha": "2026-02-03",
+      "boveda": "sueldoDuenos",
+      "tipo": "entrada",
+      "monto": 190000,
+      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo03"
+    },
+    {
+      "id": "tes_v2_impuestos03",
+      "fecha": "2026-02-03",
+      "boveda": "impuestos",
+      "tipo": "entrada",
+      "monto": 142500,
+      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo03"
+    },
+    {
+      "id": "tes_v2_ganancia03",
+      "fecha": "2026-02-03",
+      "boveda": "ganancia",
+      "tipo": "entrada",
+      "monto": 47500,
+      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo03"
+    },
+    {
+      "id": "tes_v2_e04",
+      "fecha": "2026-02-11",
+      "boveda": "recepcion",
+      "tipo": "entrada",
+      "monto": 120000,
+      "descripcion": "Ingreso menor — ejemplo",
+      "origen": "ingreso:ing_v2_demo05"
+    },
+    {
+      "id": "tes_v2_s04",
+      "fecha": "2026-02-11",
+      "boveda": "recepcion",
+      "tipo": "salida",
+      "monto": 120000,
+      "descripcion": "Distribución Profit First",
+      "origen": "distribucion:dist_v2_demo04"
+    },
+    {
+      "id": "tes_v2_operacion04",
+      "fecha": "2026-02-11",
+      "boveda": "operacion",
+      "tipo": "entrada",
+      "monto": 72000,
+      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo04"
+    },
+    {
+      "id": "tes_v2_sueldoDuenos04",
+      "fecha": "2026-02-11",
+      "boveda": "sueldoDuenos",
+      "tipo": "entrada",
+      "monto": 24000,
+      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo04"
+    },
+    {
+      "id": "tes_v2_impuestos04",
+      "fecha": "2026-02-11",
+      "boveda": "impuestos",
+      "tipo": "entrada",
+      "monto": 18000,
+      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo04"
+    },
+    {
+      "id": "tes_v2_ganancia04",
+      "fecha": "2026-02-11",
+      "boveda": "ganancia",
+      "tipo": "entrada",
+      "monto": 6000,
+      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
+      "origen": "distribucion:dist_v2_demo04"
+    }
+  ]
+};
 
   const SEED_PF_PAGOS = {
   "pf_mrl3fh0r_iqdlm": {
@@ -1617,7 +1928,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -2773,6 +3084,48 @@
     `;
   }
 
+  // ---------------- Ingresos y Distribución: cálculo en vivo (sin pasar por render) ----------------
+  // Estas dos quedan colgadas de window porque se llaman desde atributos oninput/onchange inline en el
+  // HTML, que ejecutan en el scope global — pero como están definidas AQUÍ DENTRO del IIFE, sí tienen acceso
+  // a state/fmtMoney/BOVEDAS_PAGABLES por clausura. Actualizan el DOM directo (no llaman a render()) para no
+  // perder el foco del campo Monto mientras el usuario escribe.
+  window.faRecalcularDistribucionPF = function(){
+    const montoInput = document.getElementById('fa-pf-monto');
+    const cardsWrap = document.getElementById('fa-pf-cards-wrap');
+    const checklistWrap = document.getElementById('fa-pf-checklist-wrap');
+    if(!montoInput || !cardsWrap || !checklistWrap) return;
+    const monto = Number(montoInput.value) || 0;
+    if(monto <= 0){
+      cardsWrap.style.display = 'none';
+      checklistWrap.style.display = 'none';
+      return;
+    }
+    cardsWrap.style.display = '';
+    checklistWrap.style.display = '';
+    const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
+    const montos = repartirMontoPF(monto, pct);
+    BOVEDAS_PAGABLES.forEach(b=>{
+      const m = montos[b.id];
+      const card = document.getElementById('fa-pf-card-'+b.id);
+      const chkLabel = document.getElementById('fa-pf-chk-label-'+b.id);
+      const chk = document.getElementById('fa-pf-chk-'+b.id);
+      if(card) card.textContent = fmtMoney(m);
+      if(chkLabel) chkLabel.textContent = fmtMoney(m);
+      if(chk) chk.checked = false; // si cambia el monto, hay que re-confirmar cada transferencia
+    });
+    window.faActualizarBotonConfirmarPF();
+  };
+
+  window.faActualizarBotonConfirmarPF = function(){
+    const btn = document.getElementById('fa-pf-btn-confirmar');
+    if(!btn) return;
+    const todasMarcadas = BOVEDAS_PAGABLES.every(b=>{
+      const chk = document.getElementById('fa-pf-chk-'+b.id);
+      return chk && chk.checked;
+    });
+    btn.disabled = !todasMarcadas;
+  };
+
   // ---------------- Render dispatch ----------------
   function render(){
     if(!state.authChecked){
@@ -3012,6 +3365,101 @@
 
   // Placeholder de una sección de la v2 que todavía no diseñamos — mantiene el mismo look & feel del resto
   // de la app, para que se sienta como parte de ella y no como una pantalla rota, mientras la construimos.
+  // ---------------- INGRESOS Y DISTRIBUCIÓN (Módulo 2, metodología Profit First) ----------------
+  // Un solo flujo: registrar el ingreso bruto y repartirlo en las 4 bóvedas quedan en UNA sola confirmación
+  // — no se guarda nada hasta hacer clic en "Confirmar Transferencias Realizadas". El cálculo de las 4
+  // tarjetas y el checklist ocurren con JS directo sobre el DOM (window.faRecalcularDistribucionPF /
+  // window.faActualizarBotonConfirmarPF), sin pasar por render(), para no perder el foco del campo Monto
+  // mientras se escribe.
+  function renderIngresosDistribucion(){
+    const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
+    const saldoRecepcionSuelto = getSaldoBoveda('recepcion');
+    const delAnio = state.ingresos.filter(i=> i.fecha && new Date(i.fecha+'T00:00:00').getFullYear()===state.config.anio);
+    const totalAnio = delAnio.reduce((s,i)=>s+(Number(i.monto)||0),0);
+    const filas = delAnio.slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Ingresos y Distribución</h1><div class="fa-sub">Metodología Profit First: cada ingreso se reparte al momento — Recepción es un embudo, no una cuenta de ahorro.</div></div>
+        ${yearSelect('ingresosdist')}
+      </div>
+
+      ${saldoRecepcionSuelto > 0 ? `
+      <div class="fa-card" style="border:1.5px solid var(--expense); background:#FFF5F5;">
+        <div class="fa-card-title" style="color:var(--expense);">⚠️ Tienes ${fmtMoneyC(saldoRecepcionSuelto)} sin distribuir en Recepción</div>
+        <div class="fa-hint">Viene de Tesorería (probablemente registrado antes de este flujo). Ve a Flujo de Caja → Tesorería para repartirlo — los ingresos nuevos que registres aquí abajo se distribuyen solos, no se acumulan.</div>
+      </div>
+      ` : ''}
+
+      <div class="fa-card">
+        <div class="fa-card-title">Registrar ingreso</div>
+        <div data-form="ingreso-pf">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Origen del Ingreso</label>
+              <select name="categoria">${ORIGENES_INGRESO_PF.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente"></div>
+            <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" oninput="window.faRecalcularDistribucionPF()"></div>
+          </div>
+
+          <div id="fa-pf-cards-wrap" style="display:none; margin-top:16px;">
+            <div class="fa-hint" style="margin:0 0 8px 0;">Así se reparte este ingreso, según tu configuración actual:</div>
+            <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr);">
+              ${BOVEDAS_PAGABLES.map(b=>`
+                <div class="fa-kpi">
+                  <div class="fa-kpi-label">🏦 ${escapeHtml(b.label)} (${pct[b.id]||0}%)</div>
+                  <div class="fa-kpi-value money" id="fa-pf-card-${b.id}">$0</div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+
+          <div id="fa-pf-checklist-wrap" style="display:none; margin-top:16px;">
+            <div class="fa-hint" style="margin:0 0 8px 0;">Marca cada transferencia una vez que la hayas hecho de verdad en tu banco:</div>
+            ${BOVEDAS_PAGABLES.map(b=>`
+              <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
+                <input type="checkbox" id="fa-pf-chk-${b.id}" onchange="window.faActualizarBotonConfirmarPF()">
+                Transferí <span id="fa-pf-chk-label-${b.id}" style="font-weight:700;">$0</span> a ${escapeHtml(b.label)}
+              </label>
+            `).join('')}
+            <div class="fa-form-actions" style="margin-top:10px;">
+              <button type="button" id="fa-pf-btn-confirmar" class="fa-btn fa-btn-primary" data-action="confirmar-distribucion-ingreso" disabled>Confirmar Transferencias Realizadas</button>
+            </div>
+            <div class="fa-hint" style="margin-top:6px;">El botón se activa solo cuando las 4 casillas están marcadas — evita confirmar sin haber movido la plata de verdad.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Ingresos registrados — ${state.config.anio} (${delAnio.length})</div>
+        ${filas.length===0 ? `<div class="fa-empty">Aún no registras ingresos en ${state.config.anio}.</div>` : `
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th class="num">Monto</th><th>Distribución</th></tr></thead>
+            <tbody>
+              ${filas.map(i=>`
+                <tr>
+                  <td>${fmtDate(i.fecha)}</td>
+                  <td>${escapeHtml(i.categoria)}</td>
+                  <td>${escapeHtml(i.cliente)||'—'}</td>
+                  <td class="num money">${fmtMoneyC(i.monto)}</td>
+                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">Op ${fmtMoney(i.distribucion.montos.operacion)} · Sueldo ${fmtMoney(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoney(i.distribucion.montos.impuestos)} · Gan ${fmtMoney(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>`}
+        <div class="fa-kpi-grid" style="grid-template-columns:repeat(1,1fr); max-width:220px; margin-top:14px;">
+          <div class="fa-kpi income"><div class="fa-kpi-label">Total ${state.config.anio}</div><div class="fa-kpi-value income money">${fmtMoneyC(totalAnio)}</div></div>
+        </div>
+      </div>
+    `;
+  }
+
+
+  // Placeholder de una sección de la v2 que todavía no diseñamos — mantiene el mismo look & feel del resto
+  // de la app, para que se sienta como parte de ella y no como una pantalla rota, mientras la construimos.
   function renderProximamente(titulo, descripcion){
     return `
       <div class="fa-topbar">
@@ -3028,7 +3476,7 @@
   function renderTab(){
     switch(state.activeTab){
       case 'dashboard': return renderProximamente('Dashboard', 'Vista general de tu negocio — la diseñamos juntos primero.');
-      case 'ingresosdist': return renderProximamente('Ingresos y Distribución', 'Ingresos y cómo se reparten — la diseñamos juntos primero.');
+      case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderProximamente('Estado de Resultados', 'Rentabilidad del negocio — la diseñamos juntos primero.');
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
       case 'deudas': return renderProximamente('Gestión de Deudas', 'Pagos Fijos, créditos y tarjeta — la diseñamos juntos primero.');
@@ -4437,7 +4885,7 @@
             </label>`;
           }).join('')}
         </div>
-        <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}", "${CAT_INGRESO_APORTE_INVERSIONISTA}" y "${CAT_INGRESO_OTROS}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
+        <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}" y "${CAT_INGRESO_APORTE_INVERSIONISTA}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
       </div>
 
       <div class="fa-card">
@@ -5226,9 +5674,11 @@
         id: uid('tes'), fecha, boveda:'recepcion', tipo:'salida', monto: totalRecepcion,
         descripcion:'Distribución hacia Operación / Sueldo Dueños / Impuestos / Ganancia', origen:`distribucion:${distId}`
       });
-      // ...repartida en hasta 4 entradas, una por bóveda (se omiten las de $0 para no ensuciar el libro).
+      // ...repartida en hasta 4 entradas, una por bóveda (repartirMontoPF asegura que sumen exacto — se
+      // omiten las de $0 para no ensuciar el libro).
+      const montosDist = repartirMontoPF(totalRecepcion, pcts);
       BOVEDAS_PAGABLES.forEach(b=>{
-        const monto = Math.round(totalRecepcion * (pcts[b.id]/100));
+        const monto = montosDist[b.id];
         if(monto <= 0) return;
         state.tesoreria.movimientos.push({
           id: uid('tes'), fecha, boveda: b.id, tipo:'entrada', monto,
@@ -5239,6 +5689,51 @@
       await saveKey('tesoreria', state.tesoreria, {silent:true});
       await saveKey('config', state.config, {silent:true});
       showToast('Distribución realizada — Recepción quedó en $0');
+      render();
+    }
+    else if(action === 'confirmar-distribucion-ingreso'){
+      const form = btn.closest('[data-form="ingreso-pf"]');
+      const data = readFields(form);
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      // Defensivo: el botón ya viene disabled hasta marcar las 4 casillas, pero se revalida acá también
+      // por si alguien lo habilita manipulando el DOM — nunca confiar solo en el estado visual del botón.
+      const todasMarcadas = BOVEDAS_PAGABLES.every(b=>{
+        const chk = document.getElementById('fa-pf-chk-'+b.id);
+        return chk && chk.checked;
+      });
+      if(!todasMarcadas){ showToast('Marca las 4 transferencias antes de confirmar.'); return; }
+
+      const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
+      const montos = repartirMontoPF(monto, pct);
+
+      const ingreso = {
+        id: uid('ing'),
+        fecha: data.fecha,
+        categoria: data.categoria,
+        cliente: data.cliente || '',
+        monto,
+        estado: 'Pagado',
+        distribucion: { porcentajes: {...pct}, montos, confirmadoEl: new Date().toISOString() }
+      };
+      state.ingresos.push(ingreso);
+      await saveKey('ingresos', state.ingresos);
+
+      // Mismo esquema que "Distribuir Recepción" en Tesorería: entrada+salida en Recepción (queda en $0,
+      // nunca acumula) + hasta 4 entradas en las bóvedas destino — pero acá ocurre en el mismo clic que
+      // registrar el ingreso, no como una acción separada más tarde.
+      const distId = uid('dist');
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'entrada', monto, descripcion: ingreso.categoria + (ingreso.cliente?` — ${ingreso.cliente}`:''), origen:`ingreso:${ingreso.id}` });
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'salida', monto, descripcion:'Distribución Profit First', origen:`distribucion:${distId}` });
+      BOVEDAS_PAGABLES.forEach(b=>{
+        if(montos[b.id] > 0){
+          state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda: b.id, tipo:'entrada', monto: montos[b.id], descripcion:`Distribución de "${ingreso.categoria}"`, origen:`distribucion:${distId}` });
+        }
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      showToast('Ingreso registrado y distribuido en las 4 bóvedas');
       render();
     }
     else if(action === 'asesor-enviar'){
