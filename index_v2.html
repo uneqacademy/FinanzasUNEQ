@@ -100,6 +100,19 @@
     display:flex; align-items:center; gap:8px;
   }
   .fa-brand .dot{ width:9px; height:9px; border-radius:50%; background:var(--income); display:inline-block; }
+
+  /* ---------- Menú hamburguesa (celular) ---------- */
+  .fa-hamburger-btn{
+    display:none; position:fixed; top:14px; left:14px; z-index:60;
+    width:42px; height:42px; border-radius:10px;
+    background:var(--ink); color:#fff; border:none;
+    align-items:center; justify-content:center; font-size:19px; cursor:pointer;
+    box-shadow:0 2px 10px rgba(0,0,0,0.25);
+  }
+  .fa-drawer-backdrop{
+    display:none; position:fixed; inset:0; background:rgba(20,33,61,0.5); z-index:40;
+  }
+  .fa-drawer-backdrop.fa-drawer-backdrop-open{ display:block; }
   .fa-nav-btn{
     display:flex; align-items:center; gap:10px;
     background:transparent; border:none; color:#C3C9DB;
@@ -378,13 +391,18 @@
   }
 
   @media (max-width:760px){
-    .fa-app-row{ flex-direction:column; }
-    .fa-sidebar{ width:100%; flex-direction:row; overflow-x:auto; padding:10px 12px; align-items:center; gap:2px; -webkit-overflow-scrolling:touch; }
-    .fa-brand{ padding:0 10px 0 2px; flex:0 0 auto; }
-    .fa-nav-btn{ flex:0 0 auto; white-space:nowrap; padding:9px 10px; font-size:12.5px; }
-    .fa-sidebar-footer{ display:none; }
-    .fa-sidebar-export, .fa-sidebar-export-secondary{ flex:0 0 auto; width:auto; white-space:nowrap; margin-top:0; font-size:12px; padding:9px 10px; }
-    .fa-main{ max-height:none; padding:14px 12px 34px 12px; }
+    .fa-hamburger-btn{ display:flex; }
+    .fa-app-row{ flex-direction:row; }
+    .fa-sidebar{
+      position:fixed; top:0; left:0; bottom:0; width:250px; max-width:80vw;
+      flex-direction:column; overflow-y:auto; overflow-x:hidden;
+      transform:translateX(-100%); transition:transform 0.22s ease; z-index:50;
+      padding:20px 14px;
+    }
+    .fa-sidebar.fa-sidebar-open{ transform:translateX(0); box-shadow:2px 0 24px rgba(0,0,0,0.35); }
+    .fa-nav-btn{ flex:0 0 auto; white-space:normal; padding:11px 10px; font-size:13.5px; }
+    .fa-sidebar-export, .fa-sidebar-export-secondary{ width:100%; margin-top:6px; font-size:13px; padding:10px; }
+    .fa-main{ max-height:none; padding:64px 12px 34px 12px; width:100%; }
 
     .fa-kpi-grid, .fa-kpi-grid-6, .fa-form-grid, .fa-charts-row, .fa-real-grid{ grid-template-columns:1fr !important; }
     .fa-real-op{ display:none; }
@@ -494,6 +512,20 @@
   // Operación, abono extra (Bola de Nieve) desde Ganancia.
   const BOVEDAS_ORIGEN_PAGO_DEUDA = ['operacion','ganancia'];
 
+  // ---- Estado de Resultados (Módulo 3, base devengada) ----
+  // Costos Directos (costo de venta): SOLO ocurren porque hubo una venta ese mes. Van en una lista aparte
+  // (categoriasCostoDirecto) para separarlos de Gastos Operacionales al calcular Margen Bruto.
+  const CAT_COSTO_ADS = "Inversión en Ads (Academia)";
+  const CAT_COSTO_COMISIONES = "Comisiones de Pasarelas (Stripe/Hotmart)";
+  const CAT_COSTO_AFILIADOS = "Pago a Afiliados";
+  const CATEGORIAS_COSTO_DIRECTO_DEFAULT = [CAT_COSTO_ADS, CAT_COSTO_COMISIONES, CAT_COSTO_AFILIADOS];
+  // Categorías sugeridas de Gastos Operacionales (estructura fija) — no son una lista cerrada, solo se
+  // aseguran de existir como opción; cualquier gasto que no sea Costo Directo ni Gasto Financiero cae acá.
+  const CATEGORIAS_OPEX_SUGERIDAS = ["Nómina Equipo", "Sueldo Operativo Socios", "Software/Suscripciones", "Viáticos y Generales"];
+  // Tipos de servicio para el prorrateo de ingresos devengados: Autogestionado siempre dura 1 mes (no se
+  // prorratea), Mentoría/Agencia dura los meses que el usuario indique.
+  const TIPOS_SERVICIO_DEVENGADO = ["Autogestionado", "Mentoría/Agencia"];
+
   // Reparte un monto entero en las 4 bóvedas pagables según %. Redondea sueldoDuenos/impuestos/ganancia con
   // Math.round, y hace que Operación absorba lo que sobre — así la suma de las 4 SIEMPRE calza exacto con
   // el monto original, nunca se pierde ni sobra un peso por acumulación de redondeos independientes.
@@ -572,6 +604,61 @@
         return { ...d, saldo, progreso, proyeccion };
       })
       .sort((a,b)=> a.saldo - b.saldo);
+  }
+
+  // ---- Estado de Resultados (Módulo 3, base devengada) ----
+  // Prorratea el monto total de un contrato en partes iguales sobre su duración en meses — la última cuota
+  // absorbe el resto de redondeo, para que la suma de las cuotas SIEMPRE calce exacto con el monto total.
+  function getProrrateoContrato(contrato){
+    const n = Math.max(Number(contrato.duracionMeses)||1, 1);
+    const total = Number(contrato.montoTotal)||0;
+    const base = Math.round(total/n);
+    const montos = Array.from({length:n}, ()=> base);
+    const suma = base*n;
+    montos[n-1] += (total - suma);
+    return montos;
+  }
+
+  // Calcula, mes a mes de un año, el Estado de Resultados completo en base devengada: Ingresos Devengados
+  // (prorrateados desde los contratos), Costos Directos, Margen Bruto, Gastos Operacionales, Utilidad
+  // Operativa, Gastos Financieros (alimentados automáticamente desde Gestión de Deudas) y Utilidad Neta.
+  // El Punto de Equilibrio usa el ratio de costo directo del propio mes como aproximación del costo variable
+  // (si el mes no tiene ingresos aún, asume 0% variable — el equilibrio queda igual a los Gastos Operacionales).
+  function getEstadoResultadosMensual(anio){
+    const meses = Array.from({length:12}, ()=> ({ ingresosDevengados:0, costosDirectos:0, gastosOperacionales:0, gastosFinancieros:0 }));
+
+    state.contratosDevengados.forEach(c=>{
+      if(!c.fechaInicio) return;
+      const inicio = new Date(c.fechaInicio+'T00:00:00');
+      const montos = getProrrateoContrato(c);
+      montos.forEach((monto,i)=>{
+        const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
+        if(d.getFullYear() === anio) meses[d.getMonth()].ingresosDevengados += monto;
+      });
+    });
+
+    const categoriasCostoDirecto = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    state.gastos.forEach(g=>{
+      if(!g.fecha) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear() !== anio) return;
+      const m = d.getMonth();
+      const monto = montoNegocioGasto(g); // respeta no-venta y el desglose interés/capital ya construidos
+      if(monto === 0) return;
+      if(g.categoria === CAT_GASTO_FINANCIERO) meses[m].gastosFinancieros += monto;
+      else if(categoriasCostoDirecto.includes(g.categoria)) meses[m].costosDirectos += monto;
+      else meses[m].gastosOperacionales += monto;
+    });
+
+    meses.forEach(m=>{
+      m.margenBruto = m.ingresosDevengados - m.costosDirectos;
+      m.utilidadOperativa = m.margenBruto - m.gastosOperacionales;
+      m.utilidadNeta = m.utilidadOperativa - m.gastosFinancieros;
+      const ratioCostoDirecto = m.ingresosDevengados > 0 ? (m.costosDirectos / m.ingresosDevengados) : 0;
+      m.puntoEquilibrio = ratioCostoDirecto < 1 ? Math.round(m.gastosOperacionales / (1 - ratioCostoDirecto)) : null;
+    });
+
+    return meses;
   }
 
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
@@ -1199,6 +1286,18 @@
     }
   ]
 };
+  const SEED_CONTRATOS_DEVENGADOS = [
+  {
+    "id": "contrato_v2_demo01",
+    "nombre": "Mentoría Cliente Ejemplo",
+    "montoTotal": 6000000,
+    "tipoServicio": "Mentoría/Agencia",
+    "duracionMeses": 6,
+    "fechaInicio": "2026-01-01",
+    "fechaCreacion": "2026-01-01"
+  }
+];
+
 
 
   const SEED_PF_PAGOS = {
@@ -1842,6 +1941,7 @@
     // nunca se guarda como campo fijo, para que nunca se desincronice de los pagos reales.
     deudas: { inventario: [], pagos: [] },
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
+    contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
     deudaRecienLiquidada: null, // { nombre } — dispara el banner de celebración una vez, se limpia al cerrarlo
     detalleMes: new Date().getMonth(),
     mesCortePF: new Date().getMonth(),
@@ -1854,6 +1954,7 @@
     informe: { mesDesde: 0, mesHasta: 11 },
     composicionVista: { tipo: 'fijos', modo: 'monto' },
     moduloFlujoVista: 'flujo', // 'flujo' | 'tesoreria' — sub-vista dentro del Módulo 4
+    mobileMenuOpen: false, // menú hamburguesa en celular — abre el sidebar como cajón desde la izquierda
     tables: {
       ingresos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', estado:'', mes:'' },
       gastos: { sortKey:'fecha', sortDir:'desc', search:'', categoria:'', metodo:'', mes:'', tipo:'' },
@@ -2036,7 +2137,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -2340,6 +2441,7 @@
       const pagosFijosEstado = await loadKeySeeded('pagosFijosEstado', SEED_PF_ESTADO);
       const tesoreria = await loadKeySeeded('tesoreria', SEED_TESORERIA);
       const deudas = await loadKeySeeded('deudas', SEED_DEUDAS);
+      const contratosDevengados = await loadKeySeeded('contratosDevengados', SEED_CONTRATOS_DEVENGADOS);
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -2356,11 +2458,16 @@
       const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
       // "Gasto Financiero" (Módulo 5): cuenta como gasto operacional normal — no es no-venta, así que no pasa
       // por ensureCategoriasNoVenta, solo se asegura que exista en la lista si un respaldo viejo no la trae.
+      // Igual para las categorías de Costo Directo y Gastos Operacionales sugeridas del Módulo 3.
       let gastoFinancieroCambio = false;
       if(!state.config.categoriasGastos.includes(CAT_GASTO_FINANCIERO)){
         state.config.categoriasGastos.push(CAT_GASTO_FINANCIERO);
         gastoFinancieroCambio = true;
       }
+      if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).forEach(cat=>{
+        if(!state.config.categoriasGastos.includes(cat)){ state.config.categoriasGastos.push(cat); gastoFinancieroCambio = true; }
+      });
       if(categoriasNoVentaCambiaron || gastoFinancieroCambio) await saveKey('config', state.config, {silent:true});
       state.ingresos = ingresos || [];
       state.gastos = gastos || [];
@@ -2374,6 +2481,7 @@
       state.deudas = deudas || { inventario: [], pagos: [] };
       if(!state.deudas.inventario) state.deudas.inventario = [];
       if(!state.deudas.pagos) state.deudas.pagos = [];
+      state.contratosDevengados = contratosDevengados || [];
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
       // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
@@ -3245,6 +3353,18 @@
     btn.disabled = !todasMarcadas;
   };
 
+  // Estado de Resultados: oculta el campo Duración cuando el servicio es "Autogestionado" (siempre dura 1
+  // mes, no se prorratea) — sin pasar por render() para no perder lo ya escrito en el resto del formulario.
+  window.faToggleDuracionContrato = function(){
+    const tipo = document.getElementById('fa-contrato-tipo');
+    const wrap = document.getElementById('fa-contrato-duracion-wrap');
+    const input = document.getElementById('fa-contrato-duracion');
+    if(!tipo || !wrap) return;
+    const esAutogestionado = tipo.value === 'Autogestionado';
+    wrap.style.display = esAutogestionado ? 'none' : '';
+    if(esAutogestionado && input) input.value = '1';
+  };
+
   // ---------------- Render dispatch ----------------
   function render(){
     if(!state.authChecked){
@@ -3270,6 +3390,8 @@
     root.className = state.readOnly ? 'fa-readonly' : '';
     root.innerHTML = `
       ${state.readOnly ? `<div class="fa-readonly-banner">👁️ Modo solo lectura — puedes ver todo, pero no editar</div>` : ''}
+      <button type="button" class="fa-hamburger-btn" data-action="toggle-mobile-menu" aria-label="Abrir menú">☰</button>
+      <div class="fa-drawer-backdrop ${state.mobileMenuOpen?'fa-drawer-backdrop-open':''}" data-action="close-mobile-menu"></div>
       <div class="fa-app-row">
         ${renderSidebar()}
         <div class="fa-main">${renderTab()}</div>
@@ -3414,6 +3536,161 @@
 
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-ghost" data-action="close-pf-month">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ---------------- ESTADO DE RESULTADOS (Módulo 3, base devengada) ----------------
+  function renderEstadoResultados(){
+    const anio = state.config.anio;
+    const meses = getEstadoResultadosMensual(anio);
+    const hoy = new Date();
+    const mesActualIdx = (anio === hoy.getFullYear()) ? hoy.getMonth() : 11;
+    const mesActual = meses[mesActualIdx];
+
+    const totales = meses.reduce((acc,m)=>{
+      acc.ingresosDevengados += m.ingresosDevengados;
+      acc.costosDirectos += m.costosDirectos;
+      acc.margenBruto += m.margenBruto;
+      acc.gastosOperacionales += m.gastosOperacionales;
+      acc.utilidadOperativa += m.utilidadOperativa;
+      acc.gastosFinancieros += m.gastosFinancieros;
+      acc.utilidadNeta += m.utilidadNeta;
+      return acc;
+    }, { ingresosDevengados:0, costosDirectos:0, margenBruto:0, gastosOperacionales:0, utilidadOperativa:0, gastosFinancieros:0, utilidadNeta:0 });
+
+    const gastosTotalesPorMes = meses.map(m=> m.costosDirectos + m.gastosOperacionales + m.gastosFinancieros);
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Estado de Resultados</h1><div class="fa-sub">Base devengada — mide el esfuerzo y consumo de recursos en el tiempo, no tu liquidez (para eso está Flujo de Caja).</div></div>
+        ${yearSelect('estadoresultados')}
+      </div>
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:820px;">
+        <div class="fa-kpi ${mesActual.utilidadOperativa>=0?'income':'expense'}">
+          <div class="fa-kpi-label">${mesActual.utilidadOperativa>=0?'🟢':'🔴'} Utilidad Operativa (${MESES[mesActualIdx]})</div>
+          <div class="fa-kpi-value ${mesActual.utilidadOperativa>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadOperativa)}</div>
+        </div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Punto de Equilibrio (${MESES[mesActualIdx]})</div><div class="fa-kpi-value money">${mesActual.puntoEquilibrio!==null ? fmtMoney(mesActual.puntoEquilibrio) : '—'}</div></div>
+        <div class="fa-kpi ${mesActual.utilidadNeta>=0?'income':'expense'}"><div class="fa-kpi-label">Utilidad Neta (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.utilidadNeta>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadNeta)}</div></div>
+      </div>
+      ${mesActual.puntoEquilibrio!==null ? `<div class="fa-hint">Este mes necesitas facturar (devengado) al menos ${fmtMoneyC(mesActual.puntoEquilibrio)} para cubrir tus Gastos Operacionales — llevas ${fmtMoneyC(mesActual.ingresosDevengados)}.</div>` : `<div class="fa-hint">Sin ingresos devengados este mes todavía, no se puede estimar el punto de equilibrio con costo variable.</div>`}
+
+      <div class="fa-card">
+        <div class="fa-card-title">Ingresos Devengados vs. Gastos Totales — ${anio}</div>
+        ${svgBarChart(MESES_CORTO, meses.map(m=>m.ingresosDevengados), gastosTotalesPorMes, 'Ingresos Devengados', 'Gastos Totales')}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Detalle mensual — ${anio}</div>
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr>
+              <th>Mes</th><th class="num">Ingresos Devengados</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th>
+              <th class="num">Gastos Operacionales</th><th class="num">Utilidad Operativa</th><th class="num">Gastos Financieros</th><th class="num">Utilidad Neta</th>
+            </tr></thead>
+            <tbody>
+              ${meses.map((m,i)=>`
+                <tr>
+                  <td>${MESES[i]}</td>
+                  <td class="num money" style="color:var(--income);">${fmtMoney(m.ingresosDevengados)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.costosDirectos)}</td>
+                  <td class="num money">${fmtMoney(m.margenBruto)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosOperacionales)}</td>
+                  <td class="num money" style="font-weight:700; color:${m.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${m.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoney(m.utilidadOperativa)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosFinancieros)}</td>
+                  <td class="num money" style="font-weight:700;">${fmtMoney(m.utilidadNeta)}</td>
+                </tr>
+              `).join('')}
+              <tr style="font-weight:700; background:#F8F9FA;">
+                <td>Total año</td>
+                <td class="num money" style="color:var(--income);">${fmtMoney(totales.ingresosDevengados)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.costosDirectos)}</td>
+                <td class="num money">${fmtMoney(totales.margenBruto)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosOperacionales)}</td>
+                <td class="num money">${fmtMoney(totales.utilidadOperativa)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosFinancieros)}</td>
+                <td class="num money">${fmtMoney(totales.utilidadNeta)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="fa-hint">Los Gastos Financieros de esta tabla llegan solos desde Gestión de Deudas — es exclusivamente el interés de las cuotas pagadas, nunca el capital.</div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Registrar contrato / venta cerrada</div>
+        <div class="fa-section-note">El ingreso se prorratea automáticamente sobre la duración del servicio — no se anota todo de una vez si el servicio dura varios meses.</div>
+        <div data-form="contrato-devengado">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X"></div>
+            <div class="fa-field"><label>Monto Total Cerrado</label><input type="number" name="montoTotal" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Tipo de Servicio</label>
+              <select name="tipoServicio" id="fa-contrato-tipo" onchange="window.faToggleDuracionContrato()">
+                ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option>${t}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field" id="fa-contrato-duracion-wrap"><label>Duración (meses)</label><input type="number" id="fa-contrato-duracion" name="duracionMeses" min="1" step="1" placeholder="Ej: 6"></div>
+            <div class="fa-field"><label>Fecha de Inicio</label><input type="date" name="fechaInicio" value="${todayISO()}"></div>
+          </div>
+          <div class="fa-hint">"Autogestionado" siempre dura 1 mes (el ingreso se anota completo de una vez). "Mentoría/Agencia" se reparte en partes iguales entre los meses que indiques.</div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-contrato-devengado">Registrar contrato</button>
+          </div>
+        </div>
+        ${state.contratosDevengados.length>0 ? `
+        <div class="fa-table-wrap" style="margin-top:14px;">
+          <table class="fa-table">
+            <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Duración</th><th>Inicio</th><th class="num">Monto Total</th></tr></thead>
+            <tbody>
+              ${state.contratosDevengados.slice().sort((a,b)=>(b.fechaInicio||'').localeCompare(a.fechaInicio||'')).map(c=>`
+                <tr>
+                  <td>${escapeHtml(c.nombre)}</td>
+                  <td>${escapeHtml(c.tipoServicio)}</td>
+                  <td>${c.duracionMeses} mes${c.duracionMeses===1?'':'es'}</td>
+                  <td>${fmtDate(c.fechaInicio)}</td>
+                  <td class="num money">${fmtMoneyC(c.montoTotal)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Registrar Costo Directo / Gasto Operacional</div>
+        <div class="fa-section-note">Costo Directo = solo ocurre porque hubo una venta (Ads, comisiones de pasarela, afiliados). Gasto Operacional = lo que cuesta mantener viva la empresa, venda o no venda.</div>
+        <div data-form="gasto">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Nombre del proveedor"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Campaña Meta Ads enero"></div>
+            <div class="fa-field"><label>Categoría</label>
+              <select name="categoria">
+                <optgroup label="Costos Directos">
+                  ${(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).map(c=>`<option>${escapeHtml(c)}</option>`).join('')}
+                </optgroup>
+                <optgroup label="Gastos Operacionales y otros">
+                  ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c)).map(c=>`<option>${escapeHtml(c)}</option>`).join('')}
+                </optgroup>
+              </select>
+            </div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Método de pago</label>
+              <select name="metodo">${state.config.metodosPago.map(m=>`<option>${escapeHtml(m)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Bóveda de origen (Tesorería)</label>
+              <select name="boveda">
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">Registrar gasto</button>
           </div>
         </div>
       </div>
@@ -3593,7 +3870,7 @@
       {id:'config', label:'Configuración', icon:'&#9881;'}
     ];
     return `
-      <div class="fa-sidebar">
+      <div class="fa-sidebar ${state.mobileMenuOpen?'fa-sidebar-open':''}">
         <div class="fa-brand"><span class="dot"></span> Finanzas <span style="background:#A8322D; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; margin-left:6px; vertical-align:middle;">V2 · PRUEBA</span></div>
         ${tabs.map(t=>`
           <button class="fa-nav-btn ${state.activeTab===t.id?'active':''}" data-action="nav" data-tab="${t.id}">
@@ -3726,7 +4003,7 @@
     switch(state.activeTab){
       case 'dashboard': return renderProximamente('Dashboard', 'Vista general de tu negocio — la diseñamos juntos primero.');
       case 'ingresosdist': return renderIngresosDistribucion();
-      case 'estadoresultados': return renderProximamente('Estado de Resultados', 'Rentabilidad del negocio — la diseñamos juntos primero.');
+      case 'estadoresultados': return renderEstadoResultados();
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'config': return renderConfig();
@@ -5940,6 +6217,15 @@
       state.editingPFId = null;
       state.selected.ingresos.clear();
       state.selected.gastos.clear();
+      state.mobileMenuOpen = false; // al elegir una sección en el celular, el cajón se cierra solo
+      render();
+    }
+    else if(action === 'toggle-mobile-menu'){
+      state.mobileMenuOpen = !state.mobileMenuOpen;
+      render();
+    }
+    else if(action === 'close-mobile-menu'){
+      state.mobileMenuOpen = false;
       render();
     }
     else if(action === 'switch-modulo-flujo-vista'){
@@ -6059,6 +6345,27 @@
       } else {
         showToast('Aporte depositado en Operación');
       }
+      render();
+    }
+    else if(action === 'submit-contrato-devengado'){
+      const data = readFields(btn.closest('[data-form="contrato-devengado"]'));
+      const montoTotal = Number(data.montoTotal) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre al proyecto/cliente.'); return; }
+      if(montoTotal <= 0){ showToast('Ingresa el monto total cerrado.'); return; }
+      if(!data.fechaInicio){ showToast('Elige la fecha de inicio.'); return; }
+      const esAutogestionado = data.tipoServicio === 'Autogestionado';
+      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionMeses)||1, 1);
+      state.contratosDevengados.push({
+        id: uid('contrato'),
+        nombre: data.nombre,
+        montoTotal,
+        tipoServicio: data.tipoServicio,
+        duracionMeses,
+        fechaInicio: data.fechaInicio,
+        fechaCreacion: todayISO()
+      });
+      await saveKey('contratosDevengados', state.contratosDevengados);
+      showToast(duracionMeses>1 ? `Contrato registrado — se prorratea en ${duracionMeses} meses` : 'Contrato registrado');
       render();
     }
     else if(action === 'submit-deuda'){
