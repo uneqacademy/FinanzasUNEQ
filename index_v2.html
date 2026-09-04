@@ -485,6 +485,15 @@
     "Otros Ingresos"
   ];
 
+  // Categoría de gasto para el interés de los pagos de deuda (Módulo 5) — cuenta como gasto operacional
+  // real en Estado de Resultados (NO es no-venta: el interés sí es un costo del negocio, a diferencia del
+  // capital, que nunca se registra como gasto porque solo reduce lo que se debe).
+  const CAT_GASTO_FINANCIERO = "Gasto Financiero";
+
+  // Cuentas de Tesorería desde donde se puede pagar una cuota de deuda: cuota mínima normalmente desde
+  // Operación, abono extra (Bola de Nieve) desde Ganancia.
+  const BOVEDAS_ORIGEN_PAGO_DEUDA = ['operacion','ganancia'];
+
   // Reparte un monto entero en las 4 bóvedas pagables según %. Redondea sueldoDuenos/impuestos/ganancia con
   // Math.round, y hace que Operación absorba lo que sobre — así la suma de las 4 SIEMPRE calza exacto con
   // el monto original, nunca se pierde ni sobra un peso por acumulación de redondeos independientes.
@@ -498,6 +507,71 @@
     });
     montos.operacion = monto - acumulado;
     return montos;
+  }
+
+  // ---- Gestión de Deudas (Módulo 5): proyección "golpe de realidad" ----
+  // Proyecta cuántos meses tomaría liquidar una deuda pagando SOLO la cuota mínima cada mes (sin abonos
+  // extra), y cuánto interés total se le terminaría pagando al banco en el camino. Si la cuota mínima no
+  // alcanza ni para cubrir el interés del saldo actual, la deuda nunca se paga sola — se marca "nuncaSePaga"
+  // en vez de intentar proyectar un número (evita loops infinitos y resultados sin sentido).
+  function proyectarLiquidacionDeuda(saldoActual, tasaInteres, tasaPeriodo, cuotaMinima){
+    const tasaMensual = tasaPeriodo === 'anual' ? (Number(tasaInteres)||0)/12/100 : (Number(tasaInteres)||0)/100;
+    if(saldoActual <= 0) return { meses:0, interesTotal:0, nuncaSePaga:false };
+    if(tasaMensual <= 0){
+      if(cuotaMinima <= 0) return { meses:null, interesTotal:null, nuncaSePaga:true };
+      return { meses: Math.ceil(saldoActual/cuotaMinima), interesTotal:0, nuncaSePaga:false };
+    }
+    const interesPrimerMes = saldoActual * tasaMensual;
+    if(cuotaMinima <= interesPrimerMes){
+      return { meses:null, interesTotal:null, nuncaSePaga:true };
+    }
+    let saldo = saldoActual;
+    let meses = 0;
+    let interesTotal = 0;
+    const LIMITE_MESES = 1200; // 100 años — tope de seguridad, nunca debería llegar tan lejos si nuncaSePaga ya se detectó arriba
+    while(saldo > 0 && meses < LIMITE_MESES){
+      const interesMes = saldo * tasaMensual;
+      interesTotal += interesMes;
+      let capitalMes = cuotaMinima - interesMes;
+      if(capitalMes > saldo) capitalMes = saldo; // última cuota, parcial
+      saldo -= capitalMes;
+      meses++;
+    }
+    return { meses, interesTotal: Math.round(interesTotal), nuncaSePaga: saldo > 0 };
+  }
+
+  // Suma "meses" meses a la fecha de hoy y devuelve "Mes AAAA" para mostrar la proyección (ej. "Julio 2028").
+  function fechaProyectada(meses){
+    const d = new Date();
+    d.setMonth(d.getMonth() + meses);
+    return `${MESES[d.getMonth()]} ${d.getFullYear()}`;
+  }
+
+  // Saldo actual de una deuda: SIEMPRE derivado (monto original − capital pagado hasta hoy), nunca un campo
+  // guardado — así nunca se desincroniza de los pagos reales, mismo principio que el resto de la app.
+  function getSaldoDeuda(deudaId){
+    const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+    if(!deuda) return 0;
+    const capitalPagado = state.deudas.pagos
+      .filter(p=>p.deudaId===deudaId)
+      .reduce((s,p)=> s + (Number(p.capital)||0), 0);
+    return Math.max(Math.round((Number(deuda.montoOriginal)||0) - capitalPagado), 0);
+  }
+
+  // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
+  // interés — a propósito, así funciona la Bola de Nieve). La primera de la lista es el "Objetivo Principal".
+  // Cada deuda viene con su saldo, % de progreso y proyección ya calculados, listos para pintar.
+  function getDeudasBolaDeNieve(){
+    return state.deudas.inventario
+      .filter(d=>d.activa)
+      .map(d=>{
+        const saldo = getSaldoDeuda(d.id);
+        const montoOriginal = Number(d.montoOriginal)||0;
+        const progreso = montoOriginal > 0 ? Math.min(Math.max((montoOriginal-saldo)/montoOriginal, 0), 1) : 0;
+        const proyeccion = proyectarLiquidacionDeuda(saldo, d.tasaInteres, d.tasaInteresPeriodo, d.cuotaMinima);
+        return { ...d, saldo, progreso, proyeccion };
+      })
+      .sort((a,b)=> a.saldo - b.saldo);
   }
 
   // Un Pago Fijo tiene desglose interés/capital disponible si está marcado manualmente "Es crédito", o si su
@@ -1098,6 +1172,34 @@
     }
   ]
 };
+  const SEED_DEUDAS = {
+  "inventario": [
+    {
+      "id": "deuda_v2_demo01",
+      "nombre": "Tarjeta Banco Ejemplo",
+      "montoOriginal": 3000000,
+      "tasaInteres": 2.5,
+      "tasaInteresPeriodo": "mensual",
+      "cuotaMinima": 300000,
+      "fechaVencimiento": "2026-04-05",
+      "categoria": "Tarjeta de Crédito",
+      "fechaCreacion": "2026-01-05",
+      "activa": true
+    }
+  ],
+  "pagos": [
+    {
+      "id": "pagodeuda_v2_demo01",
+      "deudaId": "deuda_v2_demo01",
+      "fecha": "2026-02-05",
+      "montoTotal": 325000,
+      "capital": 250000,
+      "interes": 75000,
+      "cuentaOrigen": "operacion"
+    }
+  ]
+};
+
 
   const SEED_PF_PAGOS = {
   "pf_mrl3fh0r_iqdlm": {
@@ -1735,6 +1837,12 @@
     // las 5 bóvedas, cada uno etiquetado con su origen (ingreso, distribución o gasto) para poder rastrearlo.
     tesoreria: { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] },
     distribucionForm: null, // { pctOperacion, pctSueldoDuenos, pctImpuestos, pctGanancia } — solo mientras el modal está abierto
+    // Gestión de Deudas (Módulo 5): inventario es la lista de pasivos; pagos es el historial de abonos, cada
+    // uno ligado a una deuda por deudaId. El saldo de cada deuda se DERIVA (montoOriginal − capital pagado),
+    // nunca se guarda como campo fijo, para que nunca se desincronice de los pagos reales.
+    deudas: { inventario: [], pagos: [] },
+    pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
+    deudaRecienLiquidada: null, // { nombre } — dispara el banner de celebración una vez, se limpia al cerrarlo
     detalleMes: new Date().getMonth(),
     mesCortePF: new Date().getMonth(),
     confirmDialog: null, // { message, action, data, confirmLabel }
@@ -1928,7 +2036,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -2231,6 +2339,7 @@
       const pagosFijosCatalogo = await loadKeySeeded('pagosFijosCatalogo', SEED_PF_CATALOGO);
       const pagosFijosEstado = await loadKeySeeded('pagosFijosEstado', SEED_PF_ESTADO);
       const tesoreria = await loadKeySeeded('tesoreria', SEED_TESORERIA);
+      const deudas = await loadKeySeeded('deudas', SEED_DEUDAS);
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -2245,7 +2354,14 @@
       if (state.config.saldoInicialUSD === undefined) state.config.saldoInicialUSD = 0;
       if (!state.config.distribucionPorcentajes) state.config.distribucionPorcentajes = {...DISTRIBUCION_DEFAULT};
       const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
-      if(categoriasNoVentaCambiaron) await saveKey('config', state.config, {silent:true});
+      // "Gasto Financiero" (Módulo 5): cuenta como gasto operacional normal — no es no-venta, así que no pasa
+      // por ensureCategoriasNoVenta, solo se asegura que exista en la lista si un respaldo viejo no la trae.
+      let gastoFinancieroCambio = false;
+      if(!state.config.categoriasGastos.includes(CAT_GASTO_FINANCIERO)){
+        state.config.categoriasGastos.push(CAT_GASTO_FINANCIERO);
+        gastoFinancieroCambio = true;
+      }
+      if(categoriasNoVentaCambiaron || gastoFinancieroCambio) await saveKey('config', state.config, {silent:true});
       state.ingresos = ingresos || [];
       state.gastos = gastos || [];
       state.ingresosUSD = ingresosUSD || [];
@@ -2255,6 +2371,9 @@
       state.tesoreria = tesoreria || { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] };
       if(!state.tesoreria.saldosIniciales) state.tesoreria.saldosIniciales = { recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 };
       if(!state.tesoreria.movimientos) state.tesoreria.movimientos = [];
+      state.deudas = deudas || { inventario: [], pagos: [] };
+      if(!state.deudas.inventario) state.deudas.inventario = [];
+      if(!state.deudas.pagos) state.deudas.pagos = [];
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
       // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
@@ -3157,6 +3276,7 @@
       </div>
       ${renderConfirmModal()}
       ${renderPfMonthModal()}
+      ${renderPagoDeudaModal()}
     `;
   }
 
@@ -3294,6 +3414,135 @@
 
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-ghost" data-action="close-pf-month">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ---------------- GESTIÓN DE DEUDAS (Módulo 5, Bola de Nieve) ----------------
+  function renderGestionDeudas(){
+    const deudas = getDeudasBolaDeNieve(); // ya ordenadas de menor a mayor saldo
+    const deudasLiquidadas = state.deudas.inventario.filter(d=> !d.activa);
+    const deudaTotalPendiente = deudas.reduce((s,d)=>s+d.saldo,0);
+    const objetivoPrincipal = deudas[0];
+    const saldoGanancia = getSaldoBoveda('ganancia');
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>Gestión de Deudas</h1><div class="fa-sub">Estrategia Bola de Nieve — ataca la deuda más chica primero, cuota mínima a las demás.</div></div>
+      </div>
+
+      ${state.deudaRecienLiquidada ? `
+      <div class="fa-card" style="border:1.5px solid var(--income); background:#F0FFF4; text-align:center; padding:28px;">
+        <div style="font-size:44px;">🏆🎉</div>
+        <div style="font-size:18px; font-weight:800; margin:8px 0;">¡${escapeHtml(state.deudaRecienLiquidada.nombre)} liquidada por completo!</div>
+        <div class="fa-hint" style="margin:0 0 14px 0;">Una menos. Ahora todo el excedente de Ganancia se puede ir contra la siguiente.</div>
+        <button type="button" class="fa-btn fa-btn-primary" data-action="cerrar-celebracion-deuda">Seguir</button>
+      </div>
+      ` : ''}
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:820px;">
+        <div class="fa-kpi expense"><div class="fa-kpi-label">Deuda total pendiente</div><div class="fa-kpi-value expense money">${fmtMoneyC(deudaTotalPendiente)}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">🎯 Objetivo Principal</div><div class="fa-kpi-value" style="font-size:16px;">${objetivoPrincipal ? escapeHtml(objetivoPrincipal.nombre) : '— sin deudas activas —'}</div></div>
+        <div class="fa-kpi income"><div class="fa-kpi-label">Disponible en Ganancia para atacar</div><div class="fa-kpi-value income money">${fmtMoneyC(saldoGanancia)}</div></div>
+      </div>
+
+      ${deudas.length===0 ? `<div class="fa-card"><div class="fa-empty">Aún no registras deudas activas. Agrega la primera abajo.</div></div>` : `
+      <div class="fa-card">
+        <div class="fa-card-title">Tus deudas, ordenadas por Bola de Nieve</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px,1fr)); gap:14px;">
+          ${deudas.map((d,i)=>`
+            <div style="border:1.5px solid ${i===0?'var(--income)':'var(--border)'}; border-radius:12px; padding:16px; ${i===0?'background:#F0FFF4;':''}">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
+                <div style="font-weight:700; font-size:14px;">${escapeHtml(d.nombre)}</div>
+                ${i===0 ? `<span class="fa-badge" style="background:var(--income); color:#fff; white-space:nowrap;">🎯 Objetivo</span>` : ''}
+              </div>
+              <div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;">
+                <div style="background:${i===0?'var(--income)':'var(--ink-soft)'}; height:100%; width:${(d.progreso*100).toFixed(0)}%;"></div>
+              </div>
+              <div class="fa-hint" style="margin:0 0 10px 0;">${(d.progreso*100).toFixed(0)}% pagado — ${fmtMoney(d.saldo)} de ${fmtMoney(d.montoOriginal)}</div>
+              <div style="font-size:12px; color:var(--ink-soft); line-height:1.6;">
+                Tasa: ${d.tasaInteres}% ${d.tasaInteresPeriodo} · Cuota mínima: ${fmtMoney(d.cuotaMinima)}<br>
+                Vence: ${d.fechaVencimiento ? fmtDate(d.fechaVencimiento) : '—'}
+              </div>
+              ${d.proyeccion.nuncaSePaga ? `
+                <div class="fa-hint" style="color:var(--expense); font-weight:700; margin-top:8px;">⚠️ La cuota mínima no cubre ni el interés — esta deuda NUNCA se paga sola, sigue creciendo.</div>
+              ` : `
+                <div class="fa-hint" style="margin-top:8px;">Pagando solo el mínimo: liquidarías en <strong>${fechaProyectada(d.proyeccion.meses)}</strong> (${d.proyeccion.meses} meses) — habrás pagado <strong style="color:var(--expense);">${fmtMoney(d.proyeccion.interesTotal)}</strong> en puro interés.</div>
+              `}
+              <div class="fa-form-actions" style="margin-top:12px;">
+                <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      `}
+
+      ${deudasLiquidadas.length>0 ? `
+      <div class="fa-card">
+        <div class="fa-card-title">🏆 Deudas Eliminadas</div>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          ${deudasLiquidadas.map(d=>`<span class="fa-badge" style="background:#F0FFF4; color:var(--income); padding:8px 14px; font-size:13px;">🏆 ${escapeHtml(d.nombre)}</span>`).join('')}
+        </div>
+      </div>
+      ` : ''}
+
+      <div class="fa-card">
+        <div class="fa-card-title">Agregar deuda al inventario</div>
+        <div data-form="deuda">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado"></div>
+            <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5"></div>
+            <div class="fa-field"><label>Período de la tasa</label>
+              <select name="tasaInteresPeriodo">
+                <option value="mensual">Mensual</option>
+                <option value="anual">Anual</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento"></div>
+            <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Agregar deuda</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPagoDeudaModal(){
+    const m = state.pagoDeudaModal;
+    if(!m) return '';
+    const deuda = state.deudas.inventario.find(d=>d.id===m.deudaId);
+    if(!deuda) return '';
+    const saldo = getSaldoDeuda(deuda.id);
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-pago-deuda">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">Registrar pago — ${escapeHtml(deuda.nombre)}</div>
+          <div class="fa-hint" style="margin-top:0;">Saldo actual: ${fmtMoneyC(saldo)}</div>
+          <div data-form="pago-deuda">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Total Pagado</label><input type="number" name="montoTotal" min="0" step="1" placeholder="0"></div>
+            <div class="fa-form-grid" style="grid-template-columns:1fr 1fr;">
+              <div class="fa-field"><label>¿Cuánto es CAPITAL?</label><input type="number" name="capital" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>¿Cuánto es INTERÉS/Comisiones?</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
+            </div>
+            <div class="fa-hint">Capital + Interés debe sumar exactamente el Monto Total Pagado.</div>
+            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label>
+              <select name="cuentaOrigen">
+                <option value="operacion">Operación (cuota mínima)</option>
+                <option value="ganancia">Ganancia (abono extra, Bola de Nieve)</option>
+              </select>
+            </div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pago-deuda">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-deuda" data-id="${deuda.id}">Confirmar pago</button>
           </div>
         </div>
       </div>
@@ -3479,7 +3728,7 @@
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderProximamente('Estado de Resultados', 'Rentabilidad del negocio — la diseñamos juntos primero.');
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
-      case 'deudas': return renderProximamente('Gestión de Deudas', 'Pagos Fijos, créditos y tarjeta — la diseñamos juntos primero.');
+      case 'deudas': return renderGestionDeudas();
       case 'config': return renderConfig();
       default: return '';
     }
@@ -5806,9 +6055,96 @@
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
       if(data.categoria === CAT_INGRESO_CREDITO_COMERCIAL){
-        showToast('Depositado en Operación — recuerda anotar la deuda en Gestión de Deudas cuando la construyamos');
+        showToast('Depositado en Operación — anota este crédito en Gestión de Deudas para que empiece a exigirte la cuota');
       } else {
         showToast('Aporte depositado en Operación');
+      }
+      render();
+    }
+    else if(action === 'submit-deuda'){
+      const data = readFields(btn.closest('[data-form="deuda"]'));
+      const montoOriginal = Number(data.montoOriginal) || 0;
+      const tasaInteres = Number(data.tasaInteres) || 0;
+      const cuotaMinima = Number(data.cuotaMinima) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre a la deuda.'); return; }
+      if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
+      const deuda = {
+        id: uid('deuda'),
+        nombre: data.nombre,
+        montoOriginal,
+        tasaInteres,
+        tasaInteresPeriodo: data.tasaInteresPeriodo || 'mensual',
+        cuotaMinima,
+        fechaVencimiento: data.fechaVencimiento || '',
+        categoria: data.categoria || '',
+        fechaCreacion: todayISO(),
+        activa: true
+      };
+      state.deudas.inventario.push(deuda);
+      await saveKey('deudas', state.deudas);
+      showToast('Deuda agregada al inventario');
+      render();
+    }
+    else if(action === 'abrir-pago-deuda'){
+      state.pagoDeudaModal = { deudaId: btn.dataset.id };
+      render();
+    }
+    else if(action === 'cerrar-pago-deuda'){
+      state.pagoDeudaModal = null;
+      render();
+    }
+    else if(action === 'cerrar-celebracion-deuda'){
+      state.deudaRecienLiquidada = null;
+      render();
+    }
+    else if(action === 'submit-pago-deuda'){
+      const deudaId = btn.dataset.id;
+      const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+      if(!deuda) return;
+      const data = readFields(btn.closest('[data-form="pago-deuda"]'));
+      const montoTotal = Number(data.montoTotal) || 0;
+      const capital = Number(data.capital) || 0;
+      const interes = Number(data.interes) || 0;
+      if(!data.fecha){ showToast('Elige una fecha para el pago.'); return; }
+      if(montoTotal <= 0){ showToast('Ingresa el monto total pagado.'); return; }
+      // Desglose obligatorio: capital + interés debe sumar exactamente el monto total, sin excepción.
+      if(capital + interes !== montoTotal){ showToast(`Capital + Interés debe sumar exactamente ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes)}.`); return; }
+
+      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen: data.cuentaOrigen };
+      state.deudas.pagos.push(pago);
+
+      const saldoRestante = getSaldoDeuda(deudaId);
+      let recienLiquidada = false;
+      if(saldoRestante <= 0){
+        deuda.activa = false;
+        recienLiquidada = true;
+      }
+      await saveKey('deudas', state.deudas);
+
+      // El monto total (capital + interés) es una salida real de la bóveda elegida en Tesorería.
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda: data.cuentaOrigen, tipo:'salida', monto: montoTotal,
+        descripcion: `Pago cuota — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      // Solo el interés es gasto operacional real (Estado de Resultados) — el capital nunca se registra
+      // como gasto, porque solo reduce lo que se debe.
+      if(interes > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO,
+          proveedor: deuda.nombre, descripcion: `Interés cuota — ${deuda.nombre}`, monto: interes,
+          metodo: 'Transferencia'
+        });
+        await saveKey('gastos', state.gastos);
+      }
+
+      state.pagoDeudaModal = null;
+      if(recienLiquidada){
+        state.deudaRecienLiquidada = { nombre: deuda.nombre };
+        showToast(`¡${deuda.nombre} liquidada!`);
+      } else {
+        showToast('Pago registrado');
       }
       render();
     }
