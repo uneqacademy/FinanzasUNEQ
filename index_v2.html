@@ -579,15 +579,19 @@
     return `${MESES[d.getMonth()]} ${d.getFullYear()}`;
   }
 
-  // Saldo actual de una deuda: SIEMPRE derivado (monto original − capital pagado hasta hoy), nunca un campo
-  // guardado — así nunca se desincroniza de los pagos reales, mismo principio que el resto de la app.
+  // Saldo actual de una deuda: SIEMPRE derivado (monto original + giros que la aumentan − capital pagado que
+  // la reduce), nunca un campo guardado — así nunca se desincroniza de los movimientos reales. "Giros" son
+  // usos de línea de crédito o compras con tarjeta que AUMENTAN lo que se debe, a diferencia de los pagos.
   function getSaldoDeuda(deudaId){
     const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
     if(!deuda) return 0;
     const capitalPagado = state.deudas.pagos
       .filter(p=>p.deudaId===deudaId)
       .reduce((s,p)=> s + (Number(p.capital)||0), 0);
-    return Math.max(Math.round((Number(deuda.montoOriginal)||0) - capitalPagado), 0);
+    const girosTotal = (state.deudas.giros||[])
+      .filter(g=>g.deudaId===deudaId)
+      .reduce((s,g)=> s + (Number(g.monto)||0), 0);
+    return Math.max(Math.round((Number(deuda.montoOriginal)||0) + girosTotal - capitalPagado), 0);
   }
 
   // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
@@ -1320,6 +1324,19 @@
       "categoria": "Tarjeta de Crédito",
       "fechaCreacion": "2026-01-05",
       "activa": true
+    },
+    {
+      "id": "deuda_v2_demo02",
+      "nombre": "Línea de Crédito Ejemplo",
+      "montoOriginal": 500000,
+      "tasaInteres": 2.0,
+      "tasaInteresPeriodo": "mensual",
+      "cuotaMinima": 50000,
+      "cupo": 2000000,
+      "fechaVencimiento": "2026-04-10",
+      "categoria": "Línea de Crédito",
+      "fechaCreacion": "2026-01-05",
+      "activa": true
     }
   ],
   "pagos": [
@@ -1332,7 +1349,8 @@
       "interes": 75000,
       "cuentaOrigen": "operacion"
     }
-  ]
+  ],
+  "giros": []
 };
   const SEED_CONTRATOS_DEVENGADOS = [
   {
@@ -1987,7 +2005,7 @@
     // Gestión de Deudas (Módulo 5): inventario es la lista de pasivos; pagos es el historial de abonos, cada
     // uno ligado a una deuda por deudaId. El saldo de cada deuda se DERIVA (montoOriginal − capital pagado),
     // nunca se guarda como campo fijo, para que nunca se desincronice de los pagos reales.
-    deudas: { inventario: [], pagos: [] },
+    deudas: { inventario: [], pagos: [], giros: [] },
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
     contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
     deudaRecienLiquidada: null, // { nombre } — dispara el banner de celebración una vez, se limpia al cerrarlo
@@ -2185,7 +2203,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -2529,6 +2547,7 @@
       state.deudas = deudas || { inventario: [], pagos: [] };
       if(!state.deudas.inventario) state.deudas.inventario = [];
       if(!state.deudas.pagos) state.deudas.pagos = [];
+      if(!state.deudas.giros) state.deudas.giros = [];
       state.contratosDevengados = contratosDevengados || [];
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
@@ -3925,6 +3944,75 @@
         </div>
       </div>
       ` : ''}
+
+      ${(() => {
+        const lineasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Línea de Crédito');
+        const tarjetasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Tarjeta de Crédito');
+        const todasActivas = state.deudas.inventario.filter(d=> d.activa);
+        const categoriasGasto = (state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).concat(
+          state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO)
+        );
+        return `
+      <div class="fa-card">
+        <div class="fa-card-title">💧 Uso de Línea de Crédito (inyección de liquidez)</div>
+        <div class="fa-section-note">Al registrar un uso, el monto entra completo a Operación como "Entrada por Financiamiento" (nunca como venta) Y aumenta al mismo tiempo lo que debes en esa línea.</div>
+        ${lineasCredito.length===0 ? `<div class="fa-hint">No tienes ninguna deuda activa categorizada "Línea de Crédito" todavía — créala primero abajo en "Agregar deuda al inventario".</div>` : `
+        <div data-form="uso-linea-credito">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Línea de Crédito</label>
+              <select name="deudaId">${lineasCredito.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Detalle (opcional)</label><input type="text" name="descripcion" placeholder="Para qué se usó"></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-uso-linea-credito">Registrar uso</button></div>
+        </div>`}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">💳 Gasto con Tarjeta de Crédito (sin salida de caja inmediata)</div>
+        <div class="fa-section-note">Se registra YA como Gasto en Estado de Resultados y aumenta la deuda de la tarjeta — pero NO descuenta nada de Tesorería todavía. Eso ocurre solo cuando pagues la facturación (botón "Registrar pago" en la tarjeta correspondiente, más abajo).</div>
+        ${tarjetasCredito.length===0 ? `<div class="fa-hint">No tienes ninguna deuda activa categorizada "Tarjeta de Crédito" todavía — créala primero abajo en "Agregar deuda al inventario".</div>` : `
+        <div data-form="gasto-tarjeta-credito">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Tarjeta</label>
+              <select name="deudaId">${tarjetasCredito.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Categoría del gasto</label>
+              <select name="categoria">${categoriasGasto.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Proveedor / Detalle</label><input type="text" name="proveedor" placeholder="Ej: Meta Ads"></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto-tarjeta-credito">Registrar gasto con tarjeta</button></div>
+        </div>`}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">🏦 Pago de Intereses / Comisión</div>
+        <div class="fa-section-note">Para cuando el banco cobra una comisión o interés que no es parte de una cuota normal — va 100% a Gastos Financieros en Estado de Resultados, no reduce el capital de la deuda.</div>
+        ${todasActivas.length===0 ? `<div class="fa-hint">No tienes deudas activas registradas.</div>` : `
+        <div data-form="pago-interes">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Deuda</label>
+              <select name="deudaId">${todasActivas.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Monto (todo es interés)</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Cuenta de Origen</label>
+              <select name="cuentaOrigen">
+                <option value="operacion">Operación</option>
+                <option value="ganancia">Ganancia</option>
+              </select>
+            </div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-interes">Registrar interés/comisión</button></div>
+        </div>`}
+      </div>
+        `;
+      })()}
 
       <div class="fa-card">
         <div class="fa-card-title">Agregar deuda al inventario</div>
@@ -6554,6 +6642,86 @@
       state.deudas.inventario.push(deuda);
       await saveKey('deudas', state.deudas);
       showToast('Deuda agregada al inventario');
+      render();
+    }
+    else if(action === 'submit-uso-linea-credito'){
+      const data = readFields(btn.closest('[data-form="uso-linea-credito"]'));
+      const deuda = state.deudas.inventario.find(d=>d.id===data.deudaId);
+      if(!deuda){ showToast('Elige una línea de crédito.'); return; }
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+
+      // Acción B primero (Gestión de Deudas): el giro aumenta lo que se debe en esa línea.
+      if(!state.deudas.giros) state.deudas.giros = [];
+      const giro = { id: uid('giro'), deudaId: deuda.id, fecha: data.fecha, monto, descripcion: data.descripcion||'', origen:'linea_credito' };
+      state.deudas.giros.push(giro);
+      await saveKey('deudas', state.deudas);
+
+      // Acción A (Tesorería): el monto entra íntegro a Operación como financiamiento — jamás como venta/ingreso.
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda:'operacion', tipo:'entrada', monto,
+        descripcion: `Entrada por Financiamiento — ${deuda.nombre}`, origen:`giro:${giro.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      showToast(`Operación +${fmtMoney(monto)} — deuda de "${deuda.nombre}" aumentada en la misma cantidad`);
+      render();
+    }
+    else if(action === 'submit-gasto-tarjeta-credito'){
+      const data = readFields(btn.closest('[data-form="gasto-tarjeta-credito"]'));
+      const deuda = state.deudas.inventario.find(d=>d.id===data.deudaId);
+      if(!deuda){ showToast('Elige una tarjeta de crédito.'); return; }
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+
+      // Acción A (Estado de Resultados): el gasto cuenta YA este mes, sin esperar a que se pague la tarjeta.
+      // A propósito NO lleva "boveda" — por eso no pasa por syncTesoreriaGasto ni descuenta nada de Tesorería.
+      state.gastos.push({
+        id: uid('gas'), fecha: data.fecha, categoria: data.categoria, proveedor: data.proveedor||'',
+        descripcion: `Compra con tarjeta — ${deuda.nombre}`, monto, metodo: 'Tarjeta de Crédito'
+      });
+      await saveKey('gastos', state.gastos);
+
+      // Acción B (Gestión de Deudas): aumenta lo que se debe en esa tarjeta.
+      if(!state.deudas.giros) state.deudas.giros = [];
+      const giro = { id: uid('giro'), deudaId: deuda.id, fecha: data.fecha, monto, descripcion: `Compra: ${data.categoria}`, origen:'tarjeta_credito' };
+      state.deudas.giros.push(giro);
+      await saveKey('deudas', state.deudas);
+
+      // Acción C: bloqueo explícito — no se toca Tesorería aquí. Eso ocurre solo al "Registrar pago" de esta
+      // tarjeta más abajo, cuando pagues la facturación real en el banco.
+      showToast('Gasto registrado en Estado de Resultados — tu Cuenta de Operación NO se movió todavía');
+      render();
+    }
+    else if(action === 'submit-pago-interes'){
+      const data = readFields(btn.closest('[data-form="pago-interes"]'));
+      const deuda = state.deudas.inventario.find(d=>d.id===data.deudaId);
+      if(!deuda){ showToast('Elige una deuda.'); return; }
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+
+      // Es un pago normal donde el 100% es interés (capital: 0) — mismo mecanismo que "Registrar pago", solo
+      // que acá no hay que desglosar nada a mano porque ya sabemos que todo es interés/comisión.
+      const pago = { id: uid('pagodeuda'), deudaId: deuda.id, fecha: data.fecha, montoTotal: monto, capital: 0, interes: monto, cuentaOrigen: data.cuentaOrigen };
+      state.deudas.pagos.push(pago);
+      await saveKey('deudas', state.deudas);
+
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda: data.cuentaOrigen, tipo:'salida', monto,
+        descripcion: `Interés/Comisión — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      state.gastos.push({
+        id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO, proveedor: deuda.nombre,
+        descripcion: `Interés/Comisión — ${deuda.nombre}`, monto, metodo: 'Transferencia'
+      });
+      await saveKey('gastos', state.gastos);
+
+      showToast('Interés/comisión registrado como Gasto Financiero');
       render();
     }
     else if(action === 'abrir-pago-deuda'){
