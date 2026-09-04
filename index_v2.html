@@ -1928,7 +1928,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -4667,6 +4667,50 @@
       `}
 
       <div class="fa-card">
+        <div class="fa-card-title">Financiamiento / Aporte de Capital</div>
+        <div class="fa-section-note">Crédito comercial o aporte de inversionista: NO pasa por el embudo de 4 bóvedas — aterriza íntegro y directo en Operación, para financiar la estructura, no para repartirse.</div>
+        <div data-form="financiamiento">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Tipo</label>
+              <select name="categoria">
+                <option value="${CAT_INGRESO_CREDITO_COMERCIAL}">${CAT_INGRESO_CREDITO_COMERCIAL}</option>
+                <option value="${CAT_INGRESO_APORTE_INVERSIONISTA}">${CAT_INGRESO_APORTE_INVERSIONISTA}</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Detalle (opcional)</label><input type="text" name="descripcion" placeholder="Ej: Banco Chile, o nombre del inversionista"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-financiamiento">Registrar financiamiento</button>
+          </div>
+          <div class="fa-hint">Si es Crédito Comercial, no olvides anotar la deuda en Gestión de Deudas apenas la construyamos — por ahora esto solo deposita en Operación, no crea el pasivo.</div>
+        </div>
+        ${(() => {
+          const historial = state.ingresos
+            .filter(i=> i.categoria===CAT_INGRESO_CREDITO_COMERCIAL || i.categoria===CAT_INGRESO_APORTE_INVERSIONISTA)
+            .slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+          if(historial.length===0) return '';
+          return `
+          <div class="fa-table-wrap" style="margin-top:14px;">
+            <table class="fa-table">
+              <thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th class="num">Monto</th></tr></thead>
+              <tbody>
+                ${historial.map(i=>`
+                  <tr>
+                    <td>${fmtDate(i.fecha)}</td>
+                    <td>${escapeHtml(i.categoria)}</td>
+                    <td>${escapeHtml(i.descripcion)||'—'}</td>
+                    <td class="num money">${fmtMoneyC(i.monto)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>`;
+        })()}
+      </div>
+
+      <div class="fa-card">
         <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
         ${BOVEDAS.map(b=>{
           const movs = getMovimientosBoveda(b.id).slice().reverse().slice(0,8);
@@ -5734,6 +5778,38 @@
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
       showToast('Ingreso registrado y distribuido en las 4 bóvedas');
+      render();
+    }
+    else if(action === 'submit-financiamiento'){
+      const data = readFields(btn.closest('[data-form="financiamiento"]'));
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+
+      const ingreso = {
+        id: uid('ing'),
+        fecha: data.fecha,
+        categoria: data.categoria, // Crédito Comercial | Aporte Inversionista — ya son no-venta por config
+        descripcion: data.descripcion || '',
+        monto,
+        estado: 'Pagado'
+      };
+      state.ingresos.push(ingreso);
+      await saveKey('ingresos', state.ingresos);
+
+      // A diferencia de un ingreso de venta: NO pasa por Recepción ni se reparte en 4 — aterriza íntegro y
+      // directo en Operación, para financiar la estructura, no para "ganancia" ni "sueldo de dueños".
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda:'operacion', tipo:'entrada', monto,
+        descripcion: `${data.categoria}${data.descripcion?` — ${data.descripcion}`:''}`, origen:`ingreso:${ingreso.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      if(data.categoria === CAT_INGRESO_CREDITO_COMERCIAL){
+        showToast('Depositado en Operación — recuerda anotar la deuda en Gestión de Deudas cuando la construyamos');
+      } else {
+        showToast('Aporte depositado en Operación');
+      }
       render();
     }
     else if(action === 'asesor-enviar'){
