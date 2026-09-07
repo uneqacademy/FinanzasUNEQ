@@ -2635,10 +2635,18 @@
 
   // ---- Tesorería (Módulo 4): las 5 bóvedas ----
   // Saldo histórico completo de una bóveda (no se resetea por año — igual que Cuenta Corriente/USD).
+  // El Flujo de Caja arranca limpio en el Día Cero: cualquier movimiento con fecha ANTERIOR a esa fecha
+  // nunca cuenta para el saldo actual de ninguna bóveda — solo Estado de Resultados (Módulo 3) puede ver
+  // historia de antes de esa fecha. Se usa en las 3 funciones de abajo, para que nunca se cuele un
+  // movimiento viejo por ningún camino.
+  function esMovimientoVigente(m){
+    return !state.config.fechaDiaCero || (m.fecha||'') >= state.config.fechaDiaCero;
+  }
+
   function getSaldoBoveda(bovedaId){
     const saldoIni = Number((state.tesoreria.saldosIniciales||{})[bovedaId]) || 0;
     return state.tesoreria.movimientos
-      .filter(m=> m.boveda === bovedaId)
+      .filter(m=> m.boveda === bovedaId && esMovimientoVigente(m))
       .reduce((s,m)=> s + (m.tipo === 'salida' ? -(Number(m.monto)||0) : (Number(m.monto)||0)), saldoIni);
   }
 
@@ -2648,6 +2656,7 @@
     const saldos = {};
     BOVEDAS.forEach(b=> saldos[b.id] = Number((state.tesoreria.saldosIniciales||{})[b.id]) || 0);
     state.tesoreria.movimientos.forEach(m=>{
+      if(!esMovimientoVigente(m)) return;
       const delta = (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
       saldos[m.boveda] = (saldos[m.boveda]||0) + delta;
     });
@@ -2658,7 +2667,7 @@
   function getMovimientosBoveda(bovedaId){
     const saldoIni = Number((state.tesoreria.saldosIniciales||{})[bovedaId]) || 0;
     const movs = state.tesoreria.movimientos
-      .filter(m=> m.boveda === bovedaId)
+      .filter(m=> m.boveda === bovedaId && esMovimientoVigente(m))
       .slice()
       .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
     let saldo = saldoIni;
