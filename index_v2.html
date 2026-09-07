@@ -531,6 +531,17 @@
   // Tipos de servicio para el prorrateo de ingresos devengados: Autogestionado siempre dura 1 mes (no se
   // prorratea), Mentoría/Agencia dura los meses que el usuario indique.
   const TIPOS_SERVICIO_DEVENGADO = ["Autogestionado", "Mentoría/Agencia"];
+  // Forma de Pago de cada línea del lote — define en qué moneda se ingresa el monto y cómo se comportan
+  // comisión/anticipo. 'usd' = pasarela internacional (Hotmart/Stripe), con tipo de cambio, comisión y
+  // anticipo, todo en USD. 'clp_transferencia' = pago directo, sin pasarela de por medio: nunca hay comisión
+  // ni anticipo, y el monto ya está en CLP. 'clp_pasarela' = pasarela de pago chilena (Transbank/Flow/etc.):
+  // el monto ya está en CLP y SÍ hay comisión (también en CLP), pero nunca anticipo — ese cargo es propio de
+  // pasarelas internacionales tipo Hotmart, no de las locales.
+  const FORMAS_PAGO_LINEA = [
+    { id:'usd', label:'USD — Pasarela Internacional (Hotmart/Stripe)', moneda:'USD', tieneComision:true, tieneAnticipo:true },
+    { id:'clp_transferencia', label:'CLP — Transferencia directa', moneda:'CLP', tieneComision:false, tieneAnticipo:false },
+    { id:'clp_pasarela', label:'CLP — Pasarela de Pago (Transbank/Flow/etc.)', moneda:'CLP', tieneComision:true, tieneAnticipo:false }
+  ];
 
   // Reparte un monto entero en las 4 bóvedas pagables según %. Redondea sueldoDuenos/impuestos/ganancia con
   // Math.round, y hace que Operación absorba lo que sobre — así la suma de las 4 SIEMPRE calza exacto con
@@ -3145,6 +3156,24 @@
     libreWrap.style.display = preset.value === 'otro' ? '' : 'none';
   };
 
+  // Según la Forma de Pago elegida para la línea, cambia la etiqueta de moneda del Monto Bruto y muestra u
+  // oculta Comisión/Anticipo — Transferencia nunca tiene comisión ni anticipo, Pasarela CLP tiene comisión
+  // (en CLP) pero nunca anticipo, y USD/Hotmart tiene ambos, en USD.
+  window.faToggleFormaPagoLinea = function(){
+    const select = document.getElementById('fa-linea-forma-pago');
+    const montoLabel = document.getElementById('fa-linea-monto-label');
+    const comisionWrap = document.getElementById('fa-linea-comision-wrap');
+    const comisionLabel = document.getElementById('fa-linea-comision-label');
+    const anticipoWrap = document.getElementById('fa-linea-anticipo-wrap');
+    if(!select || !montoLabel || !comisionWrap || !anticipoWrap) return;
+    const formaPagoData = { usd:{moneda:'USD', tieneComision:true, tieneAnticipo:true}, clp_transferencia:{moneda:'CLP', tieneComision:false, tieneAnticipo:false}, clp_pasarela:{moneda:'CLP', tieneComision:true, tieneAnticipo:false} };
+    const fp = formaPagoData[select.value] || formaPagoData.usd;
+    montoLabel.textContent = `Monto Bruto de esta línea (${fp.moneda})`;
+    comisionWrap.style.display = fp.tieneComision ? '' : 'none';
+    if(comisionLabel) comisionLabel.textContent = fp.moneda==='USD' ? 'Comisión por Cuota — Hotmart/Stripe (USD, opcional)' : 'Comisión por Cuota — Pasarela (CLP, opcional)';
+    anticipoWrap.style.display = fp.tieneAnticipo ? '' : 'none';
+  };
+
   // Busca el dólar observado del Banco Central (vía mindicador.cl) para la Fecha de Inicio del Lote de
   // Ventas. Si falla (sin internet, fecha sin dato, API caída), deja el campo vacío y editable para que se
   // ingrese a mano — nunca bloquea el registro.
@@ -3589,20 +3618,26 @@
           `;
         })() : (() => {
           const lote = state.loteEnConstruccion || { lineas: [] };
-          const totalUSDLote = lote.lineas.reduce((s,l)=>s+(Number(l.montoTotalUSD)||0),0);
+          const totalUSDLote = lote.lineas.filter(l=>(l.formaPago||'usd')==='usd').reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
+          const totalCLPLote = lote.lineas.filter(l=>l.formaPago && l.formaPago!=='usd').reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           return `
-        <div class="fa-hint" style="margin-top:0;">Paso 1: agrega cada línea de venta del lote.</div>
+        <div class="fa-hint" style="margin-top:0;">Paso 1: agrega cada línea de venta del lote — la comisión y el anticipo dependen de cómo paga ESE cliente, así que van por línea, no por lote.</div>
         <div data-form="linea-lote">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X"></div>
-            <div class="fa-field"><label>Monto Bruto de esta línea (USD)</label><input type="number" id="fa-linea-monto" name="montoUSD" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field"><label>Forma de Pago</label>
+              <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
+                ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}">${escapeHtml(f.label)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (USD)</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0"></div>
             <div class="fa-field"><label>Tipo de Servicio</label>
               <select id="fa-linea-tipo" name="tipoServicio" onchange="window.faToggleDuracionLinea()">
                 ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option>${t}</option>`).join('')}
               </select>
             </div>
             <div class="fa-field" id="fa-linea-duracion-wrap">
-              <label>Meses Reales de Duración</label>
+              <label>Meses Reales de Duración (para el ingreso)</label>
               <select id="fa-linea-duracion-preset" name="duracionPreset" onchange="window.faToggleDuracionLineaLibre()">
                 ${DURACION_SERVICIO_PRESETS.map(n=>`<option value="${n}">${n} meses</option>`).join('')}
                 <option value="otro">Otro</option>
@@ -3612,7 +3647,11 @@
               <label>¿Cuántos meses?</label>
               <input type="number" id="fa-linea-duracion-libre" name="duracionLibre" min="1" step="1" placeholder="Ej: 9">
             </div>
+            <div class="fa-field"><label>Número de Cuotas de Pago (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="1"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" name="comisionPorCuota" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0"></div>
           </div>
+          <div class="fa-hint">Se genera una comisión (y un anticipo, si aplica) por cada cuota, un mes seguido del otro desde la Fecha de Inicio del lote — cada una queda editable o eliminable por separado después.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="agregar-linea-lote">+ Agregar línea al lote</button>
           </div>
@@ -3621,18 +3660,22 @@
         ${lote.lineas.length>0 ? `
         <div class="fa-table-wrap" style="margin:14px 0;">
           <table class="fa-table">
-            <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Duración</th><th class="num">Monto USD</th><th></th></tr></thead>
+            <thead><tr><th>Proyecto/Cliente</th><th>Forma de Pago</th><th>Tipo</th><th>Duración</th><th class="num">Monto</th><th>Cuotas</th><th></th></tr></thead>
             <tbody>
-              ${lote.lineas.map((l,i)=>`
+              ${lote.lineas.map((l,i)=>{
+                const fp = FORMAS_PAGO_LINEA.find(f=>f.id===l.formaPago) || FORMAS_PAGO_LINEA[0];
+                return `
                 <tr>
                   <td>${escapeHtml(l.nombre)}</td>
+                  <td>${fp.moneda}</td>
                   <td>${escapeHtml(l.tipoServicio)}</td>
                   <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
-                  <td class="num money">${fmtMoneyUSD(l.montoTotalUSD)}</td>
+                  <td class="num money">${fp.moneda==='USD'?fmtMoneyUSD(l.montoBruto):fmtMoneyC(l.montoBruto)}</td>
+                  <td>${l.numeroCuotasPago}${l.comisionPorCuota?` (com. ${fp.moneda==='USD'?fmtMoneyUSD(l.comisionPorCuota):fmtMoneyC(l.comisionPorCuota)}/cuota)`:''}</td>
                   <td><button class="fa-icon-btn danger" data-action="quitar-linea-lote" data-index="${i}">Quitar</button></td>
                 </tr>
-              `).join('')}
-              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="3">Total del lote</td><td class="num money">${fmtMoneyUSD(totalUSDLote)}</td><td></td></tr>
+              `;}).join('')}
+              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="4">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSD(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
             </tbody>
           </table>
         </div>
@@ -3640,15 +3683,13 @@
         <div class="fa-hint" style="margin-top:0;">Paso 2: datos generales del lote completo (aplican a todas las líneas de arriba).</div>
         <div data-form="lote-devengado">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta / primera cuota)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${todayISO()}"></div>
             <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
               <div style="display:flex; gap:8px;">
                 <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50">
                 <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
               </div>
             </div>
-            <div class="fa-field"><label>Total Comisiones de Pasarela — Hotmart/Stripe (USD, opcional)</label><input type="number" name="comisionesUSD" min="0" step="0.01" placeholder="0"></div>
-            <div class="fa-field"><label>Costo de Anticipo de Fondos (USD, opcional)</label><input type="number" name="anticipoUSD" min="0" step="0.01" placeholder="0"></div>
           </div>
           <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:0;">Busca el dólar observado del Banco Central para la Fecha de Inicio, o escríbelo tú si falla.</div>
           <div class="fa-form-actions" style="margin-top:10px;">
@@ -6993,13 +7034,23 @@
     }
     else if(action === 'agregar-linea-lote'){
       const data = readFields(btn.closest('[data-form="linea-lote"]'));
-      const montoUSD = Number(data.montoUSD) || 0;
+      const formaPago = data.formaPago || 'usd';
+      const fp = FORMAS_PAGO_LINEA.find(f=>f.id===formaPago) || FORMAS_PAGO_LINEA[0];
+      const montoBruto = Number(data.montoBruto) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return; }
-      if(montoUSD <= 0){ showToast('Ingresa el Monto Bruto en USD de la línea.'); return; }
+      if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda} de la línea.`); return; }
       const esAutogestionado = data.tipoServicio === 'Autogestionado';
       const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionPreset==='otro' ? data.duracionLibre : data.duracionPreset)||1, 1);
+      const numeroCuotasPago = Math.max(Number(data.numeroCuotasPago)||1, 1);
+      // Comisión/Anticipo se ignoran por completo si la Forma de Pago no los permite — así nunca queda un
+      // valor "fantasma" cargado de un cambio de forma de pago a mitad de llenar el formulario.
+      const comisionPorCuota = fp.tieneComision ? (Number(data.comisionPorCuota) || 0) : 0;
+      const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
       if(!state.loteEnConstruccion) state.loteEnConstruccion = { lineas: [] };
-      state.loteEnConstruccion.lineas.push({ id: uid('linea'), nombre: data.nombre, montoTotalUSD: montoUSD, tipoServicio: data.tipoServicio, duracionMeses });
+      state.loteEnConstruccion.lineas.push({
+        id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoServicio: data.tipoServicio, duracionMeses,
+        numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
+      });
       showToast('Línea agregada al lote — sigue agregando o confirma abajo');
       render();
     }
@@ -7015,44 +7066,65 @@
       if(lineas.length === 0){ showToast('Agrega al menos una línea al lote antes de confirmar.'); return; }
       const data = readFields(btn.closest('[data-form="lote-devengado"]'));
       const tipoCambio = Number(data.tipoCambio) || 0;
-      const comisionesUSD = Number(data.comisionesUSD) || 0;
-      const anticipoUSD = Number(data.anticipoUSD) || 0;
       if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio del lote.'); return; }
-      if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano).'); return; }
+      // El Tipo de Cambio solo hace falta si AL MENOS una línea del lote paga en USD — si todas son CLP
+      // (transferencia o pasarela local), no tiene sentido pedirlo.
+      const necesitaTipoCambio = lineas.some(l => (l.formaPago||'usd') === 'usd');
+      if(necesitaTipoCambio && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — al menos una línea paga en USD.'); return; }
 
-      // Todo lo contable queda en CLP — el USD y el tipo de cambio quedan como referencia. El Motor de
-      // Prorrateo aplica a cada línea por separado; comisiones/anticipo se cargan UNA vez para el lote entero.
+      // Todo lo contable queda en CLP. El Motor de Prorrateo del INGRESO usa la Duración del Servicio de
+      // cada línea. La comisión y el anticipo son independientes de eso: siguen el Número de Cuotas de Pago
+      // de esa línea — una por mes, consecutiva, desde la Fecha de Inicio del lote. Si la línea paga en USD
+      // (Hotmart), todo se convierte con el Tipo de Cambio; si paga en CLP (transferencia o pasarela local),
+      // el monto ya está en la moneda final y no se convierte nada.
       const loteId = uid('lote');
+      const inicio = new Date(data.fechaInicio+'T00:00:00');
+      let seGeneraronGastos = false;
       lineas.forEach(linea=>{
-        const montoTotal = Math.round(linea.montoTotalUSD * tipoCambio);
+        const esUSD = (linea.formaPago||'usd') === 'usd';
+        const montoTotal = esUSD ? Math.round(linea.montoBruto * tipoCambio) : Math.round(linea.montoBruto);
         state.contratosDevengados.push({
-          id: uid('contrato'), loteId, nombre: linea.nombre, montoTotal, montoTotalUSD: linea.montoTotalUSD,
-          tipoCambio, tipoServicio: linea.tipoServicio, duracionMeses: linea.duracionMeses,
+          id: uid('contrato'), loteId, nombre: linea.nombre, montoTotal,
+          montoTotalUSD: esUSD ? linea.montoBruto : undefined,
+          tipoCambio: esUSD ? tipoCambio : null,
+          formaPago: linea.formaPago || 'usd',
+          tipoServicio: linea.tipoServicio, duracionMeses: linea.duracionMeses,
           fechaInicio: data.fechaInicio, fechaCreacion: todayISO()
         });
+
+        const numCuotas = Math.max(Number(linea.numeroCuotasPago)||1, 1);
+        const comisionPorCuotaCLP = esUSD
+          ? Math.round((Number(linea.comisionPorCuota)||0) * tipoCambio)
+          : Math.round(Number(linea.comisionPorCuota)||0);
+        // El anticipo de fondos solo existe para pasarelas internacionales tipo Hotmart (siempre en USD) —
+        // transferencia y pasarela CLP nunca lo tienen, por eso ni se calcula si la línea no es USD.
+        const anticipoPorCuotaCLP = esUSD ? Math.round((Number(linea.anticipoPorCuotaUSD)||0) * tipoCambio) : 0;
+        for(let i=0; i<numCuotas; i++){
+          const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
+          const fechaCuota = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+          if(comisionPorCuotaCLP > 0){
+            state.gastos.push({
+              id: uid('gas'), fecha: fechaCuota, categoria: CAT_COSTO_COMISIONES, proveedor: linea.nombre,
+              descripcion: `Comisión ${esUSD?'pasarela internacional':'pasarela'} — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
+              monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: loteId
+            });
+            seGeneraronGastos = true;
+          }
+          if(anticipoPorCuotaCLP > 0){
+            state.gastos.push({
+              id: uid('gas'), fecha: fechaCuota, categoria: CAT_GASTO_COSTO_LIQUIDEZ, proveedor: linea.nombre,
+              descripcion: `Anticipo de fondos — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
+              monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: loteId
+            });
+            seGeneraronGastos = true;
+          }
+        }
       });
       await saveKey('contratosDevengados', state.contratosDevengados);
-
-      const comisionesCLP = Math.round(comisionesUSD * tipoCambio);
-      const anticipoCLP = Math.round(anticipoUSD * tipoCambio);
-      if(comisionesCLP > 0){
-        state.gastos.push({
-          id: uid('gas'), fecha: data.fechaInicio, categoria: CAT_COSTO_COMISIONES,
-          proveedor: `Lote de ventas`, descripcion: `Comisiones de pasarela del lote (US$${comisionesUSD} x ${tipoCambio})`,
-          monto: comisionesCLP, metodo: 'Transferencia', origenContrato: loteId
-        });
-      }
-      if(anticipoCLP > 0){
-        state.gastos.push({
-          id: uid('gas'), fecha: data.fechaInicio, categoria: CAT_GASTO_COSTO_LIQUIDEZ,
-          proveedor: `Lote de ventas`, descripcion: `Anticipo de fondos del lote (US$${anticipoUSD} x ${tipoCambio})`,
-          monto: anticipoCLP, metodo: 'Transferencia', origenContrato: loteId
-        });
-      }
-      if(comisionesCLP>0 || anticipoCLP>0) await saveKey('gastos', state.gastos);
+      if(seGeneraronGastos) await saveKey('gastos', state.gastos);
 
       state.loteEnConstruccion = { lineas: [] };
-      showToast(`Lote confirmado — ${lineas.length} línea${lineas.length===1?'':'s'} registrada${lineas.length===1?'':'s'}`);
+      showToast(`Lote confirmado — ${lineas.length} línea${lineas.length===1?'':'s'} registrada${lineas.length===1?'':'s'}, comisiones y anticipos repartidos mes a mes según cada cuota`);
       render();
     }
     else if(action === 'delete-lote-devengado'){
