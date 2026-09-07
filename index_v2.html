@@ -507,6 +507,12 @@
   // real en Estado de Resultados (NO es no-venta: el interés sí es un costo del negocio, a diferencia del
   // capital, que nunca se registra como gasto porque solo reduce lo que se debe).
   const CAT_GASTO_FINANCIERO = "Gasto Financiero";
+  // Costo de anticipo de fondos (ej. 0.97% de Hotmart por liquidar antes): también es un gasto financiero,
+  // pero en categoría propia para distinguirlo del interés de deudas — ambos cuentan igual en la zona de
+  // Gastos Financieros del Estado de Resultados.
+  const CAT_GASTO_COSTO_LIQUIDEZ = "Gastos Financieros - Costo de Liquidez";
+  // Opciones predefinidas de Duración del Servicio — "otro" revela un campo libre.
+  const DURACION_SERVICIO_PRESETS = [3, 6, 12];
 
   // Cuentas de Tesorería desde donde se puede pagar una cuota de deuda: cuota mínima normalmente desde
   // Operación, abono extra (Bola de Nieve) desde Ganancia.
@@ -610,6 +616,54 @@
       .sort((a,b)=> a.saldo - b.saldo);
   }
 
+  // Elimina un pago de deuda y limpia todo lo que generó: la salida de Tesorería y el Gasto Financiero
+  // vinculado (si el pago tenía interés). Devuelve el pago eliminado, o null si no existía.
+  function deletePagoDeuda(pagoId){
+    const pago = state.deudas.pagos.find(p=>p.id===pagoId);
+    if(!pago) return null;
+    state.deudas.pagos = state.deudas.pagos.filter(p=>p.id!==pagoId);
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagodeuda:${pagoId}`);
+    state.gastos = state.gastos.filter(g=> g.origenPagoDeuda !== pagoId);
+    return pago;
+  }
+
+  // Elimina un giro (uso de línea de crédito o compra con tarjeta) y limpia lo que generó: la entrada de
+  // Tesorería (si era línea de crédito) o el Gasto vinculado (si era compra con tarjeta).
+  function deleteGiroDeuda(giroId){
+    const giro = (state.deudas.giros||[]).find(g=>g.id===giroId);
+    if(!giro) return null;
+    state.deudas.giros = state.deudas.giros.filter(g=>g.id!==giroId);
+    if(giro.origen === 'linea_credito'){
+      state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `giro:${giroId}`);
+    } else if(giro.origen === 'tarjeta_credito' || giro.origen === 'cuota_atrasada'){
+      state.gastos = state.gastos.filter(g=> g.origenGiro !== giroId);
+    }
+    return giro;
+  }
+
+  // Elimina una deuda completa del inventario, en cascada: todos sus pagos y giros (con su limpieza de
+  // Tesorería/Gastos respectiva) antes de quitar la deuda misma.
+  function deleteDeudaCompleta(deudaId){
+    state.deudas.pagos.filter(p=>p.deudaId===deudaId).forEach(p=> deletePagoDeuda(p.id));
+    (state.deudas.giros||[]).filter(g=>g.deudaId===deudaId).forEach(g=> deleteGiroDeuda(g.id));
+    state.deudas.inventario = state.deudas.inventario.filter(d=>d.id!==deudaId);
+  }
+
+  // ---- Cuentas por Pagar (sección aparte de Deudas — nacen de gastos pagados parcialmente, sin interés) ----
+  function getSaldoCtaPorPagar(ctaId){
+    const cta = state.cuentasPorPagar.items.find(c=>c.id===ctaId);
+    if(!cta) return 0;
+    const pagado = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===ctaId).reduce((s,p)=> s+(Number(p.monto)||0), 0);
+    return Math.max(Math.round((Number(cta.montoOriginal)||0) - pagado), 0);
+  }
+
+  function getCuentasPorPagarActivas(){
+    return state.cuentasPorPagar.items
+      .filter(c=>c.activa)
+      .map(c=> ({ ...c, saldo: getSaldoCtaPorPagar(c.id) }))
+      .sort((a,b)=>(a.fechaCreacion||'').localeCompare(b.fechaCreacion||''));
+  }
+
   // ---- Estado de Resultados (Módulo 3, base devengada) ----
   // Prorratea el monto total de un contrato en partes iguales sobre su duración en meses — la última cuota
   // absorbe el resto de redondeo, para que la suma de las cuotas SIEMPRE calce exacto con el monto total.
@@ -649,7 +703,7 @@
       const m = d.getMonth();
       const monto = montoNegocioGasto(g); // respeta no-venta y el desglose interés/capital ya construidos
       if(monto === 0) return;
-      if(g.categoria === CAT_GASTO_FINANCIERO) meses[m].gastosFinancieros += monto;
+      if(g.categoria === CAT_GASTO_FINANCIERO || g.categoria === CAT_GASTO_COSTO_LIQUIDEZ) meses[m].gastosFinancieros += monto;
       else if(categoriasCostoDirecto.includes(g.categoria)) meses[m].costosDirectos += monto;
       else meses[m].gastosOperacionales += monto;
     });
@@ -664,6 +718,59 @@
 
     return meses;
   }
+
+  // ---- Plantilla de Gastos Fijos (Módulo 3): generación automática al abrir la app ----
+  // Por cada plantilla activa, si no existe ya un gasto de ESTE mes calendario generado desde ella
+  // (identificado por origenPlantilla), se crea uno nuevo en estado "Pendiente" — el 100% cuenta de
+  // inmediato como Gasto Operacional en Estado de Resultados (base devengada), independiente de si se ha
+  // pagado o no. Devuelve true si generó algo nuevo (para saber si hay que guardar).
+  function generarGastosFijosDelMes(){
+    const hoy = new Date();
+    const anio = hoy.getFullYear();
+    const mes = hoy.getMonth();
+    let generados = false;
+    state.plantillasGastosFijos.filter(p=>p.activa).forEach(p=>{
+      const yaExiste = state.gastos.some(g=>{
+        if(g.origenPlantilla !== p.id || !g.fecha) return false;
+        const d = new Date(g.fecha+'T00:00:00');
+        return d.getFullYear()===anio && d.getMonth()===mes;
+      });
+      if(!yaExiste){
+        const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
+        state.gastos.push({
+          id: uid('gas'), fecha: fechaGasto, categoria: p.categoria,
+          proveedor: p.nombre, descripcion: `Gasto fijo: ${p.nombre}`, monto: p.montoMensual,
+          estado: 'Pendiente', montoPagado: 0, origenPlantilla: p.id, metodo: 'Transferencia'
+        });
+        generados = true;
+      }
+    });
+
+    // Sueldo Dueños: mismo mecanismo, pero como un ítem único y fijo (no un catálogo) — el retiro real
+    // SIEMPRE sale de la bóveda "sueldoDuenos" específicamente, nunca de otra (a diferencia de un Gasto Fijo
+    // normal, donde se elige la bóveda al procesar). Se reconoce como Gasto Operacional constante, se retire
+    // o no — la bóveda puede acumular excedentes sin que esto fuerce nada.
+    const sueldoFijo = Number(state.config.sueldoDuenosFijoMensual) || 0;
+    if(sueldoFijo > 0){
+      const yaExisteSueldo = state.gastos.some(g=>{
+        if(!g.origenSueldoDuenos || !g.fecha) return false;
+        const d = new Date(g.fecha+'T00:00:00');
+        return d.getFullYear()===anio && d.getMonth()===mes;
+      });
+      if(!yaExisteSueldo){
+        const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
+        state.gastos.push({
+          id: uid('gas'), fecha: fechaGasto, categoria: 'Sueldo Operativo Socios',
+          proveedor: 'Sueldo Dueños', descripcion: 'Sueldo Dueños del mes (fijo acordado)', monto: sueldoFijo,
+          estado: 'Pendiente', montoPagado: 0, origenSueldoDuenos: true, metodo: 'Transferencia'
+        });
+        generados = true;
+      }
+    }
+
+    return generados;
+  }
+
 
   // ---- Dashboard (Módulo 1): agregadores de solo lectura — nada de esto guarda datos, solo lee de lo que
   // ya existe en Tesorería, Estado de Resultados y Gestión de Deudas. ----
@@ -796,7 +903,16 @@
     "Otros Gastos",
     "Retiro Socios",
     "Pago Tarjeta de Crédito",
-    "Gasto no asociado a Venta Directa"
+    "Gasto no asociado a Venta Directa",
+    "Gasto Financiero",
+    "Gastos Financieros - Costo de Liquidez",
+    "Inversión en Ads (Academia)",
+    "Comisiones de Pasarelas (Stripe/Hotmart)",
+    "Pago a Afiliados",
+    "Nómina Equipo",
+    "Sueldo Operativo Socios",
+    "Software/Suscripciones",
+    "Viáticos y Generales"
   ],
   "categoriasGastosNoVenta": [
     "Gasto no asociado a Venta Directa",
@@ -808,6 +924,11 @@
     "Créditos y Renegociaciones",
     "Retiro Socios",
     "Pago Tarjeta de Crédito"
+  ],
+  "categoriasCostoDirecto": [
+    "Inversión en Ads (Academia)",
+    "Comisiones de Pasarelas (Stripe/Hotmart)",
+    "Pago a Afiliados"
   ],
   "categoriasIngresos": [
     "Academia - Cursos Autogestionados",
@@ -835,250 +956,19 @@
     "Efectivo",
     "Cheque"
   ],
-  "saldoInicial": 3000000,
-  "saldoInicialUSD": 500,
+  "saldoInicial": 0,
+  "saldoInicialUSD": 0,
   "distribucionPorcentajes": {
     "operacion": 60,
     "sueldoDuenos": 20,
     "impuestos": 15,
     "ganancia": 5
-  }
+  },
+  "metaMensualIngresos": 0
 };
-  const SEED_INGRESOS = [
-  {
-    "id": "ing_v2_demo01",
-    "fecha": "2026-01-05",
-    "categoria": "Academia - Cursos Autogestionados",
-    "cliente": "Cliente Ejemplo A",
-    "descripcion": "Venta programa BEGIN — ejemplo",
-    "estado": "Pagado",
-    "monto": 890000,
-    "distribucion": {
-      "porcentajes": {
-        "operacion": 60,
-        "sueldoDuenos": 20,
-        "impuestos": 15,
-        "ganancia": 5
-      },
-      "montos": {
-        "operacion": 534000,
-        "sueldoDuenos": 178000,
-        "impuestos": 133500,
-        "ganancia": 44500
-      },
-      "confirmadoEl": "2026-01-05T10:00:00.000Z"
-    }
-  },
-  {
-    "id": "ing_v2_demo02",
-    "fecha": "2026-01-14",
-    "categoria": "Academia - Mentorías",
-    "cliente": "Cliente Ejemplo B",
-    "descripcion": "Mentoría 1:1 — ejemplo",
-    "estado": "Pagado",
-    "monto": 450000,
-    "distribucion": {
-      "porcentajes": {
-        "operacion": 60,
-        "sueldoDuenos": 20,
-        "impuestos": 15,
-        "ganancia": 5
-      },
-      "montos": {
-        "operacion": 270000,
-        "sueldoDuenos": 90000,
-        "impuestos": 67500,
-        "ganancia": 22500
-      },
-      "confirmadoEl": "2026-01-14T10:00:00.000Z"
-    }
-  },
-  {
-    "id": "ing_v2_demo03",
-    "fecha": "2026-01-22",
-    "categoria": "Agencia - Fee de Servicio",
-    "cliente": "Empresa Ejemplo C",
-    "descripcion": "Fee mensual de servicio — ejemplo",
-    "estado": "Pendiente",
-    "monto": 1200000
-  },
-  {
-    "id": "ing_v2_demo04",
-    "fecha": "2026-02-03",
-    "categoria": "Academia - Cursos Autogestionados",
-    "cliente": "Cliente Ejemplo D",
-    "descripcion": "Venta programa NEXT — ejemplo",
-    "estado": "Pagado",
-    "monto": 950000,
-    "distribucion": {
-      "porcentajes": {
-        "operacion": 60,
-        "sueldoDuenos": 20,
-        "impuestos": 15,
-        "ganancia": 5
-      },
-      "montos": {
-        "operacion": 570000,
-        "sueldoDuenos": 190000,
-        "impuestos": 142500,
-        "ganancia": 47500
-      },
-      "confirmadoEl": "2026-02-03T10:00:00.000Z"
-    }
-  },
-  {
-    "id": "ing_v2_demo05",
-    "fecha": "2026-02-11",
-    "categoria": "Otros Ingresos",
-    "cliente": "Cliente Ejemplo E",
-    "descripcion": "Ingreso menor — ejemplo",
-    "estado": "Pagado",
-    "monto": 120000,
-    "distribucion": {
-      "porcentajes": {
-        "operacion": 60,
-        "sueldoDuenos": 20,
-        "impuestos": 15,
-        "ganancia": 5
-      },
-      "montos": {
-        "operacion": 72000,
-        "sueldoDuenos": 24000,
-        "impuestos": 18000,
-        "ganancia": 6000
-      },
-      "confirmadoEl": "2026-02-11T10:00:00.000Z"
-    }
-  },
-  {
-    "id": "ing_v2_demo06",
-    "fecha": "2026-02-18",
-    "categoria": "Aporte Inversionista",
-    "cliente": "Inversionista Ejemplo",
-    "descripcion": "Aporte de capital — ejemplo (aún no pasa por el embudo, pendiente de definir)",
-    "estado": "Pagado",
-    "monto": 2000000
-  }
-];
-  const SEED_GASTOS = [
-  {
-    "id": "gas_v2_demo01",
-    "fecha": "2026-01-05",
-    "categoria": "Arriendo y Servicios Básicos",
-    "proveedor": "Arriendo Oficina",
-    "descripcion": "Pago fijo: Arriendo Oficina (Enero 2026) — ejemplo",
-    "monto": 500000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_arriendo:2026-01:ab_v2_demo01"
-  },
-  {
-    "id": "gas_v2_demo02",
-    "fecha": "2026-01-05",
-    "categoria": "Sueldos y Honorarios",
-    "proveedor": "Sueldo Ejemplo",
-    "descripcion": "Pago fijo: Sueldo Ejemplo (Enero 2026) — ejemplo",
-    "monto": 900000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_sueldo:2026-01:ab_v2_demo02"
-  },
-  {
-    "id": "gas_v2_demo03",
-    "fecha": "2026-01-10",
-    "categoria": "Marketing y Ventas",
-    "proveedor": "Meta Ads",
-    "descripcion": "Campaña de ejemplo",
-    "monto": 300000,
-    "metodo": "Tarjeta de Crédito"
-  },
-  {
-    "id": "gas_v2_demo04",
-    "fecha": "2026-01-12",
-    "categoria": "Software y Herramientas",
-    "proveedor": "Suscripciones Varias",
-    "descripcion": "Herramientas SaaS — ejemplo",
-    "monto": 85000,
-    "metodo": "Tarjeta de Crédito"
-  },
-  {
-    "id": "gas_v2_demo05",
-    "fecha": "2026-01-15",
-    "categoria": "Créditos y Renegociaciones",
-    "proveedor": "Crédito Ejemplo Banco",
-    "descripcion": "Pago fijo: Crédito Ejemplo Banco (Enero 2026) — ejemplo",
-    "monto": 400000,
-    "interes": 60000,
-    "capital": 340000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_credito:2026-01:ab_v2_demo03"
-  },
-  {
-    "id": "gas_v2_demo06",
-    "fecha": "2026-02-05",
-    "categoria": "Arriendo y Servicios Básicos",
-    "proveedor": "Arriendo Oficina",
-    "descripcion": "Pago fijo: Arriendo Oficina (Febrero 2026) — ejemplo",
-    "monto": 500000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_arriendo:2026-02:ab_v2_demo04"
-  },
-  {
-    "id": "gas_v2_demo07",
-    "fecha": "2026-02-05",
-    "categoria": "Sueldos y Honorarios",
-    "proveedor": "Sueldo Ejemplo",
-    "descripcion": "Pago fijo: Sueldo Ejemplo (Febrero 2026) — ejemplo",
-    "monto": 900000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_sueldo:2026-02:ab_v2_demo05"
-  },
-  {
-    "id": "gas_v2_demo08",
-    "fecha": "2026-02-15",
-    "categoria": "Créditos y Renegociaciones",
-    "proveedor": "Crédito Ejemplo Banco",
-    "descripcion": "Pago fijo: Crédito Ejemplo Banco (Febrero 2026) — ejemplo",
-    "monto": 400000,
-    "interes": 58000,
-    "capital": 342000,
-    "metodo": "Transferencia",
-    "origenPagoFijo": "pf:pf_v2_demo_credito:2026-02:ab_v2_demo06"
-  }
-];
-  const SEED_PF_CATALOGO = [
-  {
-    "id": "pf_v2_demo_arriendo",
-    "categoria": "Arriendo y Servicios Básicos",
-    "concepto": "Arriendo Oficina (ejemplo)",
-    "montoMensual": 500000,
-    "fechaInicio": "",
-    "vigenteHasta": ""
-  },
-  {
-    "id": "pf_v2_demo_sueldo",
-    "categoria": "Sueldos y Honorarios",
-    "concepto": "Sueldo Ejemplo",
-    "montoMensual": 900000,
-    "fechaInicio": "",
-    "vigenteHasta": ""
-  },
-  {
-    "id": "pf_v2_demo_credito",
-    "categoria": "Créditos y Renegociaciones",
-    "concepto": "Crédito Ejemplo Banco",
-    "montoMensual": 400000,
-    "esCredito": true,
-    "fechaInicio": "",
-    "vigenteHasta": ""
-  },
-  {
-    "id": "pf_v2_demo_software",
-    "categoria": "Software y Herramientas",
-    "concepto": "Suscripciones Varias (ejemplo)",
-    "montoMensual": 85000,
-    "fechaInicio": "",
-    "vigenteHasta": ""
-  }
-];
+  const SEED_INGRESOS = [];
+  const SEED_GASTOS = [];
+  const SEED_PF_CATALOGO = [];
   const SEED_PF_ESTADO = {};
   // Movimientos de Tesorería que reflejan los ingresos de ejemplo YA marcados "Pagado" y "venta" (demo01,
   // demo02, demo04 — no incluye demo03 por Pendiente, ni demo05/demo06 por ser no-venta), para que Recepción
@@ -1091,278 +981,14 @@
     "impuestos": 0,
     "ganancia": 0
   },
-  "movimientos": [
-    {
-      "id": "tes_v2_e01",
-      "fecha": "2026-01-05",
-      "boveda": "recepcion",
-      "tipo": "entrada",
-      "monto": 890000,
-      "descripcion": "Venta programa BEGIN — ejemplo",
-      "origen": "ingreso:ing_v2_demo01"
-    },
-    {
-      "id": "tes_v2_s01",
-      "fecha": "2026-01-05",
-      "boveda": "recepcion",
-      "tipo": "salida",
-      "monto": 890000,
-      "descripcion": "Distribución Profit First",
-      "origen": "distribucion:dist_v2_demo01"
-    },
-    {
-      "id": "tes_v2_operacion01",
-      "fecha": "2026-01-05",
-      "boveda": "operacion",
-      "tipo": "entrada",
-      "monto": 534000,
-      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo01"
-    },
-    {
-      "id": "tes_v2_sueldoDuenos01",
-      "fecha": "2026-01-05",
-      "boveda": "sueldoDuenos",
-      "tipo": "entrada",
-      "monto": 178000,
-      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo01"
-    },
-    {
-      "id": "tes_v2_impuestos01",
-      "fecha": "2026-01-05",
-      "boveda": "impuestos",
-      "tipo": "entrada",
-      "monto": 133500,
-      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo01"
-    },
-    {
-      "id": "tes_v2_ganancia01",
-      "fecha": "2026-01-05",
-      "boveda": "ganancia",
-      "tipo": "entrada",
-      "monto": 44500,
-      "descripcion": "Distribución de \"Venta programa BEGIN — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo01"
-    },
-    {
-      "id": "tes_v2_e02",
-      "fecha": "2026-01-14",
-      "boveda": "recepcion",
-      "tipo": "entrada",
-      "monto": 450000,
-      "descripcion": "Mentoría 1:1 — ejemplo",
-      "origen": "ingreso:ing_v2_demo02"
-    },
-    {
-      "id": "tes_v2_s02",
-      "fecha": "2026-01-14",
-      "boveda": "recepcion",
-      "tipo": "salida",
-      "monto": 450000,
-      "descripcion": "Distribución Profit First",
-      "origen": "distribucion:dist_v2_demo02"
-    },
-    {
-      "id": "tes_v2_operacion02",
-      "fecha": "2026-01-14",
-      "boveda": "operacion",
-      "tipo": "entrada",
-      "monto": 270000,
-      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo02"
-    },
-    {
-      "id": "tes_v2_sueldoDuenos02",
-      "fecha": "2026-01-14",
-      "boveda": "sueldoDuenos",
-      "tipo": "entrada",
-      "monto": 90000,
-      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo02"
-    },
-    {
-      "id": "tes_v2_impuestos02",
-      "fecha": "2026-01-14",
-      "boveda": "impuestos",
-      "tipo": "entrada",
-      "monto": 67500,
-      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo02"
-    },
-    {
-      "id": "tes_v2_ganancia02",
-      "fecha": "2026-01-14",
-      "boveda": "ganancia",
-      "tipo": "entrada",
-      "monto": 22500,
-      "descripcion": "Distribución de \"Mentoría 1:1 — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo02"
-    },
-    {
-      "id": "tes_v2_e03",
-      "fecha": "2026-02-03",
-      "boveda": "recepcion",
-      "tipo": "entrada",
-      "monto": 950000,
-      "descripcion": "Venta programa NEXT — ejemplo",
-      "origen": "ingreso:ing_v2_demo04"
-    },
-    {
-      "id": "tes_v2_s03",
-      "fecha": "2026-02-03",
-      "boveda": "recepcion",
-      "tipo": "salida",
-      "monto": 950000,
-      "descripcion": "Distribución Profit First",
-      "origen": "distribucion:dist_v2_demo03"
-    },
-    {
-      "id": "tes_v2_operacion03",
-      "fecha": "2026-02-03",
-      "boveda": "operacion",
-      "tipo": "entrada",
-      "monto": 570000,
-      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo03"
-    },
-    {
-      "id": "tes_v2_sueldoDuenos03",
-      "fecha": "2026-02-03",
-      "boveda": "sueldoDuenos",
-      "tipo": "entrada",
-      "monto": 190000,
-      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo03"
-    },
-    {
-      "id": "tes_v2_impuestos03",
-      "fecha": "2026-02-03",
-      "boveda": "impuestos",
-      "tipo": "entrada",
-      "monto": 142500,
-      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo03"
-    },
-    {
-      "id": "tes_v2_ganancia03",
-      "fecha": "2026-02-03",
-      "boveda": "ganancia",
-      "tipo": "entrada",
-      "monto": 47500,
-      "descripcion": "Distribución de \"Venta programa NEXT — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo03"
-    },
-    {
-      "id": "tes_v2_e04",
-      "fecha": "2026-02-11",
-      "boveda": "recepcion",
-      "tipo": "entrada",
-      "monto": 120000,
-      "descripcion": "Ingreso menor — ejemplo",
-      "origen": "ingreso:ing_v2_demo05"
-    },
-    {
-      "id": "tes_v2_s04",
-      "fecha": "2026-02-11",
-      "boveda": "recepcion",
-      "tipo": "salida",
-      "monto": 120000,
-      "descripcion": "Distribución Profit First",
-      "origen": "distribucion:dist_v2_demo04"
-    },
-    {
-      "id": "tes_v2_operacion04",
-      "fecha": "2026-02-11",
-      "boveda": "operacion",
-      "tipo": "entrada",
-      "monto": 72000,
-      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo04"
-    },
-    {
-      "id": "tes_v2_sueldoDuenos04",
-      "fecha": "2026-02-11",
-      "boveda": "sueldoDuenos",
-      "tipo": "entrada",
-      "monto": 24000,
-      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo04"
-    },
-    {
-      "id": "tes_v2_impuestos04",
-      "fecha": "2026-02-11",
-      "boveda": "impuestos",
-      "tipo": "entrada",
-      "monto": 18000,
-      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo04"
-    },
-    {
-      "id": "tes_v2_ganancia04",
-      "fecha": "2026-02-11",
-      "boveda": "ganancia",
-      "tipo": "entrada",
-      "monto": 6000,
-      "descripcion": "Distribución de \"Ingreso menor — ejemplo\"",
-      "origen": "distribucion:dist_v2_demo04"
-    }
-  ]
+  "movimientos": []
 };
   const SEED_DEUDAS = {
-  "inventario": [
-    {
-      "id": "deuda_v2_demo01",
-      "nombre": "Tarjeta Banco Ejemplo",
-      "montoOriginal": 3000000,
-      "tasaInteres": 2.5,
-      "tasaInteresPeriodo": "mensual",
-      "cuotaMinima": 300000,
-      "cupo": 3500000,
-      "fechaVencimiento": "2026-04-05",
-      "categoria": "Tarjeta de Crédito",
-      "fechaCreacion": "2026-01-05",
-      "activa": true
-    },
-    {
-      "id": "deuda_v2_demo02",
-      "nombre": "Línea de Crédito Ejemplo",
-      "montoOriginal": 500000,
-      "tasaInteres": 2.0,
-      "tasaInteresPeriodo": "mensual",
-      "cuotaMinima": 50000,
-      "cupo": 2000000,
-      "fechaVencimiento": "2026-04-10",
-      "categoria": "Línea de Crédito",
-      "fechaCreacion": "2026-01-05",
-      "activa": true
-    }
-  ],
-  "pagos": [
-    {
-      "id": "pagodeuda_v2_demo01",
-      "deudaId": "deuda_v2_demo01",
-      "fecha": "2026-02-05",
-      "montoTotal": 325000,
-      "capital": 250000,
-      "interes": 75000,
-      "cuentaOrigen": "operacion"
-    }
-  ],
+  "inventario": [],
+  "pagos": [],
   "giros": []
 };
-  const SEED_CONTRATOS_DEVENGADOS = [
-  {
-    "id": "contrato_v2_demo01",
-    "nombre": "Mentoría Cliente Ejemplo",
-    "montoTotal": 6000000,
-    "tipoServicio": "Mentoría/Agencia",
-    "duracionMeses": 6,
-    "fechaInicio": "2026-01-01",
-    "fechaCreacion": "2026-01-01"
-  }
-];
+  const SEED_CONTRATOS_DEVENGADOS = [];
 
 
 
@@ -2008,6 +1634,18 @@
     deudas: { inventario: [], pagos: [], giros: [] },
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
     contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
+    editingContratoId: null,
+    loteEnConstruccion: { lineas: [] }, // Lote de Ventas: líneas que se van agregando antes de confirmar el lote completo
+    editingDeudaId: null,
+    // Plantilla de Gastos Fijos: catálogo que se genera solo cada mes (Pendiente) al abrir la app.
+    plantillasGastosFijos: [],
+    editingPlantillaId: null,
+    procesandoGastoId: null, // qué gasto Pendiente se está procesando (ingresando el Monto Pagado Realmente)
+    // Cuentas por Pagar: sección APARTE de Gestión de Deudas (no son créditos, no tienen interés) — nacen
+    // automáticamente cuando un gasto se paga parcialmente.
+    cuentasPorPagar: { items: [], pagos: [] },
+    pagandoCtaPorPagarId: null,
+    registrandoCuotaAtrasadaId: null, // qué deuda de crédito se le está registrando una cuota atrasada
     deudaRecienLiquidada: null, // { nombre } — dispara el banner de celebración una vez, se limpia al cerrarlo
     detalleMes: new Date().getMonth(),
     mesCortePF: new Date().getMonth(),
@@ -2203,7 +1841,9 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','save-sueldo-duenos-config',
+    'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
@@ -2508,6 +2148,8 @@
       const tesoreria = await loadKeySeeded('tesoreria', SEED_TESORERIA);
       const deudas = await loadKeySeeded('deudas', SEED_DEUDAS);
       const contratosDevengados = await loadKeySeeded('contratosDevengados', SEED_CONTRATOS_DEVENGADOS);
+      const plantillasGastosFijos = await loadKeySeeded('plantillasGastosFijos', []);
+      const cuentasPorPagar = await loadKeySeeded('cuentasPorPagar', { items: [], pagos: [] });
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -2530,6 +2172,10 @@
         state.config.categoriasGastos.push(CAT_GASTO_FINANCIERO);
         gastoFinancieroCambio = true;
       }
+      if(!state.config.categoriasGastos.includes(CAT_GASTO_COSTO_LIQUIDEZ)){
+        state.config.categoriasGastos.push(CAT_GASTO_COSTO_LIQUIDEZ);
+        gastoFinancieroCambio = true;
+      }
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).forEach(cat=>{
         if(!state.config.categoriasGastos.includes(cat)){ state.config.categoriasGastos.push(cat); gastoFinancieroCambio = true; }
@@ -2549,6 +2195,16 @@
       if(!state.deudas.pagos) state.deudas.pagos = [];
       if(!state.deudas.giros) state.deudas.giros = [];
       state.contratosDevengados = contratosDevengados || [];
+      state.plantillasGastosFijos = plantillasGastosFijos || [];
+      state.cuentasPorPagar = cuentasPorPagar || { items: [], pagos: [] };
+      if(!state.cuentasPorPagar.items) state.cuentasPorPagar.items = [];
+      if(!state.cuentasPorPagar.pagos) state.cuentasPorPagar.pagos = [];
+
+      // Plantilla de Gastos Fijos: al abrir la app, si una plantilla activa no tiene todavía su gasto del
+      // mes en curso, se genera automáticamente en estado "Pendiente" — no hay servidor que lo haga solo un
+      // día del mes, así que esto es lo más cercano a "automático" que se puede lograr en una app sin backend.
+      const generadosEsteMes = generarGastosFijosDelMes();
+      if(generadosEsteMes) await saveKey('gastos', state.gastos, {silent:true});
 
       // Duplicado accidental de categoría ("Retiros Socios" vs "Retiro Socios") — se fusiona automáticamente
       // en cada carga hacia el nombre bueno, en gastos, Pagos Fijos y las listas de categorías.
@@ -2887,6 +2543,16 @@
   function removeTesoreriaIngreso(ingresoId){
     const origen = `ingreso:${ingresoId}`;
     state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
+  }
+
+  // Igual que removeTesoreriaIngreso, pero para el flujo de Ingresos y Distribución (Profit First): además
+  // de la entrada a Recepción, limpia TODA la distribución asociada (la salida de Recepción, la entrada de
+  // Reserva si tenía, y las hasta 4 entradas en las bóvedas destino) — todas comparten `ingresoId` como
+  // llave de correlación.
+  function removeTesoreriaPorIngresoPF(ingresoId){
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=>
+      m.origen !== `ingreso:${ingresoId}` && m.origen !== `distribucion:${ingresoId}` && m.origen !== `reserva:${ingresoId}`
+    );
   }
 
   // Mantiene sincronizada la salida de Tesorería que corresponde a un gasto: la crea o actualiza según la
@@ -3385,19 +3051,36 @@
   // perder el foco del campo Monto mientras el usuario escribe.
   window.faRecalcularDistribucionPF = function(){
     const montoInput = document.getElementById('fa-pf-monto');
+    const reservaInput = document.getElementById('fa-pf-reserva');
     const cardsWrap = document.getElementById('fa-pf-cards-wrap');
     const checklistWrap = document.getElementById('fa-pf-checklist-wrap');
+    const reservaWrap = document.getElementById('fa-pf-reserva-wrap');
+    const chkReservaWrap = document.getElementById('fa-pf-chk-reserva-wrap');
     if(!montoInput || !cardsWrap || !checklistWrap) return;
     const monto = Number(montoInput.value) || 0;
     if(monto <= 0){
       cardsWrap.style.display = 'none';
       checklistWrap.style.display = 'none';
+      if(reservaWrap) reservaWrap.style.display = 'none';
       return;
     }
     cardsWrap.style.display = '';
     checklistWrap.style.display = '';
+    // La Reserva para Costos Directos sale 100% hacia Operación ANTES de aplicar Profit First — los 4
+    // porcentajes se calculan solo sobre el "Margen Neto Restante" (monto − reserva), nunca sobre el bruto.
+    const reserva = Math.min(Number(reservaInput ? reservaInput.value : 0) || 0, monto);
+    const montoParaDistribuir = monto - reserva;
+    if(reservaWrap) reservaWrap.style.display = reserva > 0 ? '' : 'none';
+    if(chkReservaWrap) chkReservaWrap.style.display = reserva > 0 ? 'flex' : 'none';
+    const cardReserva = document.getElementById('fa-pf-card-reserva');
+    const chkLabelReserva = document.getElementById('fa-pf-chk-label-reserva');
+    const chkReserva = document.getElementById('fa-pf-chk-reserva');
+    if(cardReserva) cardReserva.textContent = fmtMoney(reserva);
+    if(chkLabelReserva) chkLabelReserva.textContent = fmtMoney(reserva);
+    if(chkReserva) chkReserva.checked = false;
+
     const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
-    const montos = repartirMontoPF(monto, pct);
+    const montos = repartirMontoPF(montoParaDistribuir, pct);
     BOVEDAS_PAGABLES.forEach(b=>{
       const m = montos[b.id];
       const card = document.getElementById('fa-pf-card-'+b.id);
@@ -3413,7 +3096,11 @@
   window.faActualizarBotonConfirmarPF = function(){
     const btn = document.getElementById('fa-pf-btn-confirmar');
     if(!btn) return;
-    const todasMarcadas = BOVEDAS_PAGABLES.every(b=>{
+    const reservaInput = document.getElementById('fa-pf-reserva');
+    const reserva = Number(reservaInput ? reservaInput.value : 0) || 0;
+    const chkReserva = document.getElementById('fa-pf-chk-reserva');
+    const reservaOk = reserva > 0 ? (chkReserva && chkReserva.checked) : true;
+    const todasMarcadas = reservaOk && BOVEDAS_PAGABLES.every(b=>{
       const chk = document.getElementById('fa-pf-chk-'+b.id);
       return chk && chk.checked;
     });
@@ -3425,11 +3112,64 @@
   window.faToggleDuracionContrato = function(){
     const tipo = document.getElementById('fa-contrato-tipo');
     const wrap = document.getElementById('fa-contrato-duracion-wrap');
-    const input = document.getElementById('fa-contrato-duracion');
+    const libreWrap = document.getElementById('fa-contrato-duracion-libre-wrap');
     if(!tipo || !wrap) return;
     const esAutogestionado = tipo.value === 'Autogestionado';
     wrap.style.display = esAutogestionado ? 'none' : '';
-    if(esAutogestionado && input) input.value = '1';
+    if(esAutogestionado && libreWrap) libreWrap.style.display = 'none';
+  };
+
+  // Revela el campo de meses libre solo cuando el selector de Duración está en "Otro".
+  window.faToggleDuracionLibre = function(){
+    const preset = document.getElementById('fa-contrato-duracion-preset');
+    const libreWrap = document.getElementById('fa-contrato-duracion-libre-wrap');
+    if(!preset || !libreWrap) return;
+    libreWrap.style.display = preset.value === 'otro' ? '' : 'none';
+  };
+
+  // Igual que las dos de arriba, pero para el formulario de "agregar línea al lote" — usa ids propios
+  // (fa-linea-*) para no interferir con el formulario de edición de una línea ya guardada (fa-contrato-*).
+  window.faToggleDuracionLinea = function(){
+    const tipo = document.getElementById('fa-linea-tipo');
+    const wrap = document.getElementById('fa-linea-duracion-wrap');
+    const libreWrap = document.getElementById('fa-linea-duracion-libre-wrap');
+    if(!tipo || !wrap) return;
+    const esAutogestionado = tipo.value === 'Autogestionado';
+    wrap.style.display = esAutogestionado ? 'none' : '';
+    if(esAutogestionado && libreWrap) libreWrap.style.display = 'none';
+  };
+  window.faToggleDuracionLineaLibre = function(){
+    const preset = document.getElementById('fa-linea-duracion-preset');
+    const libreWrap = document.getElementById('fa-linea-duracion-libre-wrap');
+    if(!preset || !libreWrap) return;
+    libreWrap.style.display = preset.value === 'otro' ? '' : 'none';
+  };
+
+  // Busca el dólar observado del Banco Central (vía mindicador.cl) para la Fecha de Inicio del Lote de
+  // Ventas. Si falla (sin internet, fecha sin dato, API caída), deja el campo vacío y editable para que se
+  // ingrese a mano — nunca bloquea el registro.
+  window.faBuscarTipoCambio = async function(){
+    const fechaInput = document.getElementById('fa-contrato-fecha');
+    const tcInput = document.getElementById('fa-contrato-tc');
+    const statusEl = document.getElementById('fa-contrato-tc-status');
+    if(!fechaInput || !fechaInput.value){
+      if(statusEl) statusEl.textContent = 'Elige primero la Fecha de Inicio.';
+      return;
+    }
+    const [y,m,d] = fechaInput.value.split('-');
+    const fechaApi = `${d}-${m}-${y}`;
+    if(statusEl) statusEl.textContent = 'Buscando el dólar observado...';
+    try{
+      const resp = await fetch(`https://mindicador.cl/api/dolar/${fechaApi}`);
+      if(!resp.ok) throw new Error('status ' + resp.status);
+      const data = await resp.json();
+      if(!data.serie || !data.serie.length) throw new Error('sin datos para esa fecha');
+      const valor = data.serie[0].valor;
+      if(tcInput) tcInput.value = valor;
+      if(statusEl) statusEl.textContent = `Dólar observado del ${fechaInput.value}: $${valor} — puedes editarlo si lo necesitas.`;
+    } catch(e){
+      if(statusEl) statusEl.textContent = '⚠️ No se pudo obtener el tipo de cambio automáticamente (sin internet, fecha sin dato, o el servicio no responde). Ingrésalo a mano arriba.';
+    }
   };
 
   // ---------------- Render dispatch ----------------
@@ -3466,6 +3206,9 @@
       ${renderConfirmModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
+      ${renderProcesarGastoModal()}
+      ${renderPagarSaldoCtaPorPagarModal()}
+      ${renderCuotaAtrasadaModal()}
     `;
   }
 
@@ -3801,77 +3544,280 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Registrar contrato / venta cerrada</div>
-        <div class="fa-section-note">El ingreso se prorratea automáticamente sobre la duración del servicio — no se anota todo de una vez si el servicio dura varios meses.</div>
+        <div class="fa-card-title">${state.editingContratoId ? 'Editar línea del lote' : 'Registrar Lote de Ventas'}</div>
+        <div class="fa-section-note">Un lote puede tener varias líneas de venta adentro — cada una con su propia duración y prorrateo. Comisiones y Anticipo de Fondos se cargan UNA vez por lote completo (no por línea), sin prorratear.</div>
+        ${state.editingContratoId ? (() => {
+          const editingC = state.contratosDevengados.find(c=>c.id===state.editingContratoId);
+          const esAutogest = editingC ? editingC.tipoServicio==='Autogestionado' : false;
+          const duracionEsPreset = editingC ? DURACION_SERVICIO_PRESETS.includes(editingC.duracionMeses) : true;
+          return `
         <div data-form="contrato-devengado">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X"></div>
-            <div class="fa-field"><label>Monto Total Cerrado</label><input type="number" name="montoTotal" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${editingC?escapeHtml(editingC.nombre):''}"></div>
+            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${editingC?editingC.fechaInicio:todayISO()}"></div>
             <div class="fa-field"><label>Tipo de Servicio</label>
               <select name="tipoServicio" id="fa-contrato-tipo" onchange="window.faToggleDuracionContrato()">
+                ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option ${editingC&&editingC.tipoServicio===t?'selected':''}>${t}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field" id="fa-contrato-duracion-wrap" style="${esAutogest?'display:none;':''}">
+              <label>Meses Reales de Duración del Servicio</label>
+              <select id="fa-contrato-duracion-preset" name="duracionPreset" onchange="window.faToggleDuracionLibre()">
+                ${DURACION_SERVICIO_PRESETS.map(n=>`<option value="${n}" ${editingC&&editingC.duracionMeses===n?'selected':''}>${n} meses</option>`).join('')}
+                <option value="otro" ${editingC&&!duracionEsPreset?'selected':''}>Otro</option>
+              </select>
+            </div>
+            <div class="fa-field" id="fa-contrato-duracion-libre-wrap" style="${editingC && !duracionEsPreset && !esAutogest ? '' : 'display:none;'}">
+              <label>¿Cuántos meses?</label>
+              <input type="number" id="fa-contrato-duracion-libre" name="duracionLibre" min="1" step="1" placeholder="Ej: 9" value="${editingC && !duracionEsPreset ? editingC.duracionMeses : ''}">
+            </div>
+          </div>
+          <div class="fa-field" style="max-width:320px; margin:14px 0;">
+            <label>Tipo de Cambio (CLP por USD)</label>
+            <div style="display:flex; gap:8px;">
+              <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${editingC?editingC.tipoCambio:''}">
+              <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
+            </div>
+            <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Busca el dólar observado del Banco Central para la Fecha de Inicio, o escríbelo tú si falla.</div>
+          </div>
+          <div class="fa-field" style="max-width:280px;"><label>Valor de esta línea (USD)</label><input type="number" name="montoBrutoUSD" min="0" step="0.01" placeholder="0" value="${editingC?editingC.montoTotalUSD:''}"></div>
+          <div class="fa-form-actions" style="margin-top:14px;">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-contrato-devengado">Guardar cambios</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-contrato">Cancelar</button>
+          </div>
+        </div>
+          `;
+        })() : (() => {
+          const lote = state.loteEnConstruccion || { lineas: [] };
+          const totalUSDLote = lote.lineas.reduce((s,l)=>s+(Number(l.montoTotalUSD)||0),0);
+          return `
+        <div class="fa-hint" style="margin-top:0;">Paso 1: agrega cada línea de venta del lote.</div>
+        <div data-form="linea-lote">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X"></div>
+            <div class="fa-field"><label>Monto Bruto de esta línea (USD)</label><input type="number" id="fa-linea-monto" name="montoUSD" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field"><label>Tipo de Servicio</label>
+              <select id="fa-linea-tipo" name="tipoServicio" onchange="window.faToggleDuracionLinea()">
                 ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option>${t}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field" id="fa-contrato-duracion-wrap"><label>Duración (meses)</label><input type="number" id="fa-contrato-duracion" name="duracionMeses" min="1" step="1" placeholder="Ej: 6"></div>
-            <div class="fa-field"><label>Fecha de Inicio</label><input type="date" name="fechaInicio" value="${todayISO()}"></div>
+            <div class="fa-field" id="fa-linea-duracion-wrap">
+              <label>Meses Reales de Duración</label>
+              <select id="fa-linea-duracion-preset" name="duracionPreset" onchange="window.faToggleDuracionLineaLibre()">
+                ${DURACION_SERVICIO_PRESETS.map(n=>`<option value="${n}">${n} meses</option>`).join('')}
+                <option value="otro">Otro</option>
+              </select>
+            </div>
+            <div class="fa-field" id="fa-linea-duracion-libre-wrap" style="display:none;">
+              <label>¿Cuántos meses?</label>
+              <input type="number" id="fa-linea-duracion-libre" name="duracionLibre" min="1" step="1" placeholder="Ej: 9">
+            </div>
           </div>
-          <div class="fa-hint">"Autogestionado" siempre dura 1 mes (el ingreso se anota completo de una vez). "Mentoría/Agencia" se reparte en partes iguales entre los meses que indiques.</div>
           <div class="fa-form-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-contrato-devengado">Registrar contrato</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="agregar-linea-lote">+ Agregar línea al lote</button>
           </div>
         </div>
-        ${state.contratosDevengados.length>0 ? `
+
+        ${lote.lineas.length>0 ? `
+        <div class="fa-table-wrap" style="margin:14px 0;">
+          <table class="fa-table">
+            <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Duración</th><th class="num">Monto USD</th><th></th></tr></thead>
+            <tbody>
+              ${lote.lineas.map((l,i)=>`
+                <tr>
+                  <td>${escapeHtml(l.nombre)}</td>
+                  <td>${escapeHtml(l.tipoServicio)}</td>
+                  <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
+                  <td class="num money">${fmtMoneyUSD(l.montoTotalUSD)}</td>
+                  <td><button class="fa-icon-btn danger" data-action="quitar-linea-lote" data-index="${i}">Quitar</button></td>
+                </tr>
+              `).join('')}
+              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="3">Total del lote</td><td class="num money">${fmtMoneyUSD(totalUSDLote)}</td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="fa-hint" style="margin-top:0;">Paso 2: datos generales del lote completo (aplican a todas las líneas de arriba).</div>
+        <div data-form="lote-devengado">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
+              <div style="display:flex; gap:8px;">
+                <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50">
+                <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
+              </div>
+            </div>
+            <div class="fa-field"><label>Total Comisiones de Pasarela — Hotmart/Stripe (USD, opcional)</label><input type="number" name="comisionesUSD" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field"><label>Costo de Anticipo de Fondos (USD, opcional)</label><input type="number" name="anticipoUSD" min="0" step="0.01" placeholder="0"></div>
+          </div>
+          <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:0;">Busca el dólar observado del Banco Central para la Fecha de Inicio, o escríbelo tú si falla.</div>
+          <div class="fa-form-actions" style="margin-top:10px;">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-lote-devengado">Confirmar Lote Completo (${lote.lineas.length} línea${lote.lineas.length===1?'':'s'})</button>
+          </div>
+        </div>
+        ` : `<div class="fa-hint">Agrega al menos una línea arriba para poder confirmar el lote.</div>`}
+          `;
+        })()}
+        ${(() => {
+          if(state.contratosDevengados.length===0) return '';
+          const grupos = {};
+          state.contratosDevengados.forEach(c=>{
+            const lid = c.loteId || c.id; // compatibilidad: líneas antiguas sin loteId cuentan como lote de 1
+            if(!grupos[lid]) grupos[lid] = [];
+            grupos[lid].push(c);
+          });
+          const lotesOrdenados = Object.entries(grupos).sort((a,b)=> (b[1][0].fechaInicio||'').localeCompare(a[1][0].fechaInicio||''));
+          return `
+        <div style="margin-top:18px;">
+          ${lotesOrdenados.map(([loteId, lineas])=>`
+            <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-weight:700; font-size:13px;">Lote — ${fmtDate(lineas[0].fechaInicio)} (${lineas.length} línea${lineas.length===1?'':'s'})</span>
+                <button class="fa-icon-btn danger" data-action="delete-lote-devengado" data-loteid="${loteId}">Eliminar lote completo</button>
+              </div>
+              <div class="fa-table-wrap">
+                <table class="fa-table">
+                  <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Duración</th><th class="num">Monto USD</th><th class="num">T.C.</th><th class="num">Monto CLP</th><th></th></tr></thead>
+                  <tbody>
+                    ${lineas.map(c=>`
+                      <tr>
+                        <td>${escapeHtml(c.nombre)}</td>
+                        <td>${escapeHtml(c.tipoServicio)}</td>
+                        <td>${c.duracionMeses} mes${c.duracionMeses===1?'':'es'}</td>
+                        <td class="num money">${c.montoTotalUSD!==undefined ? fmtMoneyUSD(c.montoTotalUSD) : '—'}</td>
+                        <td class="num">${c.tipoCambio!==undefined ? c.tipoCambio : '—'}</td>
+                        <td class="num money">${fmtMoneyC(c.montoTotal)}</td>
+                        <td>
+                          <div class="fa-row-actions">
+                            <button class="fa-icon-btn" data-action="edit-contrato-devengado" data-id="${c.id}">Editar</button>
+                            <button class="fa-icon-btn danger" data-action="delete-contrato-devengado" data-id="${c.id}">Eliminar</button>
+                          </div>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="fa-hint">El USD y el tipo de cambio quedan solo como referencia — todo el cálculo contable (Margen Bruto, Utilidad Operativa, etc.) usa exclusivamente el monto en CLP.</div>
+          `;
+        })()}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Plantilla de Gastos Fijos</div>
+        <div class="fa-section-note">Precarga tus gastos operacionales fijos (Nómina, Software, etc.) — cada vez que abras la app, si no existe todavía el gasto de este mes para una plantilla activa, se genera solo en estado "Pendiente".</div>
+        ${(() => {
+          const editingP = state.editingPlantillaId ? state.plantillasGastosFijos.find(p=>p.id===state.editingPlantillaId) : null;
+          return `
+        <div data-form="plantilla-gasto-fijo">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre</label><input type="text" name="nombre" placeholder="Ej: Nómina, Software CRM" value="${editingP?escapeHtml(editingP.nombre):''}"></div>
+            <div class="fa-field"><label>Categoría</label>
+              <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
+            ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
+          </div>
+        </div>
+        ${state.plantillasGastosFijos.length>0 ? `
         <div class="fa-table-wrap" style="margin-top:14px;">
           <table class="fa-table">
-            <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Duración</th><th>Inicio</th><th class="num">Monto Total</th></tr></thead>
+            <thead><tr><th>Nombre</th><th>Categoría</th><th class="num">Monto Mensual</th><th>Estado</th><th></th></tr></thead>
             <tbody>
-              ${state.contratosDevengados.slice().sort((a,b)=>(b.fechaInicio||'').localeCompare(a.fechaInicio||'')).map(c=>`
+              ${state.plantillasGastosFijos.map(p=>`
                 <tr>
-                  <td>${escapeHtml(c.nombre)}</td>
-                  <td>${escapeHtml(c.tipoServicio)}</td>
-                  <td>${c.duracionMeses} mes${c.duracionMeses===1?'':'es'}</td>
-                  <td>${fmtDate(c.fechaInicio)}</td>
-                  <td class="num money">${fmtMoneyC(c.montoTotal)}</td>
+                  <td>${escapeHtml(p.nombre)}</td>
+                  <td>${escapeHtml(p.categoria)}</td>
+                  <td class="num money">${fmtMoneyC(p.montoMensual)}</td>
+                  <td>${p.activa?`<span class="fa-badge pagado">Activa</span>`:`<span class="fa-badge pendiente">Pausada</span>`}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="toggle-plantilla-activa" data-id="${p.id}">${p.activa?'Pausar':'Reactivar'}</button>
+                      <button class="fa-icon-btn" data-action="edit-plantilla" data-id="${p.id}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-plantilla" data-id="${p.id}">Eliminar</button>
+                    </div>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
         </div>` : ''}
+          `;
+        })()}
       </div>
 
       <div class="fa-card">
         <div class="fa-card-title">Registrar Costo Directo / Gasto Operacional</div>
         <div class="fa-section-note">Costo Directo = solo ocurre porque hubo una venta (Ads, comisiones de pasarela, afiliados). Gasto Operacional = lo que cuesta mantener viva la empresa, venda o no venda.</div>
+        ${(() => {
+          const editingG = state.editingGastoId ? state.gastos.find(g=>g.id===state.editingGastoId) : null;
+          const gastosDelAnio = state.gastos
+            .filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===state.config.anio)
+            .slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+          return `
         <div data-form="gasto">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Nombre del proveedor"></div>
-            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Campaña Meta Ads enero"></div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editingG?editingG.fecha:todayISO()}"></div>
+            <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Nombre del proveedor" value="${editingG?escapeHtml(editingG.proveedor||''):''}"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Campaña Meta Ads enero" value="${editingG?escapeHtml(editingG.descripcion||''):''}"></div>
             <div class="fa-field"><label>Categoría</label>
               <select name="categoria">
                 <optgroup label="Costos Directos">
-                  ${(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).map(c=>`<option>${escapeHtml(c)}</option>`).join('')}
+                  ${(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
                 <optgroup label="Gastos Operacionales y otros">
-                  ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c)).map(c=>`<option>${escapeHtml(c)}</option>`).join('')}
+                  ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c)).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
               </select>
             </div>
-            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0" value="${editingG?editingG.monto:''}"></div>
             <div class="fa-field"><label>Método de pago</label>
-              <select name="metodo">${state.config.metodosPago.map(m=>`<option>${escapeHtml(m)}</option>`).join('')}</select>
+              <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editingG&&editingG.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Bóveda de origen (Tesorería)</label>
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
-                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
           </div>
           <div class="fa-form-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">Registrar gasto</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">${editingG?'Guardar cambios':'Registrar gasto'}</button>
+            ${editingG?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-gasto">Cancelar</button>`:''}
           </div>
         </div>
+        ${gastosDelAnio.length>0 ? `
+        <div class="fa-table-wrap" style="margin-top:14px;">
+          <table class="fa-table">
+            <thead><tr><th>Fecha</th><th>Categoría</th><th>Proveedor/Detalle</th><th class="num">Monto</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              ${gastosDelAnio.map(g=>`
+                <tr>
+                  <td>${fmtDate(g.fecha)}</td>
+                  <td>${escapeHtml(g.categoria)}</td>
+                  <td>${escapeHtml(g.proveedor||g.descripcion||'')||'—'}</td>
+                  <td class="num money">${fmtMoneyC(g.monto)}</td>
+                  <td>${g.estado==='Pendiente'?`<span class="fa-badge pendiente">Pendiente</span>`:g.estado==='Pagado Parcial'?`<span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Parcial (${fmtMoney(g.montoPagado)} de ${fmtMoney(g.monto)})</span>`:''}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      ${g.estado==='Pendiente'?`<button class="fa-icon-btn" data-action="abrir-procesar-gasto" data-id="${g.id}">Procesar pago</button>`:''}
+                      <button class="fa-icon-btn" data-action="edit-gasto" data-id="${g.id}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-gasto" data-id="${g.id}">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+          `;
+        })()}
       </div>
     `;
   }
@@ -3908,7 +3854,11 @@
       <div class="fa-card">
         <div class="fa-card-title">Tus deudas, ordenadas por Bola de Nieve</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px,1fr)); gap:14px;">
-          ${deudas.map((d,i)=>`
+          ${deudas.map((d,i)=>{
+            const movs = state.deudas.pagos.filter(p=>p.deudaId===d.id).map(p=>({ tipo:'pago', fecha:p.fecha, monto:p.montoTotal, id:p.id, detalle:`Pago (cap. ${fmtMoney(p.capital)} + int. ${fmtMoney(p.interes)})` }))
+              .concat((state.deudas.giros||[]).filter(g=>g.deudaId===d.id).map(g=>({ tipo:'giro', fecha:g.fecha, monto:g.monto, id:g.id, detalle: g.origen==='linea_credito'?'Uso de línea':'Compra con tarjeta' })))
+              .sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||'')).slice(0,5);
+            return `
             <div style="border:1.5px solid ${i===0?'var(--income)':'var(--border)'}; border-radius:12px; padding:16px; ${i===0?'background:#F0FFF4;':''}">
               <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
                 <div style="font-weight:700; font-size:14px;">${escapeHtml(d.nombre)}</div>
@@ -3927,11 +3877,25 @@
               ` : `
                 <div class="fa-hint" style="margin-top:8px;">Pagando solo el mínimo: liquidarías en <strong>${fechaProyectada(d.proyeccion.meses)}</strong> (${d.proyeccion.meses} meses) — habrás pagado <strong style="color:var(--expense);">${fmtMoney(d.proyeccion.interesTotal)}</strong> en puro interés.</div>
               `}
+              ${movs.length>0 ? `
+              <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
+                ${movs.map(m=>`
+                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; margin-bottom:4px;">
+                    <span>${fmtDate(m.fecha)} — ${m.detalle}: ${fmtMoney(m.monto)}</span>
+                    <button class="fa-icon-btn danger" style="padding:2px 6px; font-size:11px;" data-action="${m.tipo==='pago'?'delete-pago-deuda':'delete-giro-deuda'}" data-id="${m.id}">✕</button>
+                  </div>
+                `).join('')}
+              </div>` : ''}
               <div class="fa-form-actions" style="margin-top:12px;">
                 <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
+                <button type="button" class="fa-btn fa-btn-ghost" data-action="abrir-cuota-atrasada" data-id="${d.id}">⚠️ Cuota atrasada</button>
+              </div>
+              <div class="fa-row-actions" style="margin-top:8px;">
+                <button class="fa-icon-btn" data-action="edit-deuda" data-id="${d.id}">Editar deuda</button>
+                <button class="fa-icon-btn danger" data-action="delete-deuda" data-id="${d.id}">Eliminar deuda</button>
               </div>
             </div>
-          `).join('')}
+          `;}).join('')}
         </div>
       </div>
       `}
@@ -3944,6 +3908,60 @@
         </div>
       </div>
       ` : ''}
+
+      <div class="fa-card">
+        <div class="fa-card-title">📋 Cuentas por Pagar</div>
+        <div class="fa-section-note">Sección aparte de tus créditos — sin interés, sin cuota mínima. Se generan solas cuando pagas parcialmente un gasto en Estado de Resultados, pero también puedes agregar una a mano.</div>
+        ${(() => {
+          const ctasActivas = getCuentasPorPagarActivas();
+          const totalCtasPorPagar = ctasActivas.reduce((s,c)=>s+c.saldo,0);
+          return `
+        ${ctasActivas.length===0 ? `<div class="fa-empty">No tienes Cuentas por Pagar activas.</div>` : `
+        <div class="fa-kpi-grid" style="grid-template-columns:repeat(1,1fr); max-width:260px; margin-bottom:14px;">
+          <div class="fa-kpi expense"><div class="fa-kpi-label">Total Cuentas por Pagar</div><div class="fa-kpi-value expense money">${fmtMoneyC(totalCtasPorPagar)}</div></div>
+        </div>
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr><th>Nombre</th><th>Origen</th><th class="num">Saldo Pendiente</th><th></th></tr></thead>
+            <tbody>
+              ${ctasActivas.map(c=>{
+                const pagosDeEstaCuenta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===c.id);
+                return `
+                <tr>
+                  <td>${escapeHtml(c.nombre)}</td>
+                  <td>${c.esSueldoDuenos?'Sueldo Dueños':c.origenGasto?'Gasto pagado parcial':'Manual'}</td>
+                  <td class="num money">${fmtMoneyC(c.saldo)}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="abrir-pagar-saldo-ctapagar" data-id="${c.id}">Pagar Saldo</button>
+                      <button class="fa-icon-btn danger" data-action="delete-ctapagar" data-id="${c.id}">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+                ${pagosDeEstaCuenta.length>0 ? `
+                <tr><td colspan="4" style="padding-top:0; padding-bottom:10px;">
+                  ${pagosDeEstaCuenta.map(p=>`
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; padding:2px 0 2px 14px;">
+                      <span>↳ Pago ${fmtDate(p.fecha)}: ${fmtMoney(p.monto)}</span>
+                      <button class="fa-icon-btn danger" style="padding:2px 6px; font-size:11px;" data-action="delete-pago-ctapagar" data-id="${p.id}">✕</button>
+                    </div>
+                  `).join('')}
+                </td></tr>` : ''}
+              `;}).join('')}
+            </tbody>
+          </table>
+        </div>`}
+        <div class="fa-hint" style="margin-top:12px;">Agregar una Cuenta por Pagar manual (no ligada a un gasto):</div>
+        <div data-form="cuenta-por-pagar" style="margin-top:6px;">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre / Proveedor</label><input type="text" name="nombre" placeholder="Ej: Contador — honorario pendiente"></div>
+            <div class="fa-field"><label>Monto Pendiente</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0"></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-cuenta-por-pagar">Agregar</button></div>
+        </div>
+          `;
+        })()}
+      </div>
 
       ${(() => {
         const lineasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Línea de Crédito');
@@ -4015,27 +4033,33 @@
       })()}
 
       <div class="fa-card">
-        <div class="fa-card-title">Agregar deuda al inventario</div>
+        <div class="fa-card-title">${state.editingDeudaId ? 'Editar deuda' : 'Agregar deuda al inventario'}</div>
+        ${(() => {
+          const editingD = state.editingDeudaId ? state.deudas.inventario.find(d=>d.id===state.editingDeudaId) : null;
+          return `
         <div data-form="deuda">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado"></div>
-            <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0"></div>
-            <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5"></div>
+            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado" value="${editingD?escapeHtml(editingD.nombre):''}"></div>
+            <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0" value="${editingD?editingD.montoOriginal:''}"></div>
+            <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5" value="${editingD?editingD.tasaInteres:''}"></div>
             <div class="fa-field"><label>Período de la tasa</label>
               <select name="tasaInteresPeriodo">
-                <option value="mensual">Mensual</option>
-                <option value="anual">Anual</option>
+                <option value="mensual" ${editingD&&editingD.tasaInteresPeriodo==='mensual'?'selected':''}>Mensual</option>
+                <option value="anual" ${editingD&&editingD.tasaInteresPeriodo==='anual'?'selected':''}>Anual</option>
               </select>
             </div>
-            <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0"></div>
-            <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento"></div>
-            <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito"></div>
-            <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica"></div>
+            <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0" value="${editingD?editingD.cuotaMinima:''}"></div>
+            <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento" value="${editingD?editingD.fechaVencimiento||'':''}"></div>
+            <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito" value="${editingD?escapeHtml(editingD.categoria||''):''}"></div>
+            <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica" value="${editingD&&editingD.cupo?editingD.cupo:''}"></div>
           </div>
           <div class="fa-form-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Agregar deuda</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">${state.editingDeudaId?'Guardar cambios':'Agregar deuda'}</button>
+            ${state.editingDeudaId?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-deuda">Cancelar</button>`:''}
           </div>
         </div>
+          `;
+        })()}
       </div>
     `;
   }
@@ -4069,6 +4093,109 @@
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pago-deuda">Cancelar</button>
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-deuda" data-id="${deuda.id}">Confirmar pago</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "Procesar pago" de un gasto Pendiente/Pagado Parcial de la Plantilla de Gastos Fijos — permite
+  // ingresar el Monto Pagado Realmente, que puede ser menor al Monto Total (creando una Cuenta por Pagar
+  // automática por la diferencia).
+  function renderProcesarGastoModal(){
+    const gastoId = state.procesandoGastoId;
+    if(!gastoId) return '';
+    const gasto = state.gastos.find(g=>g.id===gastoId);
+    if(!gasto) return '';
+    const yaPagado = Number(gasto.montoPagado)||0;
+    const restante = Math.max((Number(gasto.monto)||0) - yaPagado, 0);
+    const esSueldoDuenos = !!gasto.origenSueldoDuenos;
+    const saldoSueldoDuenos = esSueldoDuenos ? getSaldoBoveda('sueldoDuenos') : 0;
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-procesar-gasto">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">${esSueldoDuenos?'Retirar Sueldo Dueños':'Procesar pago'} — ${escapeHtml(gasto.proveedor||gasto.descripcion||gasto.categoria)}</div>
+          <div class="fa-hint" style="margin-top:0;">Monto Total del gasto: ${fmtMoneyC(gasto.monto)}${yaPagado>0?` — ya pagado: ${fmtMoney(yaPagado)}, restante: ${fmtMoney(restante)}`:''}. Este monto ya cuenta 100% en Estado de Resultados, sin importar cuánto retires ahora.</div>
+          ${esSueldoDuenos ? `<div class="fa-hint">Disponible hoy en la bóveda Sueldo Dueños: <strong>${fmtMoney(saldoSueldoDuenos)}</strong>. Si retiras menos por falta de liquidez, la diferencia queda como "Sueldos Dueños por Pagar" — no tienes que retirar todo, la bóveda puede seguir acumulando.</div>` : ''}
+          <div data-form="procesar-gasto">
+            <div class="fa-field" style="margin-bottom:10px;"><label>${esSueldoDuenos?'Monto Retirado Realmente (ahora)':'Monto Pagado Realmente (ahora)'}</label><input type="number" name="montoPagadoAhora" min="0" step="1" placeholder="0"></div>
+            ${esSueldoDuenos ? `
+            <div class="fa-field"><label>Bóveda de origen</label><input type="text" value="Sueldo Dueños (fija — este retiro siempre sale de ahí)" disabled style="background:#F1F2F4;"></div>
+            ` : `
+            <div class="fa-field"><label>Bóveda de origen (Tesorería)</label>
+              <select name="boveda">
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+            `}
+          </div>
+          <div class="fa-hint">Si ${esSueldoDuenos?'retiras':'pagas'} menos que el restante, la diferencia se crea automáticamente como una Cuenta por Pagar en Gestión de Deudas${esSueldoDuenos?' ("Sueldos Dueños por Pagar")':''}.</div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-procesar-gasto">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-procesar-gasto" data-id="${gasto.id}">Confirmar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "Pagar Saldo" de una Cuenta por Pagar — a diferencia de "Registrar pago" de un crédito, acá NUNCA
+  // se toca Estado de Resultados (el gasto ya se reconoció 100% en su mes de origen): solo reduce el pasivo
+  // y descuenta el efectivo de la bóveda elegida.
+  function renderPagarSaldoCtaPorPagarModal(){
+    const ctaId = state.pagandoCtaPorPagarId;
+    if(!ctaId) return '';
+    const cta = state.cuentasPorPagar.items.find(c=>c.id===ctaId);
+    if(!cta) return '';
+    const saldo = getSaldoCtaPorPagar(ctaId);
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-pagar-saldo-ctapagar">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">Pagar Saldo — ${escapeHtml(cta.nombre)}</div>
+          <div class="fa-hint" style="margin-top:0;">Saldo pendiente: ${fmtMoneyC(saldo)}. Este pago NO se registra de nuevo en Estado de Resultados — ese gasto ya se contó 100% en su mes de origen.</div>
+          <div data-form="pagar-saldo-ctapagar">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field" style="margin-bottom:10px;"><label>Monto a Pagar</label><input type="number" name="monto" min="0" step="1" placeholder="${saldo}" value="${saldo}"></div>
+            <div class="fa-field"><label>Cuenta de Origen</label>
+              <select name="boveda">
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pagar-saldo-ctapagar">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pagar-saldo-ctapagar" data-id="${cta.id}">Confirmar pago</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "Cuota atrasada" — registro 100% manual (sin amortización automática, tal como se pidió): el
+  // usuario ingresa el interés y el capital de la cuota que no se pagó. El interés se reconoce como Gasto
+  // Financiero YA (aunque no se haya pagado — es el costo de mantenerse en mora), y el capital se suma al
+  // saldo insoluto (como un "giro"). NINGUNO de los dos toca Tesorería, porque no salió plata del banco.
+  function renderCuotaAtrasadaModal(){
+    const deudaId = state.registrandoCuotaAtrasadaId;
+    if(!deudaId) return '';
+    const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+    if(!deuda) return '';
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-cuota-atrasada">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">⚠️ Cuota atrasada — ${escapeHtml(deuda.nombre)}</div>
+          <div class="fa-hint" style="margin-top:0;">Para cuando no pagaste la cuota del mes: el interés cuenta como Gasto Financiero igual, y el capital se suma a lo que debes — sin que haya salido plata del banco todavía.</div>
+          <div data-form="cuota-atrasada">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha (mes de la cuota atrasada)</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-form-grid" style="grid-template-columns:1fr 1fr;">
+              <div class="fa-field"><label>Interés de la cuota</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Capital de la cuota</label><input type="number" name="capital" min="0" step="1" placeholder="0"></div>
+            </div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-cuota-atrasada">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-cuota-atrasada" data-id="${deuda.id}">Registrar atraso</button>
           </div>
         </div>
       </div>
@@ -4152,6 +4279,7 @@
     const delAnio = state.ingresos.filter(i=> i.fecha && new Date(i.fecha+'T00:00:00').getFullYear()===state.config.anio);
     const totalAnio = delAnio.reduce((s,i)=>s+(Number(i.monto)||0),0);
     const filas = delAnio.slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+    const editing = state.editingIngresoId ? state.ingresos.find(i=>i.id===state.editingIngresoId) : null;
 
     return `
       <div class="fa-topbar">
@@ -4167,31 +4295,47 @@
       ` : ''}
 
       <div class="fa-card">
-        <div class="fa-card-title">Registrar ingreso</div>
+        <div class="fa-card-title">${editing ? 'Editar ingreso' : 'Registrar ingreso'}</div>
+        ${editing ? `<div class="fa-hint" style="margin-top:0;">Estás editando un ingreso ya distribuido — al guardar, se recalcula la distribución con el monto/porcentajes actuales y se reemplazan los movimientos de Tesorería asociados. No hace falta re-marcar las transferencias.</div>` : ''}
         <div data-form="ingreso-pf">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editing?editing.fecha:todayISO()}"></div>
             <div class="fa-field"><label>Origen del Ingreso</label>
-              <select name="categoria">${ORIGENES_INGRESO_PF.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select>
+              <select name="categoria">${ORIGENES_INGRESO_PF.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
-            <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente"></div>
-            <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" oninput="window.faRecalcularDistribucionPF()"></div>
+            <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
+            <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
+            <div class="fa-field"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
+
+          <div id="fa-pf-reserva-wrap" style="${editing && editing.distribucion && editing.distribucion.reserva ? '' : 'display:none;'} margin-top:14px;">
+            <div class="fa-kpi" style="max-width:280px;">
+              <div class="fa-kpi-label">🔒 Reserva Costos Directos → Operación</div>
+              <div class="fa-kpi-value money" id="fa-pf-card-reserva">${fmtMoney(editing&&editing.distribucion?editing.distribucion.reserva||0:0)}</div>
+            </div>
           </div>
 
-          <div id="fa-pf-cards-wrap" style="display:none; margin-top:16px;">
-            <div class="fa-hint" style="margin:0 0 8px 0;">Así se reparte este ingreso, según tu configuración actual:</div>
+          <div id="fa-pf-cards-wrap" style="${editing?'':'display:none;'} margin-top:16px;">
+            <div class="fa-hint" style="margin:0 0 8px 0;">Así se reparte el Margen Neto Restante (después de la reserva), según tu configuración actual:</div>
             <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr);">
-              ${BOVEDAS_PAGABLES.map(b=>`
+              ${BOVEDAS_PAGABLES.map(b=>{
+                const montoInicial = editing && editing.distribucion ? editing.distribucion.montos[b.id] : 0;
+                return `
                 <div class="fa-kpi">
                   <div class="fa-kpi-label">🏦 ${escapeHtml(b.label)} (${pct[b.id]||0}%)</div>
-                  <div class="fa-kpi-value money" id="fa-pf-card-${b.id}">$0</div>
+                  <div class="fa-kpi-value money" id="fa-pf-card-${b.id}">${fmtMoney(montoInicial)}</div>
                 </div>
-              `).join('')}
+              `;}).join('')}
             </div>
           </div>
 
-          <div id="fa-pf-checklist-wrap" style="display:none; margin-top:16px;">
+          <div id="fa-pf-checklist-wrap" style="${editing?'display:none;':'display:none;'} margin-top:16px;">
             <div class="fa-hint" style="margin:0 0 8px 0;">Marca cada transferencia una vez que la hayas hecho de verdad en tu banco:</div>
+            <label id="fa-pf-chk-reserva-wrap" style="display:${editing&&editing.distribucion&&editing.distribucion.reserva?'flex':'none'}; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
+              <input type="checkbox" id="fa-pf-chk-reserva" onchange="window.faActualizarBotonConfirmarPF()">
+              Transferí <span id="fa-pf-chk-label-reserva" style="font-weight:700;">$0</span> de reserva a Operación
+            </label>
             ${BOVEDAS_PAGABLES.map(b=>`
               <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
                 <input type="checkbox" id="fa-pf-chk-${b.id}" onchange="window.faActualizarBotonConfirmarPF()">
@@ -4201,8 +4345,13 @@
             <div class="fa-form-actions" style="margin-top:10px;">
               <button type="button" id="fa-pf-btn-confirmar" class="fa-btn fa-btn-primary" data-action="confirmar-distribucion-ingreso" disabled>Confirmar Transferencias Realizadas</button>
             </div>
-            <div class="fa-hint" style="margin-top:6px;">El botón se activa solo cuando las 4 casillas están marcadas — evita confirmar sin haber movido la plata de verdad.</div>
+            <div class="fa-hint" style="margin-top:6px;">El botón se activa solo cuando todas las casillas están marcadas — evita confirmar sin haber movido la plata de verdad.</div>
           </div>
+          ${editing ? `
+          <div class="fa-form-actions" style="margin-top:14px;">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-distribucion-ingreso">Guardar cambios</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cancelar-edicion-ingreso-pf">Cancelar</button>
+          </div>` : ''}
         </div>
       </div>
 
@@ -4211,7 +4360,7 @@
         ${filas.length===0 ? `<div class="fa-empty">Aún no registras ingresos en ${state.config.anio}.</div>` : `
         <div class="fa-table-wrap">
           <table class="fa-table">
-            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th class="num">Monto</th><th>Distribución</th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th class="num">Monto</th><th>Distribución</th><th></th></tr></thead>
             <tbody>
               ${filas.map(i=>`
                 <tr>
@@ -4219,7 +4368,13 @@
                   <td>${escapeHtml(i.categoria)}</td>
                   <td>${escapeHtml(i.cliente)||'—'}</td>
                   <td class="num money">${fmtMoneyC(i.monto)}</td>
-                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">Op ${fmtMoney(i.distribucion.montos.operacion)} · Sueldo ${fmtMoney(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoney(i.distribucion.montos.impuestos)} · Gan ${fmtMoney(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
+                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoney(i.distribucion.reserva)} · `:''}Op ${fmtMoney(i.distribucion.montos.operacion)} · Sueldo ${fmtMoney(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoney(i.distribucion.montos.impuestos)} · Gan ${fmtMoney(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="edit-ingreso-pf" data-id="${i.id}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-ingreso-pf" data-id="${i.id}">Eliminar</button>
+                    </div>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
@@ -5667,6 +5822,28 @@
       </div>
 
       <div class="fa-card">
+        <div class="fa-card-title">Día Cero — Saldo Inicial de Tesorería</div>
+        <div class="fa-section-note">El punto de partida manual de cada bóveda, antes de que empieces a registrar movimientos reales. La liquidez de tu negocio arranca desde acá — no se toca con el historial que cargues en Estado de Resultados (Módulo 3), que queda completamente aparte.</div>
+        <div data-form="dia-cero">
+          <div class="fa-form-grid">
+            ${BOVEDAS.map(b=>`
+              <div class="fa-field"><label>${escapeHtml(b.label)}</label><input type="number" name="saldo_${b.id}" min="0" step="1" value="${Number((state.tesoreria.saldosIniciales||{})[b.id])||0}"></div>
+            `).join('')}
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="save-dia-cero">Guardar Día Cero</button></div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Sueldo Dueños — Regla de Acumulación</div>
+        <div class="fa-section-note">La bóveda "Sueldo Dueños" acumula sin forzar retiro — es tu fondo de reserva exclusivo para nómina directiva. Estado de Resultados igual reconoce este monto como Gasto Fijo constante cada mes, se retire o no.</div>
+        <div data-form="sueldo-duenos-config">
+          <div class="fa-field" style="max-width:280px;"><label>Sueldo Fijo Acordado (mensual)</label><input type="number" name="sueldoDuenosFijoMensual" min="0" step="1" value="${state.config.sueldoDuenosFijoMensual||0}"></div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="save-sueldo-duenos-config">Guardar</button></div>
+        </div>
+      </div>
+
+      <div class="fa-card">
         <div class="fa-card-title">Datos generales</div>
         <div class="fa-field" style="max-width:220px; margin-bottom:14px;">
           <label>Año activo</label>
@@ -6326,12 +6503,78 @@
         showToast('Ingreso eliminado');
         render();
       }
+      else if(cd.action === 'do-delete-ingreso-pf'){
+        state.ingresos = state.ingresos.filter(i=>i.id!==cd.data);
+        await saveKey('ingresos', state.ingresos);
+        // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino).
+        removeTesoreriaPorIngresoPF(cd.data);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+        showToast('Ingreso y su distribución eliminados');
+        render();
+      }
+      else if(cd.action === 'do-delete-contrato-devengado'){
+        state.contratosDevengados = state.contratosDevengados.filter(c=>c.id!==cd.data);
+        await saveKey('contratosDevengados', state.contratosDevengados);
+        // Los gastos de comisiones/anticipo que ese lote generó quedan huérfanos si no se limpian.
+        const teniaGastosVinculados = state.gastos.some(g=>g.origenContrato===cd.data);
+        state.gastos = state.gastos.filter(g=>g.origenContrato!==cd.data);
+        if(teniaGastosVinculados) await saveKey('gastos', state.gastos);
+        showToast('Lote de ventas eliminado');
+        render();
+      }
+      else if(cd.action === 'do-delete-lote-devengado'){
+        // Borra TODAS las líneas del lote (comparten loteId) + los gastos de comisiones/anticipo vinculados
+        // al lote completo — a diferencia de eliminar una línea suelta, esto sí limpia todo de una vez.
+        state.contratosDevengados = state.contratosDevengados.filter(c=> (c.loteId||c.id) !== cd.data);
+        await saveKey('contratosDevengados', state.contratosDevengados);
+        const teniaGastosVinculados = state.gastos.some(g=>g.origenContrato===cd.data);
+        state.gastos = state.gastos.filter(g=>g.origenContrato!==cd.data);
+        if(teniaGastosVinculados) await saveKey('gastos', state.gastos);
+        showToast('Lote completo eliminado, junto con sus comisiones/anticipo vinculados');
+        render();
+      }
+      else if(cd.action === 'do-delete-deuda'){
+        deleteDeudaCompleta(cd.data);
+        await Promise.all([
+          saveKey('deudas', state.deudas),
+          saveKey('tesoreria', state.tesoreria, {silent:true}),
+          saveKey('gastos', state.gastos)
+        ]);
+        showToast('Deuda eliminada, junto con sus pagos y giros');
+        render();
+      }
+      else if(cd.action === 'do-delete-pago-deuda'){
+        const pago = deletePagoDeuda(cd.data);
+        if(pago){
+          await Promise.all([
+            saveKey('deudas', state.deudas),
+            saveKey('tesoreria', state.tesoreria, {silent:true}),
+            saveKey('gastos', state.gastos)
+          ]);
+          showToast('Pago eliminado');
+        }
+        render();
+      }
+      else if(cd.action === 'do-delete-giro-deuda'){
+        const giro = deleteGiroDeuda(cd.data);
+        if(giro){
+          await Promise.all([
+            saveKey('deudas', state.deudas),
+            saveKey('tesoreria', state.tesoreria, {silent:true}),
+            saveKey('gastos', state.gastos)
+          ]);
+          showToast('Movimiento eliminado');
+        }
+        render();
+      }
       else if(cd.action === 'do-delete-gasto'){
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
         state.gastos = state.gastos.filter(g=>g.id!==cd.data);
         await saveKey('gastos', state.gastos);
-        // V2 — Tesorería: si ese gasto tenía una salida de bóveda asociada, se quita también.
+        // V2 — Tesorería: si ese gasto tenía una salida de bóveda asociada, se quita también (ya sea el
+        // camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
         removeTesoreriaGasto(cd.data);
+        state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${cd.data}`);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
         if(gastoAEliminar && gastoAEliminar.origenPagoFijo){
           unlinkGastoFromPF(gastoAEliminar);
@@ -6339,6 +6582,44 @@
           showToast('Gasto eliminado — se actualizó el abono en Pagos Fijos');
         } else {
           showToast('Gasto eliminado');
+        }
+        render();
+      }
+      else if(cd.action === 'do-delete-plantilla'){
+        state.plantillasGastosFijos = state.plantillasGastosFijos.filter(p=>p.id!==cd.data);
+        await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
+        showToast('Plantilla eliminada');
+        render();
+      }
+      else if(cd.action === 'do-delete-ctapagar'){
+        // Revierte cada pago (su salida de Tesorería) antes de borrar la cuenta misma — para no dejar
+        // movimientos de banco huérfanos sin la Cuenta por Pagar que los originó.
+        const pagosDeEstaCuenta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===cd.data);
+        pagosDeEstaCuenta.forEach(p=>{
+          state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${p.id}`);
+        });
+        state.cuentasPorPagar.pagos = state.cuentasPorPagar.pagos.filter(p=>p.ctaId!==cd.data);
+        state.cuentasPorPagar.items = state.cuentasPorPagar.items.filter(c=>c.id!==cd.data);
+        await Promise.all([
+          saveKey('cuentasPorPagar', state.cuentasPorPagar),
+          saveKey('tesoreria', state.tesoreria, {silent:true})
+        ]);
+        showToast('Cuenta por Pagar eliminada, junto con sus pagos');
+        render();
+      }
+      else if(cd.action === 'do-delete-pago-ctapagar'){
+        const pago = state.cuentasPorPagar.pagos.find(p=>p.id===cd.data);
+        if(pago){
+          const cta = state.cuentasPorPagar.items.find(c=>c.id===pago.ctaId);
+          state.cuentasPorPagar.pagos = state.cuentasPorPagar.pagos.filter(p=>p.id!==cd.data);
+          state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${cd.data}`);
+          // Si la cuenta se había marcado como liquidada (activa:false) por este pago, vuelve a quedar activa.
+          if(cta && !cta.activa) cta.activa = true;
+          await Promise.all([
+            saveKey('cuentasPorPagar', state.cuentasPorPagar),
+            saveKey('tesoreria', state.tesoreria, {silent:true})
+          ]);
+          showToast('Pago eliminado — el saldo pendiente volvió a subir');
         }
         render();
       }
@@ -6392,25 +6673,49 @@
       else if(cd.action === 'do-reset-data'){
         state.ingresos = [];
         state.gastos = [];
+        state.ingresosUSD = [];
+        state.gastosUSD = [];
         state.pagosFijosCatalogo = [];
         state.pagosFijosEstado = {};
         state.pagosFijosPagos = {};
         state.pagosFijosMontos = {};
+        state.tesoreria = { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] };
+        state.deudas = { inventario: [], pagos: [], giros: [] };
+        state.contratosDevengados = [];
         state.config = {
           anio: new Date().getFullYear(),
           saldoInicial: 0,
+          saldoInicialUSD: 0,
           categoriasIngresos: CAT_INGRESOS_DEFAULT.slice(),
           categoriasGastos: CAT_GASTOS_DEFAULT.slice(),
           metodosPago: METODOS_DEFAULT.slice(),
-          categoriasNoVenta: []
+          categoriasNoVenta: [],
+          distribucionPorcentajes: {...DISTRIBUCION_DEFAULT},
+          categoriasCostoDirecto: CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(),
+          metaMensualIngresos: 0
         };
         ensureCategoriasNoVenta(state.config);
-        await Promise.all([
+        if(!state.config.categoriasGastos.includes(CAT_GASTO_FINANCIERO)) state.config.categoriasGastos.push(CAT_GASTO_FINANCIERO);
+        if(!state.config.categoriasGastos.includes(CAT_GASTO_COSTO_LIQUIDEZ)) state.config.categoriasGastos.push(CAT_GASTO_COSTO_LIQUIDEZ);
+        CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).forEach(cat=>{
+          if(!state.config.categoriasGastos.includes(cat)) state.config.categoriasGastos.push(cat);
+        });
+        const resultados = await Promise.all([
           saveKey('ingresos', []), saveKey('gastos', []), saveKey('config', state.config),
+          saveKey('ingresosUSD', []), saveKey('gastosUSD', []),
           saveKey('pagosFijosCatalogo', []), saveKey('pagosFijosEstado', {}),
-          saveKey('pagosFijosPagos', {}), saveKey('pagosFijosMontos', {})
+          saveKey('pagosFijosPagos', {}), saveKey('pagosFijosMontos', {}),
+          saveKey('tesoreria', state.tesoreria), saveKey('deudas', state.deudas),
+          saveKey('contratosDevengados', [])
         ]);
-        showToast('Datos restablecidos');
+        // Antes esto no se revisaba — si UNA clave fallaba al guardar (ej. por permisos en Firebase),
+        // igual se mostraba "restablecido" como si todo hubiera funcionado, y esa clave se quedaba con los
+        // datos viejos. Ahora si falla algo, se avisa explícitamente en vez de fingir que salió bien.
+        if(resultados.every(ok=>ok)){
+          showToast('Datos restablecidos — Ingresos, Gastos, Cuenta USD, Tesorería, Deudas y Estado de Resultados quedaron en blanco');
+        } else {
+          showToast('⚠️ Algunas claves no se pudieron borrar en Firebase (revisa tu conexión o los permisos). Recarga la página para ver qué quedó sin borrar.');
+        }
         render();
       }
       else if(cd.action === 'do-import-json'){
@@ -6525,45 +6830,83 @@
       const form = btn.closest('[data-form="ingreso-pf"]');
       const data = readFields(form);
       const monto = Number(data.monto) || 0;
+      const reserva = Math.min(Number(data.reserva) || 0, monto);
       if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
       if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
-      // Defensivo: el botón ya viene disabled hasta marcar las 4 casillas, pero se revalida acá también
-      // por si alguien lo habilita manipulando el DOM — nunca confiar solo en el estado visual del botón.
-      const todasMarcadas = BOVEDAS_PAGABLES.every(b=>{
-        const chk = document.getElementById('fa-pf-chk-'+b.id);
-        return chk && chk.checked;
-      });
-      if(!todasMarcadas){ showToast('Marca las 4 transferencias antes de confirmar.'); return; }
+      const editId = state.editingIngresoId;
+      // Al editar, ya se hicieron las transferencias la primera vez — no se vuelve a pedir el checklist.
+      if(!editId){
+        // Defensivo: el botón ya viene disabled hasta marcar todas las casillas, pero se revalida acá
+        // también por si alguien lo habilita manipulando el DOM — nunca confiar solo en el botón visual.
+        const chkReserva = document.getElementById('fa-pf-chk-reserva');
+        const reservaOk = reserva > 0 ? (chkReserva && chkReserva.checked) : true;
+        const todasMarcadas = reservaOk && BOVEDAS_PAGABLES.every(b=>{
+          const chk = document.getElementById('fa-pf-chk-'+b.id);
+          return chk && chk.checked;
+        });
+        if(!todasMarcadas){ showToast('Marca todas las transferencias antes de confirmar.'); return; }
+      }
 
+      // La Reserva sale 100% hacia Operación ANTES de Profit First — los 4 % se calculan solo sobre el
+      // "Margen Neto Restante" (monto − reserva), nunca sobre el ingreso bruto completo.
+      const montoParaDistribuir = monto - reserva;
       const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
-      const montos = repartirMontoPF(monto, pct);
+      const montos = repartirMontoPF(montoParaDistribuir, pct);
+      const ingresoId = editId || uid('ing');
 
       const ingreso = {
-        id: uid('ing'),
+        id: ingresoId,
         fecha: data.fecha,
         categoria: data.categoria,
         cliente: data.cliente || '',
         monto,
         estado: 'Pagado',
-        distribucion: { porcentajes: {...pct}, montos, confirmadoEl: new Date().toISOString() }
+        distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
       };
-      state.ingresos.push(ingreso);
+      if(editId){
+        const idx = state.ingresos.findIndex(i=>i.id===editId);
+        if(idx>-1) state.ingresos[idx] = ingreso;
+        state.editingIngresoId = null;
+      } else {
+        state.ingresos.push(ingreso);
+      }
       await saveKey('ingresos', state.ingresos);
 
-      // Mismo esquema que "Distribuir Recepción" en Tesorería: entrada+salida en Recepción (queda en $0,
-      // nunca acumula) + hasta 4 entradas en las bóvedas destino — pero acá ocurre en el mismo clic que
-      // registrar el ingreso, no como una acción separada más tarde.
-      const distId = uid('dist');
-      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'entrada', monto, descripcion: ingreso.categoria + (ingreso.cliente?` — ${ingreso.cliente}`:''), origen:`ingreso:${ingreso.id}` });
-      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'salida', monto, descripcion:'Distribución Profit First', origen:`distribucion:${distId}` });
+      // Se usa el ID del propio ingreso como llave de correlación de su distribución (en vez de un id random)
+      // — así, si se edita o se elimina, es trivial encontrar y limpiar TODOS sus movimientos de Tesorería.
+      removeTesoreriaPorIngresoPF(ingresoId);
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'entrada', monto, descripcion: ingreso.categoria + (ingreso.cliente?` — ${ingreso.cliente}`:''), origen:`ingreso:${ingresoId}` });
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'salida', monto, descripcion:'Distribución Profit First', origen:`distribucion:${ingresoId}` });
+      if(reserva > 0){
+        state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'operacion', tipo:'entrada', monto: reserva, descripcion:`Reserva Costos Directos — ${ingreso.categoria}`, origen:`reserva:${ingresoId}` });
+      }
       BOVEDAS_PAGABLES.forEach(b=>{
         if(montos[b.id] > 0){
-          state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda: b.id, tipo:'entrada', monto: montos[b.id], descripcion:`Distribución de "${ingreso.categoria}"`, origen:`distribucion:${distId}` });
+          state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda: b.id, tipo:'entrada', monto: montos[b.id], descripcion:`Distribución de "${ingreso.categoria}"`, origen:`distribucion:${ingresoId}` });
         }
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
-      showToast('Ingreso registrado y distribuido en las 4 bóvedas');
+      showToast(reserva>0 ? `Ingreso registrado — reserva de ${fmtMoney(reserva)} bloqueada en Operación, resto repartido en las 4 bóvedas` : 'Ingreso registrado y distribuido en las 4 bóvedas');
+      render();
+    }
+    else if(action === 'edit-ingreso-pf'){
+      state.editingIngresoId = btn.dataset.id;
+      render();
+      const card = root.querySelector('.fa-card');
+      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+    else if(action === 'cancelar-edicion-ingreso-pf'){
+      state.editingIngresoId = null;
+      render();
+    }
+    else if(action === 'delete-ingreso-pf'){
+      state.confirmDialog = {
+        message: '¿Eliminar este ingreso? También se eliminan sus movimientos de Tesorería asociados (Recepción y las bóvedas donde se distribuyó). Esta acción no se puede deshacer.',
+        action: 'do-delete-ingreso-pf',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
       render();
     }
     else if(action === 'submit-financiamiento'){
@@ -6598,25 +6941,272 @@
       }
       render();
     }
+    else if(action === 'edit-contrato-devengado'){
+      state.editingContratoId = btn.dataset.id;
+      render();
+      const card = root.querySelector('.fa-card');
+      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+    else if(action === 'cancel-edit-contrato'){
+      state.editingContratoId = null;
+      render();
+    }
+    else if(action === 'delete-contrato-devengado'){
+      state.confirmDialog = {
+        message: '¿Eliminar este lote de ventas? También se eliminan los gastos de comisiones/anticipo de fondos vinculados a él. Esta acción no se puede deshacer.',
+        action: 'do-delete-contrato-devengado',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
     else if(action === 'submit-contrato-devengado'){
+      // Este handler ahora SOLO edita una línea ya guardada — crear líneas nuevas pasa por el constructor de
+      // lote (agregar-linea-lote + confirmar-lote-devengado). Por eso no toca comisiones/anticipo: esos son
+      // del lote completo (origenContrato = loteId), no de una línea individual.
+      const editId = state.editingContratoId;
+      if(!editId){ showToast('No hay ninguna línea en edición.'); return; }
       const data = readFields(btn.closest('[data-form="contrato-devengado"]'));
-      const montoTotal = Number(data.montoTotal) || 0;
+      const montoBrutoUSD = Number(data.montoBrutoUSD) || 0;
+      const tipoCambio = Number(data.tipoCambio) || 0;
       if(!data.nombre){ showToast('Ponle un nombre al proyecto/cliente.'); return; }
-      if(montoTotal <= 0){ showToast('Ingresa el monto total cerrado.'); return; }
       if(!data.fechaInicio){ showToast('Elige la fecha de inicio.'); return; }
+      if(montoBrutoUSD <= 0){ showToast('Ingresa el Monto Bruto en USD.'); return; }
+      if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano).'); return; }
       const esAutogestionado = data.tipoServicio === 'Autogestionado';
-      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionMeses)||1, 1);
-      state.contratosDevengados.push({
-        id: uid('contrato'),
-        nombre: data.nombre,
-        montoTotal,
-        tipoServicio: data.tipoServicio,
-        duracionMeses,
-        fechaInicio: data.fechaInicio,
-        fechaCreacion: todayISO()
+      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionPreset==='otro' ? data.duracionLibre : data.duracionPreset)||1, 1);
+      const montoTotal = Math.round(montoBrutoUSD * tipoCambio);
+
+      const idx = state.contratosDevengados.findIndex(c=>c.id===editId);
+      if(idx>-1){
+        const anterior = state.contratosDevengados[idx];
+        state.contratosDevengados[idx] = {
+          ...anterior,
+          nombre: data.nombre, montoTotal, montoTotalUSD: montoBrutoUSD, tipoCambio,
+          tipoServicio: data.tipoServicio, duracionMeses, fechaInicio: data.fechaInicio
+        };
+      }
+      state.editingContratoId = null;
+      await saveKey('contratosDevengados', state.contratosDevengados);
+      showToast('Línea actualizada');
+      render();
+    }
+    else if(action === 'agregar-linea-lote'){
+      const data = readFields(btn.closest('[data-form="linea-lote"]'));
+      const montoUSD = Number(data.montoUSD) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return; }
+      if(montoUSD <= 0){ showToast('Ingresa el Monto Bruto en USD de la línea.'); return; }
+      const esAutogestionado = data.tipoServicio === 'Autogestionado';
+      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionPreset==='otro' ? data.duracionLibre : data.duracionPreset)||1, 1);
+      if(!state.loteEnConstruccion) state.loteEnConstruccion = { lineas: [] };
+      state.loteEnConstruccion.lineas.push({ id: uid('linea'), nombre: data.nombre, montoTotalUSD: montoUSD, tipoServicio: data.tipoServicio, duracionMeses });
+      showToast('Línea agregada al lote — sigue agregando o confirma abajo');
+      render();
+    }
+    else if(action === 'quitar-linea-lote'){
+      const idx = Number(btn.dataset.index);
+      if(state.loteEnConstruccion && state.loteEnConstruccion.lineas){
+        state.loteEnConstruccion.lineas.splice(idx, 1);
+      }
+      render();
+    }
+    else if(action === 'confirmar-lote-devengado'){
+      const lineas = (state.loteEnConstruccion && state.loteEnConstruccion.lineas) || [];
+      if(lineas.length === 0){ showToast('Agrega al menos una línea al lote antes de confirmar.'); return; }
+      const data = readFields(btn.closest('[data-form="lote-devengado"]'));
+      const tipoCambio = Number(data.tipoCambio) || 0;
+      const comisionesUSD = Number(data.comisionesUSD) || 0;
+      const anticipoUSD = Number(data.anticipoUSD) || 0;
+      if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio del lote.'); return; }
+      if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano).'); return; }
+
+      // Todo lo contable queda en CLP — el USD y el tipo de cambio quedan como referencia. El Motor de
+      // Prorrateo aplica a cada línea por separado; comisiones/anticipo se cargan UNA vez para el lote entero.
+      const loteId = uid('lote');
+      lineas.forEach(linea=>{
+        const montoTotal = Math.round(linea.montoTotalUSD * tipoCambio);
+        state.contratosDevengados.push({
+          id: uid('contrato'), loteId, nombre: linea.nombre, montoTotal, montoTotalUSD: linea.montoTotalUSD,
+          tipoCambio, tipoServicio: linea.tipoServicio, duracionMeses: linea.duracionMeses,
+          fechaInicio: data.fechaInicio, fechaCreacion: todayISO()
+        });
       });
       await saveKey('contratosDevengados', state.contratosDevengados);
-      showToast(duracionMeses>1 ? `Contrato registrado — se prorratea en ${duracionMeses} meses` : 'Contrato registrado');
+
+      const comisionesCLP = Math.round(comisionesUSD * tipoCambio);
+      const anticipoCLP = Math.round(anticipoUSD * tipoCambio);
+      if(comisionesCLP > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fechaInicio, categoria: CAT_COSTO_COMISIONES,
+          proveedor: `Lote de ventas`, descripcion: `Comisiones de pasarela del lote (US$${comisionesUSD} x ${tipoCambio})`,
+          monto: comisionesCLP, metodo: 'Transferencia', origenContrato: loteId
+        });
+      }
+      if(anticipoCLP > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fechaInicio, categoria: CAT_GASTO_COSTO_LIQUIDEZ,
+          proveedor: `Lote de ventas`, descripcion: `Anticipo de fondos del lote (US$${anticipoUSD} x ${tipoCambio})`,
+          monto: anticipoCLP, metodo: 'Transferencia', origenContrato: loteId
+        });
+      }
+      if(comisionesCLP>0 || anticipoCLP>0) await saveKey('gastos', state.gastos);
+
+      state.loteEnConstruccion = { lineas: [] };
+      showToast(`Lote confirmado — ${lineas.length} línea${lineas.length===1?'':'s'} registrada${lineas.length===1?'':'s'}`);
+      render();
+    }
+    else if(action === 'delete-lote-devengado'){
+      state.confirmDialog = {
+        message: '¿Eliminar este lote completo? Se eliminan todas sus líneas y los gastos de comisiones/anticipo de fondos vinculados. Esta acción no se puede deshacer.',
+        action: 'do-delete-lote-devengado',
+        data: btn.dataset.loteid,
+        confirmLabel: 'Eliminar lote'
+      };
+      render();
+    }
+    else if(action === 'edit-deuda'){
+      state.editingDeudaId = btn.dataset.id;
+      render();
+      const card = root.querySelector('.fa-card');
+      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+    else if(action === 'cancel-edit-deuda'){
+      state.editingDeudaId = null;
+      render();
+    }
+    else if(action === 'delete-deuda'){
+      const deuda = state.deudas.inventario.find(d=>d.id===btn.dataset.id);
+      state.confirmDialog = {
+        message: `¿Eliminar "${deuda?deuda.nombre:'esta deuda'}" por completo? También se eliminan todos sus pagos y giros registrados, junto con los movimientos de Tesorería y gastos financieros vinculados. Esta acción no se puede deshacer.`,
+        action: 'do-delete-deuda',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar todo'
+      };
+      render();
+    }
+    else if(action === 'delete-pago-deuda'){
+      state.confirmDialog = {
+        message: '¿Eliminar este pago? Se revierte la salida de Tesorería y el Gasto Financiero vinculado (si tenía interés) — el saldo de la deuda vuelve a subir en la parte de capital que este pago había reducido.',
+        action: 'do-delete-pago-deuda',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'delete-giro-deuda'){
+      state.confirmDialog = {
+        message: '¿Eliminar este movimiento? Se revierte lo que generó (la entrada de Tesorería si era uso de línea, o el gasto vinculado si era compra con tarjeta) y el saldo de la deuda baja en esa misma cantidad.',
+        action: 'do-delete-giro-deuda',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'submit-cuenta-por-pagar'){
+      const data = readFields(btn.closest('[data-form="cuenta-por-pagar"]'));
+      const montoOriginal = Number(data.montoOriginal) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre a la Cuenta por Pagar.'); return; }
+      if(montoOriginal <= 0){ showToast('Ingresa el monto pendiente.'); return; }
+      state.cuentasPorPagar.items.push({ id: uid('ctapagar'), nombre: data.nombre, montoOriginal, origenGasto: null, fechaCreacion: todayISO(), activa: true });
+      await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+      showToast('Cuenta por Pagar agregada');
+      render();
+    }
+    else if(action === 'abrir-pagar-saldo-ctapagar'){
+      state.pagandoCtaPorPagarId = btn.dataset.id;
+      render();
+    }
+    else if(action === 'cerrar-pagar-saldo-ctapagar'){
+      state.pagandoCtaPorPagarId = null;
+      render();
+    }
+    else if(action === 'submit-pagar-saldo-ctapagar'){
+      const ctaId = btn.dataset.id;
+      const cta = state.cuentasPorPagar.items.find(c=>c.id===ctaId);
+      if(!cta){ showToast('No se encontró la Cuenta por Pagar.'); return; }
+      const data = readFields(btn.closest('[data-form="pagar-saldo-ctapagar"]'));
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      if(!data.boveda){ showToast('Elige de qué bóveda sale el pago.'); return; }
+
+      const pagoId = uid('pagoctapagar');
+      state.cuentasPorPagar.pagos.push({ id: pagoId, ctaId, fecha: data.fecha, monto, boveda: data.boveda });
+      const saldoRestante = getSaldoCtaPorPagar(ctaId);
+      if(saldoRestante <= 0) cta.activa = false;
+      await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+
+      // Únicas 2 acciones, tal como se pidió: reduce el pasivo (arriba) y descuenta el efectivo de Tesorería
+      // (abajo) — JAMÁS toca Estado de Resultados, porque ese gasto ya se reconoció 100% en su mes de origen.
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda: data.boveda, tipo:'salida', monto,
+        descripcion: `Pago Cuenta por Pagar — ${cta.nombre}`, origen:`pagoctapagar:${pagoId}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      state.pagandoCtaPorPagarId = null;
+      showToast(saldoRestante<=0 ? 'Cuenta por Pagar liquidada por completo' : 'Pago parcial registrado');
+      render();
+    }
+    else if(action === 'delete-ctapagar'){
+      state.confirmDialog = {
+        message: '¿Eliminar esta Cuenta por Pagar? Si ya tiene pagos hechos, también se revierten sus movimientos de Tesorería. Esta acción no se puede deshacer.',
+        action: 'do-delete-ctapagar',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'delete-pago-ctapagar'){
+      state.confirmDialog = {
+        message: '¿Eliminar este pago? El saldo pendiente de la Cuenta por Pagar vuelve a subir, y se revierte su salida de Tesorería.',
+        action: 'do-delete-pago-ctapagar',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'abrir-cuota-atrasada'){
+      state.registrandoCuotaAtrasadaId = btn.dataset.id;
+      render();
+    }
+    else if(action === 'cerrar-cuota-atrasada'){
+      state.registrandoCuotaAtrasadaId = null;
+      render();
+    }
+    else if(action === 'submit-cuota-atrasada'){
+      const deudaId = btn.dataset.id;
+      const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+      if(!deuda){ showToast('No se encontró la deuda.'); return; }
+      const data = readFields(btn.closest('[data-form="cuota-atrasada"]'));
+      const interes = Number(data.interes) || 0;
+      const capital = Number(data.capital) || 0;
+      if(!data.fecha){ showToast('Elige la fecha de la cuota atrasada.'); return; }
+      if(interes <= 0 && capital <= 0){ showToast('Ingresa al menos el interés o el capital de la cuota.'); return; }
+
+      // El capital de la cuota no pagada se suma al saldo insoluto (mismo mecanismo que un "giro" de línea
+      // de crédito), para no perder el rastro del atraso — pero sin tocar Tesorería, porque no se pagó nada.
+      let giroId = null;
+      if(capital > 0){
+        if(!state.deudas.giros) state.deudas.giros = [];
+        giroId = uid('giro');
+        state.deudas.giros.push({ id: giroId, deudaId, fecha: data.fecha, monto: capital, descripcion: 'Cuota atrasada (capital)', origen:'cuota_atrasada' });
+        await saveKey('deudas', state.deudas);
+      }
+      // El interés cuenta como Gasto Financiero YA, aunque no se haya pagado — es el costo de la mora. A
+      // propósito NO lleva "boveda": nunca debe descontarse de Tesorería, porque no salió plata del banco.
+      // Se etiqueta con el mismo giroId (si existe) para que eliminar el giro limpie también este gasto.
+      if(interes > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO, proveedor: deuda.nombre,
+          descripcion: `Cuota atrasada (interés) — ${deuda.nombre}`, monto: interes, metodo: 'N/A — no pagado',
+          origenGiro: giroId
+        });
+        await saveKey('gastos', state.gastos);
+      }
+
+      state.registrandoCuotaAtrasadaId = null;
+      showToast('Cuota atrasada registrada — el saldo de la deuda subió y el interés ya cuenta en Estado de Resultados');
       render();
     }
     else if(action === 'submit-deuda'){
@@ -6626,8 +7216,10 @@
       const cuotaMinima = Number(data.cuotaMinima) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la deuda.'); return; }
       if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
+      const editId = state.editingDeudaId;
+      const deudaAnterior = editId ? state.deudas.inventario.find(d=>d.id===editId) : null;
       const deuda = {
-        id: uid('deuda'),
+        id: editId || uid('deuda'),
         nombre: data.nombre,
         montoOriginal,
         tasaInteres,
@@ -6636,12 +7228,18 @@
         fechaVencimiento: data.fechaVencimiento || '',
         categoria: data.categoria || '',
         cupo: Number(data.cupo) || null, // solo relevante para tarjetas/líneas de crédito — si no se define, el Dashboard usa montoOriginal como aproximación
-        fechaCreacion: todayISO(),
-        activa: true
+        fechaCreacion: editId ? deudaAnterior.fechaCreacion : todayISO(),
+        activa: editId ? deudaAnterior.activa : true // al editar, no se reactiva sola ni se desactiva sola
       };
-      state.deudas.inventario.push(deuda);
+      if(editId){
+        const idx = state.deudas.inventario.findIndex(d=>d.id===editId);
+        if(idx>-1) state.deudas.inventario[idx] = deuda;
+        state.editingDeudaId = null;
+      } else {
+        state.deudas.inventario.push(deuda);
+      }
       await saveKey('deudas', state.deudas);
-      showToast('Deuda agregada al inventario');
+      showToast(editId ? 'Deuda actualizada' : 'Deuda agregada al inventario');
       render();
     }
     else if(action === 'submit-uso-linea-credito'){
@@ -6678,15 +7276,16 @@
 
       // Acción A (Estado de Resultados): el gasto cuenta YA este mes, sin esperar a que se pague la tarjeta.
       // A propósito NO lleva "boveda" — por eso no pasa por syncTesoreriaGasto ni descuenta nada de Tesorería.
+      const giroId = uid('giro');
       state.gastos.push({
         id: uid('gas'), fecha: data.fecha, categoria: data.categoria, proveedor: data.proveedor||'',
-        descripcion: `Compra con tarjeta — ${deuda.nombre}`, monto, metodo: 'Tarjeta de Crédito'
+        descripcion: `Compra con tarjeta — ${deuda.nombre}`, monto, metodo: 'Tarjeta de Crédito', origenGiro: giroId
       });
       await saveKey('gastos', state.gastos);
 
       // Acción B (Gestión de Deudas): aumenta lo que se debe en esa tarjeta.
       if(!state.deudas.giros) state.deudas.giros = [];
-      const giro = { id: uid('giro'), deudaId: deuda.id, fecha: data.fecha, monto, descripcion: `Compra: ${data.categoria}`, origen:'tarjeta_credito' };
+      const giro = { id: giroId, deudaId: deuda.id, fecha: data.fecha, monto, descripcion: `Compra: ${data.categoria}`, origen:'tarjeta_credito' };
       state.deudas.giros.push(giro);
       await saveKey('deudas', state.deudas);
 
@@ -6717,7 +7316,7 @@
 
       state.gastos.push({
         id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO, proveedor: deuda.nombre,
-        descripcion: `Interés/Comisión — ${deuda.nombre}`, monto, metodo: 'Transferencia'
+        descripcion: `Interés/Comisión — ${deuda.nombre}`, monto, metodo: 'Transferencia', origenPagoDeuda: pago.id
       });
       await saveKey('gastos', state.gastos);
 
@@ -6773,7 +7372,7 @@
         state.gastos.push({
           id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO,
           proveedor: deuda.nombre, descripcion: `Interés cuota — ${deuda.nombre}`, monto: interes,
-          metodo: 'Transferencia'
+          metodo: 'Transferencia', origenPagoDeuda: pago.id
         });
         await saveKey('gastos', state.gastos);
       }
@@ -7108,7 +7707,7 @@
     }
     else if(action === 'reset-data'){
       state.confirmDialog = {
-        message: 'Esto borrará TODOS tus ingresos, gastos y pagos fijos guardados. ¿Confirmas que quieres continuar?',
+        message: 'Esto borrará TODOS tus datos guardados en esta versión de prueba: Ingresos, Gastos, Cuenta USD, Pagos Fijos, Tesorería (bóvedas), Gestión de Deudas y Estado de Resultados. ¿Confirmas que quieres continuar?',
         action: 'do-reset-data',
         data: null,
         confirmLabel: 'Borrar todo'
@@ -7139,6 +7738,101 @@
         await saveKey('tesoreria', state.tesoreria, {silent:true});
       }
       showToast('Ingreso guardado');
+      render();
+    }
+    else if(action === 'submit-plantilla-gasto-fijo'){
+      const data = readFields(btn.closest('[data-form="plantilla-gasto-fijo"]'));
+      const montoMensual = Number(data.montoMensual) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre a la plantilla.'); return; }
+      if(montoMensual <= 0){ showToast('Ingresa el monto mensual.'); return; }
+      const editId = state.editingPlantillaId;
+      if(editId){
+        const idx = state.plantillasGastosFijos.findIndex(p=>p.id===editId);
+        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual };
+        state.editingPlantillaId = null;
+      } else {
+        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, activa:true, fechaCreacion: todayISO() });
+      }
+      await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
+      showToast(editId?'Plantilla actualizada':'Plantilla agregada — se generará su gasto Pendiente la próxima vez que abras la app (o el mes que corresponda)');
+      render();
+    }
+    else if(action === 'edit-plantilla'){
+      state.editingPlantillaId = btn.dataset.id;
+      render();
+    }
+    else if(action === 'cancel-edit-plantilla'){
+      state.editingPlantillaId = null;
+      render();
+    }
+    else if(action === 'toggle-plantilla-activa'){
+      const p = state.plantillasGastosFijos.find(p=>p.id===btn.dataset.id);
+      if(p){
+        p.activa = !p.activa;
+        await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
+        showToast(p.activa?'Plantilla reactivada':'Plantilla pausada — no generará más gastos hasta que la reactives');
+        render();
+      }
+    }
+    else if(action === 'delete-plantilla'){
+      state.confirmDialog = {
+        message: '¿Eliminar esta plantilla? No se borran los gastos que ya generó, solo deja de generar nuevos hacia adelante.',
+        action: 'do-delete-plantilla',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'abrir-procesar-gasto'){
+      state.procesandoGastoId = btn.dataset.id;
+      render();
+    }
+    else if(action === 'cerrar-procesar-gasto'){
+      state.procesandoGastoId = null;
+      render();
+    }
+    else if(action === 'submit-procesar-gasto'){
+      const gastoId = btn.dataset.id;
+      const gasto = state.gastos.find(g=>g.id===gastoId);
+      if(!gasto){ showToast('No se encontró el gasto.'); return; }
+      const data = readFields(btn.closest('[data-form="procesar-gasto"]'));
+      const montoPagado = Number(data.montoPagadoAhora) || 0;
+      // El retiro de Sueldo Dueños SIEMPRE sale de esa bóveda específica — no es elegible, a diferencia de
+      // un Gasto Fijo normal donde sí se elige de dónde pagar.
+      const boveda = gasto.origenSueldoDuenos ? 'sueldoDuenos' : data.boveda;
+      if(!boveda){ showToast('Elige de qué bóveda sale el pago.'); return; }
+      if(montoPagado < 0){ showToast('El monto pagado no puede ser negativo.'); return; }
+      if(montoPagado > gasto.monto){ showToast('El monto pagado no puede ser mayor al Monto Total del gasto.'); return; }
+
+      gasto.montoPagado = montoPagado;
+      gasto.boveda = boveda;
+      gasto.estado = montoPagado >= gasto.monto ? 'Pagado' : 'Pagado Parcial';
+      await saveKey('gastos', state.gastos);
+
+      // Acción B (Tesorería): solo el monto REALMENTE pagado sale del banco — nunca el Monto Total del gasto,
+      // que ya cuenta 100% en Estado de Resultados desde que se generó (base devengada).
+      if(montoPagado > 0){
+        state.tesoreria.movimientos.push({
+          id: uid('tes'), fecha: gasto.fecha, boveda, tipo:'salida', monto: montoPagado,
+          descripcion: `${gasto.origenSueldoDuenos?'Retiro Sueldo Dueños':'Pago'} de "${gasto.proveedor||gasto.categoria}"`, origen:`gastoprocesado:${gasto.id}`
+        });
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+      }
+
+      // Acción C (Gestión de Deudas): la diferencia se convierte en una Cuenta por Pagar nueva — etiquetada
+      // "Sueldos Dueños por Pagar" cuando corresponde, para distinguirla de un gasto fijo común.
+      const diferencia = gasto.monto - montoPagado;
+      if(diferencia > 0){
+        state.cuentasPorPagar.items.push({
+          id: uid('ctapagar'),
+          nombre: gasto.origenSueldoDuenos ? 'Sueldos Dueños por Pagar' : (gasto.proveedor || gasto.descripcion || gasto.categoria),
+          montoOriginal: diferencia, origenGasto: gasto.id, esSueldoDuenos: !!gasto.origenSueldoDuenos, fechaCreacion: gasto.fecha, activa: true
+        });
+        await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+      }
+
+      state.procesandoGastoId = null;
+      showToast(diferencia>0 ? `Procesado — se creó una Cuenta por Pagar de ${fmtMoney(diferencia)} en Gestión de Deudas` : 'Gasto pagado por completo');
       render();
     }
     else if(action === 'submit-gasto'){
@@ -7240,6 +7934,22 @@
       state.config.metaMensualIngresos = Number(data.metaMensualIngresos) || 0;
       await saveKey('config', state.config);
       showToast('Configuración guardada');
+      render();
+    }
+    else if(action === 'save-dia-cero'){
+      const data = readFields(btn.closest('[data-form="dia-cero"]'));
+      const nuevosSaldos = {};
+      BOVEDAS.forEach(b=>{ nuevosSaldos[b.id] = Number(data['saldo_'+b.id]) || 0; });
+      state.tesoreria.saldosIniciales = nuevosSaldos;
+      await saveKey('tesoreria', state.tesoreria);
+      showToast('Día Cero guardado — el saldo inicial de tus bóvedas quedó actualizado');
+      render();
+    }
+    else if(action === 'save-sueldo-duenos-config'){
+      const data = readFields(btn.closest('[data-form="sueldo-duenos-config"]'));
+      state.config.sueldoDuenosFijoMensual = Number(data.sueldoDuenosFijoMensual) || 0;
+      await saveKey('config', state.config);
+      showToast('Sueldo Fijo Acordado guardado — se generará su gasto Pendiente cada mes en Estado de Resultados');
       render();
     }
     else if(action === 'add-cat-ingreso'){
