@@ -8297,14 +8297,15 @@
       const data = readFields(btn.closest('[data-form="dia-cero"]'));
       if(!data.fechaDiaCero){ showToast('Elige la Fecha Día Cero.'); return; }
       state.config.fechaDiaCero = data.fechaDiaCero;
-      await saveKey('config', state.config);
 
       // Cada saldo inicial se registra como un movimiento REAL en el historial de Tesorería (no como un
       // número estático aparte) — así la matemática del Flujo de Caja siempre cuadra con el saldo de la
       // bóveda, y queda visible de dónde salió ese dinero. Por eso saldosIniciales queda en 0: el valor
       // ahora vive 100% en el movimiento, para no contarlo dos veces.
+      let saldoInicialOperacion = 0;
       BOVEDAS.forEach(b=>{
         const monto = Number(data['saldo_'+b.id]) || 0;
+        if(b.id === 'operacion') saldoInicialOperacion = monto;
         const origen = `dia-cero:${b.id}`;
         state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
         if(monto > 0){
@@ -8315,8 +8316,13 @@
         }
       });
       state.tesoreria.saldosIniciales = { recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 };
+      // El "Acumulado del año" de la pestaña Flujo de Caja (más antigua, calcula aparte de las bóvedas) usa
+      // este otro campo — se sincroniza automáticamente con el saldo inicial de Operación del Día Cero, para
+      // que ambas pantallas partan del mismo número sin tener que llenarlo dos veces.
+      state.config.saldoInicial = saldoInicialOperacion;
+      await saveKey('config', state.config);
       await saveKey('tesoreria', state.tesoreria);
-      showToast('Día Cero guardado — el saldo inicial de cada bóveda ya aparece como movimiento en el historial');
+      showToast('Día Cero guardado — el saldo inicial ya aparece en Tesorería y en Flujo de Caja');
       render();
     }
     else if(action === 'save-sueldo-duenos-config'){
