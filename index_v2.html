@@ -2510,6 +2510,9 @@
 
     state.ingresos.forEach(ing=>{
       if(!ing.fecha) return;
+      // El Flujo de Caja arranca limpio en el Día Cero — un ingreso de antes de esa fecha nunca cuenta acá,
+      // aunque sí pueda seguir viéndose en Estado de Resultados (Módulo 3), que es aparte.
+      if(!esMovimientoVigente({fecha: ing.fecha})) return;
       const d = new Date(ing.fecha+'T00:00:00');
       if(d.getFullYear() !== year) return;
       const m = d.getMonth();
@@ -2528,6 +2531,9 @@
 
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
+      // Mismo Firewall del Día Cero: un gasto histórico (registrado para Estado de Resultados) nunca debe
+      // mover el Flujo de Caja real, sin importar qué bóveda tenga asignada.
+      if(!esMovimientoVigente({fecha: g.fecha})) return;
       const d = new Date(g.fecha+'T00:00:00');
       if(d.getFullYear() !== year) return;
       const m = d.getMonth();
