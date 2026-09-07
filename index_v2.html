@@ -503,6 +503,11 @@
     "Otros Ingresos"
   ];
 
+  // Pasarela/Medio de Pago (Módulo 2 - Ingresos y Distribución): campo puramente informativo, para dejar
+  // registrado por dónde entró la plata. El monto siempre es el neto en CLP que aterrizó en el banco — este
+  // campo NO dispara ninguna conversión de moneda ni cálculo distinto, solo queda guardado como referencia.
+  const PASARELAS_PAGO = ["Hotmart", "Payoneer", "PayPal", "Transferencia Bancaria", "Flow", "Mercado Pago", "Transbank"];
+
   // Categoría de gasto para el interés de los pagos de deuda (Módulo 5) — cuenta como gasto operacional
   // real en Estado de Resultados (NO es no-venta: el interés sí es un costo del negocio, a diferencia del
   // capital, que nunca se registra como gasto porque solo reduce lo que se debe).
@@ -531,6 +536,28 @@
   // Tipos de servicio para el prorrateo de ingresos devengados: Autogestionado siempre dura 1 mes (no se
   // prorratea), Mentoría/Agencia dura los meses que el usuario indique.
   const TIPOS_SERVICIO_DEVENGADO = ["Autogestionado", "Mentoría/Agencia"];
+  // Catálogo de Productos (Estado de Resultados, Módulo 3) — reemplaza el selector de 2 opciones de arriba
+  // para las líneas NUEVAS del Lote de Ventas. Cada tipo trae su propia regla de duración:
+  // - duracion:'input' → el usuario ingresa entre 1 y 12 meses.
+  // - duracion:<número> → duración fija, no se pide nada (ej. Sinergia siempre 3 meses).
+  // - usaFechaEvento:true → el ingreso se reconoce en la Fecha del Evento (campo aparte), no en la Fecha de
+  //   Inicio del lote — para Eventos Online, donde la venta y la ejecución pueden ser fechas distintas.
+  // - comisionBloqueada:true → "Dinero Limpio": la Comisión por Cuota queda fija en $0 y no editable, porque
+  //   este tipo de ingreso ya llega neto (Co-Producciones y Afiliación).
+  const TIPOS_INGRESO_CATALOGO = [
+    { id:'mentoria', label:'Mentorías', duracion:'input' },
+    { id:'sinergia', label:'Sinergia', duracion:3 },
+    { id:'fee_agencia', label:'Fee Agencia', duracion:'input' },
+    { id:'membresia_anual', label:'Membresía Anual', duracion:12 },
+    { id:'membresia_semestral', label:'Membresía Semestral', duracion:6 },
+    { id:'membresia_trimestral', label:'Membresía Trimestral', duracion:3 },
+    { id:'curso_autogestionado', label:'Cursos Autogestionados', duracion:1 },
+    { id:'membresia_mensual', label:'Membresía Mensual', duracion:1 },
+    { id:'evento_online', label:'Eventos Online', duracion:1, usaFechaEvento:true },
+    { id:'evento_presencial', label:'Evento Presencial', duracion:1, usaFechaEvento:true },
+    { id:'coproduccion', label:'Co-Producciones', duracion:1, comisionBloqueada:true },
+    { id:'afiliacion', label:'Afiliación', duracion:1, comisionBloqueada:true }
+  ];
   // Forma de Pago de cada línea del lote — define en qué moneda se ingresa el monto y cómo se comportan
   // comisión/anticipo. 'usd' = pasarela internacional (Hotmart/Stripe), con tipo de cambio, comisión y
   // anticipo, todo en USD. 'clp_transferencia' = pago directo, sin pasarela de por medio: nunca hay comisión
@@ -539,9 +566,18 @@
   // pasarelas internacionales tipo Hotmart, no de las locales.
   const FORMAS_PAGO_LINEA = [
     { id:'usd', label:'USD — Pasarela Internacional (Hotmart/Stripe)', moneda:'USD', tieneComision:true, tieneAnticipo:true },
+    { id:'paypal', label:'USD — PayPal', moneda:'USD', tieneComision:true, tieneAnticipo:true },
+    { id:'payoneer', label:'USD — Payoneer', moneda:'USD', tieneComision:true, tieneAnticipo:true },
     { id:'clp_transferencia', label:'CLP — Transferencia directa', moneda:'CLP', tieneComision:false, tieneAnticipo:false },
     { id:'clp_pasarela', label:'CLP — Pasarela de Pago (Transbank/Flow/etc.)', moneda:'CLP', tieneComision:true, tieneAnticipo:false }
   ];
+  // Revisa si una Forma de Pago es en USD consultando FORMAS_PAGO_LINEA (nunca comparando contra el string
+  // 'usd' directo) — así cualquier método nuevo que se agregue a la lista (PayPal, Payoneer, el que sea)
+  // queda bien reconocido sin tener que tocar la lógica de conversión en cada lugar donde se usa.
+  function esFormaPagoUSD(formaPagoId){
+    const fp = FORMAS_PAGO_LINEA.find(f=>f.id===(formaPagoId||'usd'));
+    return fp ? fp.moneda==='USD' : true;
+  }
 
   // Reparte un monto entero en las 4 bóvedas pagables según %. Redondea sueldoDuenos/impuestos/ganancia con
   // Math.round, y hace que Operación absorba lo que sobre — así la suma de las 4 SIEMPRE calza exacto con
@@ -3140,20 +3176,27 @@
 
   // Igual que las dos de arriba, pero para el formulario de "agregar línea al lote" — usa ids propios
   // (fa-linea-*) para no interferir con el formulario de edición de una línea ya guardada (fa-contrato-*).
-  window.faToggleDuracionLinea = function(){
-    const tipo = document.getElementById('fa-linea-tipo');
-    const wrap = document.getElementById('fa-linea-duracion-wrap');
-    const libreWrap = document.getElementById('fa-linea-duracion-libre-wrap');
-    if(!tipo || !wrap) return;
-    const esAutogestionado = tipo.value === 'Autogestionado';
-    wrap.style.display = esAutogestionado ? 'none' : '';
-    if(esAutogestionado && libreWrap) libreWrap.style.display = 'none';
-  };
-  window.faToggleDuracionLineaLibre = function(){
-    const preset = document.getElementById('fa-linea-duracion-preset');
-    const libreWrap = document.getElementById('fa-linea-duracion-libre-wrap');
-    if(!preset || !libreWrap) return;
-    libreWrap.style.display = preset.value === 'otro' ? '' : 'none';
+  // Según el Tipo de Ingreso elegido para la línea (Catálogo de Productos):
+  // - Si su duración es 'input', muestra el campo de meses (1-12) para que el usuario lo indique.
+  // - Si su duración es un número fijo, oculta el campo — no hay nada que preguntar.
+  // - Si usaFechaEvento, muestra el campo "Fecha del Evento" (el ingreso cuenta ahí, no en la venta).
+  // - Si comisionBloqueada ("Dinero Limpio"), deshabilita y fuerza en 0 la Comisión por Cuota.
+  window.faToggleTipoIngresoLinea = function(){
+    const select = document.getElementById('fa-linea-tipo-ingreso');
+    const duracionWrap = document.getElementById('fa-linea-duracion-wrap');
+    const duracionInput = document.getElementById('fa-linea-duracion-input');
+    const fechaEventoWrap = document.getElementById('fa-linea-fecha-evento-wrap');
+    const comisionInput = document.getElementById('fa-linea-comision-input');
+    const dineroLimpioHint = document.getElementById('fa-linea-dinero-limpio-hint');
+    if(!select || !duracionWrap) return;
+    const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===select.value) || TIPOS_INGRESO_CATALOGO[0];
+    duracionWrap.style.display = ti.duracion === 'input' ? '' : 'none';
+    if(fechaEventoWrap) fechaEventoWrap.style.display = ti.usaFechaEvento ? '' : 'none';
+    if(comisionInput){
+      comisionInput.disabled = !!ti.comisionBloqueada;
+      if(ti.comisionBloqueada) comisionInput.value = '0';
+    }
+    if(dineroLimpioHint) dineroLimpioHint.style.display = ti.comisionBloqueada ? '' : 'none';
   };
 
   // Según la Forma de Pago elegida para la línea, cambia la etiqueta de moneda del Monto Bruto y muestra u
@@ -3166,8 +3209,7 @@
     const comisionLabel = document.getElementById('fa-linea-comision-label');
     const anticipoWrap = document.getElementById('fa-linea-anticipo-wrap');
     if(!select || !montoLabel || !comisionWrap || !anticipoWrap) return;
-    const formaPagoData = { usd:{moneda:'USD', tieneComision:true, tieneAnticipo:true}, clp_transferencia:{moneda:'CLP', tieneComision:false, tieneAnticipo:false}, clp_pasarela:{moneda:'CLP', tieneComision:true, tieneAnticipo:false} };
-    const fp = formaPagoData[select.value] || formaPagoData.usd;
+    const fp = FORMAS_PAGO_LINEA.find(f=>f.id===select.value) || FORMAS_PAGO_LINEA[0];
     montoLabel.textContent = `Monto Bruto de esta línea (${fp.moneda})`;
     comisionWrap.style.display = fp.tieneComision ? '' : 'none';
     if(comisionLabel) comisionLabel.textContent = fp.moneda==='USD' ? 'Comisión por Cuota — Hotmart/Stripe (USD, opcional)' : 'Comisión por Cuota — Pasarela (CLP, opcional)';
@@ -3574,42 +3616,49 @@
 
       <div class="fa-card">
         <div class="fa-card-title">${state.editingContratoId ? 'Editar línea del lote' : 'Registrar Lote de Ventas'}</div>
-        <div class="fa-section-note">Un lote puede tener varias líneas de venta adentro — cada una con su propia duración y prorrateo. Comisiones y Anticipo de Fondos se cargan UNA vez por lote completo (no por línea), sin prorratear.</div>
+        <div class="fa-section-note">Un lote puede tener varias líneas de venta adentro — cada una con su propia duración y prorrateo. Comisión y Anticipo se cargan por línea, según cómo paga ESE cliente.</div>
         ${state.editingContratoId ? (() => {
           const editingC = state.contratosDevengados.find(c=>c.id===state.editingContratoId);
-          const esAutogest = editingC ? editingC.tipoServicio==='Autogestionado' : false;
-          const duracionEsPreset = editingC ? DURACION_SERVICIO_PRESETS.includes(editingC.duracionMeses) : true;
+          if(!editingC) return `<div class="fa-hint">No se encontró la línea a editar.</div>`;
+          const fp = FORMAS_PAGO_LINEA.find(f=>f.id===editingC.formaPago) || FORMAS_PAGO_LINEA[0];
+          const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===editingC.tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
           return `
         <div data-form="contrato-devengado">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${editingC?escapeHtml(editingC.nombre):''}"></div>
-            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${editingC?editingC.fechaInicio:todayISO()}"></div>
-            <div class="fa-field"><label>Tipo de Servicio</label>
-              <select name="tipoServicio" id="fa-contrato-tipo" onchange="window.faToggleDuracionContrato()">
-                ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option ${editingC&&editingC.tipoServicio===t?'selected':''}>${t}</option>`).join('')}
+            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${escapeHtml(editingC.nombre)}"></div>
+            <div class="fa-field"><label>Forma de Pago</label>
+              <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
+                ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}" ${editingC.formaPago===f.id?'selected':''}>${escapeHtml(f.label)}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field" id="fa-contrato-duracion-wrap" style="${esAutogest?'display:none;':''}">
-              <label>Meses Reales de Duración del Servicio</label>
-              <select id="fa-contrato-duracion-preset" name="duracionPreset" onchange="window.faToggleDuracionLibre()">
-                ${DURACION_SERVICIO_PRESETS.map(n=>`<option value="${n}" ${editingC&&editingC.duracionMeses===n?'selected':''}>${n} meses</option>`).join('')}
-                <option value="otro" ${editingC&&!duracionEsPreset?'selected':''}>Otro</option>
+            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (${fp.moneda})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${fp.moneda==='USD'?editingC.montoTotalUSD:editingC.montoTotal}"></div>
+            <div class="fa-field"><label>Tipo de Ingreso</label>
+              <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
+                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}" ${editingC.tipoIngreso===t.id?'selected':''}>${escapeHtml(t.label)}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field" id="fa-contrato-duracion-libre-wrap" style="${editingC && !duracionEsPreset && !esAutogest ? '' : 'display:none;'}">
-              <label>¿Cuántos meses?</label>
-              <input type="number" id="fa-contrato-duracion-libre" name="duracionLibre" min="1" step="1" placeholder="Ej: 9" value="${editingC && !duracionEsPreset ? editingC.duracionMeses : ''}">
+            <div class="fa-field" id="fa-linea-duracion-wrap" style="${ti.duracion==='input'?'':'display:none;'}">
+              <label>Meses Reales de Duración (1 a 12)</label>
+              <input type="number" id="fa-linea-duracion-input" name="duracionMeses" min="1" max="12" step="1" placeholder="Ej: 6" value="${ti.duracion==='input'?editingC.duracionMeses:''}">
             </div>
-          </div>
-          <div class="fa-field" style="max-width:320px; margin:14px 0;">
-            <label>Tipo de Cambio (CLP por USD)</label>
-            <div style="display:flex; gap:8px;">
-              <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${editingC?editingC.tipoCambio:''}">
-              <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
+            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="${ti.usaFechaEvento?'':'display:none;'}">
+              <label>Fecha del Evento (el ingreso cuenta ahí, no en la fecha de venta)</label>
+              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento" value="${editingC.fechaInicio||''}">
             </div>
-            <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Busca el dólar observado del Banco Central para la Fecha de Inicio, o escríbelo tú si falla.</div>
+            <div class="fa-field"><label>Fecha de Venta (para las comisiones de las cuotas)</label><input type="date" id="fa-contrato-fecha" name="fechaVentaLote" value="${editingC.fechaVentaLote||editingC.fechaInicio}"></div>
+            <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
+              <div style="display:flex; gap:8px;">
+                <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${editingC.tipoCambio||''}">
+                <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
+              </div>
+              <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Solo hace falta si la Forma de Pago es en USD.</div>
+            </div>
+            <div class="fa-field"><label>Número de Cuotas de Pago</label><input type="number" name="numeroCuotasPago" min="1" step="1" value="${editingC.numeroCuotasPago||1}"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap" style="${fp.tieneComision?'':'display:none;'}"><label id="fa-linea-comision-label">Comisión por Cuota (${fp.moneda}, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${editingC.comisionPorCuota||''}" ${ti.comisionBloqueada?'disabled':''}></div>
+            <div class="fa-field" id="fa-linea-anticipo-wrap" style="${fp.tieneAnticipo?'':'display:none;'}"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${editingC.anticipoPorCuotaUSD||''}"></div>
           </div>
-          <div class="fa-field" style="max-width:280px;"><label>Valor de esta línea (USD)</label><input type="number" name="montoBrutoUSD" min="0" step="0.01" placeholder="0" value="${editingC?editingC.montoTotalUSD:''}"></div>
+          <div class="fa-hint" id="fa-linea-dinero-limpio-hint" style="${ti.comisionBloqueada?'':'display:none;'} color:var(--income); font-weight:600;">💧 Dinero Limpio: este tipo de ingreso llega neto, sin comisión de pasarela.</div>
+          <div class="fa-hint">Al guardar, se regeneran las comisiones/anticipo de ESTA línea con los valores actuales — no afecta a las demás líneas del mismo lote.</div>
           <div class="fa-form-actions" style="margin-top:14px;">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-contrato-devengado">Guardar cambios</button>
             <button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-contrato">Cancelar</button>
@@ -3618,8 +3667,8 @@
           `;
         })() : (() => {
           const lote = state.loteEnConstruccion || { lineas: [] };
-          const totalUSDLote = lote.lineas.filter(l=>(l.formaPago||'usd')==='usd').reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
-          const totalCLPLote = lote.lineas.filter(l=>l.formaPago && l.formaPago!=='usd').reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
+          const totalUSDLote = lote.lineas.filter(l=>esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
+          const totalCLPLote = lote.lineas.filter(l=>l.formaPago && !esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           return `
         <div class="fa-hint" style="margin-top:0;">Paso 1: agrega cada línea de venta del lote — la comisión y el anticipo dependen de cómo paga ESE cliente, así que van por línea, no por lote.</div>
         <div data-form="linea-lote">
@@ -3631,26 +3680,24 @@
               </select>
             </div>
             <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (USD)</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0"></div>
-            <div class="fa-field"><label>Tipo de Servicio</label>
-              <select id="fa-linea-tipo" name="tipoServicio" onchange="window.faToggleDuracionLinea()">
-                ${TIPOS_SERVICIO_DEVENGADO.map(t=>`<option>${t}</option>`).join('')}
+            <div class="fa-field"><label>Tipo de Ingreso</label>
+              <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
+                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}">${escapeHtml(t.label)}</option>`).join('')}
               </select>
             </div>
             <div class="fa-field" id="fa-linea-duracion-wrap">
-              <label>Meses Reales de Duración (para el ingreso)</label>
-              <select id="fa-linea-duracion-preset" name="duracionPreset" onchange="window.faToggleDuracionLineaLibre()">
-                ${DURACION_SERVICIO_PRESETS.map(n=>`<option value="${n}">${n} meses</option>`).join('')}
-                <option value="otro">Otro</option>
-              </select>
+              <label>Meses Reales de Duración (1 a 12)</label>
+              <input type="number" id="fa-linea-duracion-input" name="duracionMeses" min="1" max="12" step="1" placeholder="Ej: 6">
             </div>
-            <div class="fa-field" id="fa-linea-duracion-libre-wrap" style="display:none;">
-              <label>¿Cuántos meses?</label>
-              <input type="number" id="fa-linea-duracion-libre" name="duracionLibre" min="1" step="1" placeholder="Ej: 9">
+            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:none;">
+              <label>Fecha del Evento (el ingreso cuenta ahí, no en la fecha de venta)</label>
+              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento">
             </div>
             <div class="fa-field"><label>Número de Cuotas de Pago (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="1"></div>
-            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" name="comisionPorCuota" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0"></div>
             <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0"></div>
           </div>
+          <div class="fa-hint" id="fa-linea-dinero-limpio-hint" style="display:none; color:var(--income); font-weight:600;">💧 Dinero Limpio: este tipo de ingreso llega neto, sin comisión de pasarela — el campo queda bloqueado en $0.</div>
           <div class="fa-hint">Se genera una comisión (y un anticipo, si aplica) por cada cuota, un mes seguido del otro desde la Fecha de Inicio del lote — cada una queda editable o eliminable por separado después.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="agregar-linea-lote">+ Agregar línea al lote</button>
@@ -3664,11 +3711,12 @@
             <tbody>
               ${lote.lineas.map((l,i)=>{
                 const fp = FORMAS_PAGO_LINEA.find(f=>f.id===l.formaPago) || FORMAS_PAGO_LINEA[0];
+                const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===l.tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
                 return `
                 <tr>
                   <td>${escapeHtml(l.nombre)}</td>
                   <td>${fp.moneda}</td>
-                  <td>${escapeHtml(l.tipoServicio)}</td>
+                  <td>${escapeHtml(ti.label)}${l.fechaEvento?` (evento: ${fmtDate(l.fechaEvento)})`:''}</td>
                   <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
                   <td class="num money">${fp.moneda==='USD'?fmtMoneyUSD(l.montoBruto):fmtMoneyC(l.montoBruto)}</td>
                   <td>${l.numeroCuotasPago}${l.comisionPorCuota?` (com. ${fp.moneda==='USD'?fmtMoneyUSD(l.comisionPorCuota):fmtMoneyC(l.comisionPorCuota)}/cuota)`:''}</td>
@@ -3723,7 +3771,7 @@
                     ${lineas.map(c=>`
                       <tr>
                         <td>${escapeHtml(c.nombre)}</td>
-                        <td>${escapeHtml(c.tipoServicio)}</td>
+                        <td>${c.tipoIngreso ? escapeHtml((TIPOS_INGRESO_CATALOGO.find(t=>t.id===c.tipoIngreso)||{label:c.tipoIngreso}).label) : escapeHtml(c.tipoServicio||'')}</td>
                         <td>${c.duracionMeses} mes${c.duracionMeses===1?'':'es'}</td>
                         <td class="num money">${c.montoTotalUSD!==undefined ? fmtMoneyUSD(c.montoTotalUSD) : '—'}</td>
                         <td class="num">${c.tipoCambio!==undefined ? c.tipoCambio : '—'}</td>
@@ -4345,10 +4393,13 @@
               <select name="categoria">${ORIGENES_INGRESO_PF.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
+            <div class="fa-field"><label>Pasarela / Medio de Pago</label>
+              <select name="pasarela">${PASARELAS_PAGO.map(p=>`<option ${editing&&editing.pasarela===p?'selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
+            </div>
             <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
             <div class="fa-field"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
           </div>
-          <div class="fa-hint" style="margin-top:0;">La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
+          <div class="fa-hint" style="margin-top:0;">El monto siempre se ingresa en CLP — el neto real que llegó a tu banco. La Pasarela es solo para dejar registrado por dónde entró la plata, no cambia ningún cálculo. La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
 
           <div id="fa-pf-reserva-wrap" style="${editing && editing.distribucion && editing.distribucion.reserva ? '' : 'display:none;'} margin-top:14px;">
             <div class="fa-kpi" style="max-width:280px;">
@@ -4401,13 +4452,14 @@
         ${filas.length===0 ? `<div class="fa-empty">Aún no registras ingresos en ${state.config.anio}.</div>` : `
         <div class="fa-table-wrap">
           <table class="fa-table">
-            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th class="num">Monto</th><th>Distribución</th><th></th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th>Pasarela</th><th class="num">Monto</th><th>Distribución</th><th></th></tr></thead>
             <tbody>
               ${filas.map(i=>`
                 <tr>
                   <td>${fmtDate(i.fecha)}</td>
                   <td>${escapeHtml(i.categoria)}</td>
                   <td>${escapeHtml(i.cliente)||'—'}</td>
+                  <td>${escapeHtml(i.pasarela)||'—'}</td>
                   <td class="num money">${fmtMoneyC(i.monto)}</td>
                   <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoney(i.distribucion.reserva)} · `:''}Op ${fmtMoney(i.distribucion.montos.operacion)} · Sueldo ${fmtMoney(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoney(i.distribucion.montos.impuestos)} · Gan ${fmtMoney(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
                   <td>
@@ -6564,12 +6616,14 @@
         render();
       }
       else if(cd.action === 'do-delete-lote-devengado'){
-        // Borra TODAS las líneas del lote (comparten loteId) + los gastos de comisiones/anticipo vinculados
-        // al lote completo — a diferencia de eliminar una línea suelta, esto sí limpia todo de una vez.
+        // Borra TODAS las líneas del lote (comparten loteId) + los gastos de comisiones/anticipo de CADA
+        // una — ahora que cada línea etiqueta sus propios gastos con su propio id (no con el del lote), hay
+        // que juntar primero los ids de todas sus líneas antes de poder limpiar los gastos vinculados.
+        const idsDeLasLineas = state.contratosDevengados.filter(c=> (c.loteId||c.id) === cd.data).map(c=>c.id);
         state.contratosDevengados = state.contratosDevengados.filter(c=> (c.loteId||c.id) !== cd.data);
         await saveKey('contratosDevengados', state.contratosDevengados);
-        const teniaGastosVinculados = state.gastos.some(g=>g.origenContrato===cd.data);
-        state.gastos = state.gastos.filter(g=>g.origenContrato!==cd.data);
+        const teniaGastosVinculados = state.gastos.some(g=>idsDeLasLineas.includes(g.origenContrato));
+        state.gastos = state.gastos.filter(g=>!idsDeLasLineas.includes(g.origenContrato));
         if(teniaGastosVinculados) await saveKey('gastos', state.gastos);
         showToast('Lote completo eliminado, junto con sus comisiones/anticipo vinculados');
         render();
@@ -6723,6 +6777,15 @@
         state.tesoreria = { saldosIniciales:{ recepcion:0, operacion:0, sueldoDuenos:0, impuestos:0, ganancia:0 }, movimientos: [] };
         state.deudas = { inventario: [], pagos: [], giros: [] };
         state.contratosDevengados = [];
+        state.plantillasGastosFijos = [];
+        state.cuentasPorPagar = { items: [], pagos: [] };
+        state.loteEnConstruccion = { lineas: [] };
+        state.editingContratoId = null;
+        state.editingDeudaId = null;
+        state.editingPlantillaId = null;
+        state.procesandoGastoId = null;
+        state.pagandoCtaPorPagarId = null;
+        state.registrandoCuotaAtrasadaId = null;
         state.config = {
           anio: new Date().getFullYear(),
           saldoInicial: 0,
@@ -6733,7 +6796,8 @@
           categoriasNoVenta: [],
           distribucionPorcentajes: {...DISTRIBUCION_DEFAULT},
           categoriasCostoDirecto: CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(),
-          metaMensualIngresos: 0
+          metaMensualIngresos: 0,
+          sueldoDuenosFijoMensual: 0
         };
         ensureCategoriasNoVenta(state.config);
         if(!state.config.categoriasGastos.includes(CAT_GASTO_FINANCIERO)) state.config.categoriasGastos.push(CAT_GASTO_FINANCIERO);
@@ -6747,13 +6811,14 @@
           saveKey('pagosFijosCatalogo', []), saveKey('pagosFijosEstado', {}),
           saveKey('pagosFijosPagos', {}), saveKey('pagosFijosMontos', {}),
           saveKey('tesoreria', state.tesoreria), saveKey('deudas', state.deudas),
-          saveKey('contratosDevengados', [])
+          saveKey('contratosDevengados', []),
+          saveKey('plantillasGastosFijos', []), saveKey('cuentasPorPagar', state.cuentasPorPagar)
         ]);
         // Antes esto no se revisaba — si UNA clave fallaba al guardar (ej. por permisos en Firebase),
         // igual se mostraba "restablecido" como si todo hubiera funcionado, y esa clave se quedaba con los
         // datos viejos. Ahora si falla algo, se avisa explícitamente en vez de fingir que salió bien.
         if(resultados.every(ok=>ok)){
-          showToast('Datos restablecidos — Ingresos, Gastos, Cuenta USD, Tesorería, Deudas y Estado de Resultados quedaron en blanco');
+          showToast('Datos restablecidos — Ingresos, Gastos, Cuenta USD, Tesorería, Deudas, Estado de Resultados, Plantillas y Cuentas por Pagar quedaron en blanco');
         } else {
           showToast('⚠️ Algunas claves no se pudieron borrar en Firebase (revisa tu conexión o los permisos). Recarga la página para ver qué quedó sin borrar.');
         }
@@ -6900,6 +6965,7 @@
         fecha: data.fecha,
         categoria: data.categoria,
         cliente: data.cliente || '',
+        pasarela: data.pasarela || '',
         monto,
         estado: 'Pagado',
         distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
@@ -6916,7 +6982,7 @@
       // Se usa el ID del propio ingreso como llave de correlación de su distribución (en vez de un id random)
       // — así, si se edita o se elimina, es trivial encontrar y limpiar TODOS sus movimientos de Tesorería.
       removeTesoreriaPorIngresoPF(ingresoId);
-      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'entrada', monto, descripcion: ingreso.categoria + (ingreso.cliente?` — ${ingreso.cliente}`:''), origen:`ingreso:${ingresoId}` });
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'entrada', monto, descripcion: ingreso.categoria + (ingreso.cliente?` — ${ingreso.cliente}`:'') + (ingreso.pasarela?` (${ingreso.pasarela})`:''), origen:`ingreso:${ingresoId}` });
       state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'recepcion', tipo:'salida', monto, descripcion:'Distribución Profit First', origen:`distribucion:${ingresoId}` });
       if(reserva > 0){
         state.tesoreria.movimientos.push({ id: uid('tes'), fecha: data.fecha, boveda:'operacion', tipo:'entrada', monto: reserva, descripcion:`Reserva Costos Directos — ${ingreso.categoria}`, origen:`reserva:${ingresoId}` });
@@ -7002,33 +7068,77 @@
       render();
     }
     else if(action === 'submit-contrato-devengado'){
-      // Este handler ahora SOLO edita una línea ya guardada — crear líneas nuevas pasa por el constructor de
-      // lote (agregar-linea-lote + confirmar-lote-devengado). Por eso no toca comisiones/anticipo: esos son
-      // del lote completo (origenContrato = loteId), no de una línea individual.
+      // Edita una línea ya guardada — nada queda bloqueado, se puede cambiar cualquier campo, incluyendo
+      // Tipo de Ingreso, Forma de Pago, Duración, Fecha del Evento, Cuotas, Comisión y Anticipo.
       const editId = state.editingContratoId;
       if(!editId){ showToast('No hay ninguna línea en edición.'); return; }
-      const data = readFields(btn.closest('[data-form="contrato-devengado"]'));
-      const montoBrutoUSD = Number(data.montoBrutoUSD) || 0;
-      const tipoCambio = Number(data.tipoCambio) || 0;
-      if(!data.nombre){ showToast('Ponle un nombre al proyecto/cliente.'); return; }
-      if(!data.fechaInicio){ showToast('Elige la fecha de inicio.'); return; }
-      if(montoBrutoUSD <= 0){ showToast('Ingresa el Monto Bruto en USD.'); return; }
-      if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano).'); return; }
-      const esAutogestionado = data.tipoServicio === 'Autogestionado';
-      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionPreset==='otro' ? data.duracionLibre : data.duracionPreset)||1, 1);
-      const montoTotal = Math.round(montoBrutoUSD * tipoCambio);
-
       const idx = state.contratosDevengados.findIndex(c=>c.id===editId);
-      if(idx>-1){
-        const anterior = state.contratosDevengados[idx];
-        state.contratosDevengados[idx] = {
-          ...anterior,
-          nombre: data.nombre, montoTotal, montoTotalUSD: montoBrutoUSD, tipoCambio,
-          tipoServicio: data.tipoServicio, duracionMeses, fechaInicio: data.fechaInicio
-        };
-      }
-      state.editingContratoId = null;
+      if(idx<0){ showToast('No se encontró la línea a editar.'); return; }
+      const anterior = state.contratosDevengados[idx];
+
+      const data = readFields(btn.closest('[data-form="contrato-devengado"]'));
+      const formaPago = data.formaPago || 'usd';
+      const fp = FORMAS_PAGO_LINEA.find(f=>f.id===formaPago) || FORMAS_PAGO_LINEA[0];
+      const montoBruto = Number(data.montoBruto) || 0;
+      const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
+      const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
+      const esUSD = fp.moneda === 'USD';
+      const tipoCambio = esUSD ? (Number(data.tipoCambio) || 0) : null;
+      if(!data.nombre){ showToast('Ponle un nombre al proyecto/cliente.'); return; }
+      if(!data.fechaVentaLote){ showToast('Elige la Fecha de Venta.'); return; }
+      if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda}.`); return; }
+      if(esUSD && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — esta línea paga en USD.'); return; }
+      const duracionMeses = ti.duracion === 'input' ? Math.min(Math.max(Number(data.duracionMeses)||1, 1), 12) : ti.duracion;
+      if(ti.usaFechaEvento && !data.fechaEvento){ showToast('Ingresa la Fecha del Evento para este tipo de ingreso.'); return; }
+      const numeroCuotasPago = Math.max(Number(data.numeroCuotasPago)||1, 1);
+      const comisionPorCuota = (fp.tieneComision && !ti.comisionBloqueada) ? (Number(data.comisionPorCuota) || 0) : 0;
+      const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
+
+      const montoTotal = esUSD ? Math.round(montoBruto * tipoCambio) : Math.round(montoBruto);
+      const fechaIngreso = ti.usaFechaEvento ? data.fechaEvento : data.fechaVentaLote;
+
+      state.contratosDevengados[idx] = {
+        ...anterior,
+        nombre: data.nombre, montoTotal,
+        montoTotalUSD: esUSD ? montoBruto : undefined,
+        tipoCambio, formaPago, tipoIngreso, duracionMeses,
+        fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
+        numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
+      };
       await saveKey('contratosDevengados', state.contratosDevengados);
+
+      // Se borran los gastos de comisión/anticipo VIEJOS de esta línea (solo los de ella, gracias a que
+      // cada línea etiqueta los suyos con su propio id) y se regeneran con los valores actuales — así nunca
+      // quedan cifras desactualizadas ni duplicadas, y jamás se toca lo de otra línea del mismo lote.
+      state.gastos = state.gastos.filter(g=> g.origenContrato !== editId);
+      const numCuotas = numeroCuotasPago;
+      const comisionPorCuotaCLP = esUSD ? Math.round(comisionPorCuota * tipoCambio) : Math.round(comisionPorCuota);
+      const anticipoPorCuotaCLP = esUSD ? Math.round(anticipoPorCuotaUSD * tipoCambio) : 0;
+      const inicioCuotas = new Date(data.fechaVentaLote+'T00:00:00');
+      let seGeneraronGastos = false;
+      for(let i=0; i<numCuotas; i++){
+        const d = new Date(inicioCuotas.getFullYear(), inicioCuotas.getMonth()+i, 1);
+        const fechaCuota = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+        if(comisionPorCuotaCLP > 0){
+          state.gastos.push({
+            id: uid('gas'), fecha: fechaCuota, categoria: CAT_COSTO_COMISIONES, proveedor: data.nombre,
+            descripcion: `Comisión ${esUSD?'pasarela internacional':'pasarela'} — cuota ${i+1}/${numCuotas} — ${data.nombre}`,
+            monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: editId
+          });
+          seGeneraronGastos = true;
+        }
+        if(anticipoPorCuotaCLP > 0){
+          state.gastos.push({
+            id: uid('gas'), fecha: fechaCuota, categoria: CAT_GASTO_COSTO_LIQUIDEZ, proveedor: data.nombre,
+            descripcion: `Anticipo de fondos — cuota ${i+1}/${numCuotas} — ${data.nombre}`,
+            monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: editId
+          });
+          seGeneraronGastos = true;
+        }
+      }
+      await saveKey('gastos', state.gastos);
+
+      state.editingContratoId = null;
       showToast('Línea actualizada');
       render();
     }
@@ -7039,16 +7149,21 @@
       const montoBruto = Number(data.montoBruto) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return; }
       if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda} de la línea.`); return; }
-      const esAutogestionado = data.tipoServicio === 'Autogestionado';
-      const duracionMeses = esAutogestionado ? 1 : Math.max(Number(data.duracionPreset==='otro' ? data.duracionLibre : data.duracionPreset)||1, 1);
+      const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
+      const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
+      // La duración la define el Catálogo de Productos: fija para la mayoría, o el número que ingresó el
+      // usuario (acotado 1-12) cuando el tipo lo permite (Mentorías, Fee Agencia).
+      const duracionMeses = ti.duracion === 'input' ? Math.min(Math.max(Number(data.duracionMeses)||1, 1), 12) : ti.duracion;
+      if(ti.usaFechaEvento && !data.fechaEvento){ showToast('Ingresa la Fecha del Evento para este tipo de ingreso.'); return; }
       const numeroCuotasPago = Math.max(Number(data.numeroCuotasPago)||1, 1);
-      // Comisión/Anticipo se ignoran por completo si la Forma de Pago no los permite — así nunca queda un
-      // valor "fantasma" cargado de un cambio de forma de pago a mitad de llenar el formulario.
-      const comisionPorCuota = fp.tieneComision ? (Number(data.comisionPorCuota) || 0) : 0;
+      // Comisión/Anticipo se ignoran por completo si la Forma de Pago no los permite, y la Comisión además
+      // queda en 0 obligatorio si el Catálogo de Productos marca este tipo como "Dinero Limpio".
+      const comisionPorCuota = (fp.tieneComision && !ti.comisionBloqueada) ? (Number(data.comisionPorCuota) || 0) : 0;
       const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
       if(!state.loteEnConstruccion) state.loteEnConstruccion = { lineas: [] };
       state.loteEnConstruccion.lineas.push({
-        id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoServicio: data.tipoServicio, duracionMeses,
+        id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoIngreso, duracionMeses,
+        fechaEvento: ti.usaFechaEvento ? data.fechaEvento : null,
         numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
       });
       showToast('Línea agregada al lote — sigue agregando o confirma abajo');
@@ -7069,7 +7184,7 @@
       if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio del lote.'); return; }
       // El Tipo de Cambio solo hace falta si AL MENOS una línea del lote paga en USD — si todas son CLP
       // (transferencia o pasarela local), no tiene sentido pedirlo.
-      const necesitaTipoCambio = lineas.some(l => (l.formaPago||'usd') === 'usd');
+      const necesitaTipoCambio = lineas.some(l => esFormaPagoUSD(l.formaPago));
       if(necesitaTipoCambio && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — al menos una línea paga en USD.'); return; }
 
       // Todo lo contable queda en CLP. El Motor de Prorrateo del INGRESO usa la Duración del Servicio de
@@ -7081,15 +7196,26 @@
       const inicio = new Date(data.fechaInicio+'T00:00:00');
       let seGeneraronGastos = false;
       lineas.forEach(linea=>{
-        const esUSD = (linea.formaPago||'usd') === 'usd';
+        const esUSD = esFormaPagoUSD(linea.formaPago);
         const montoTotal = esUSD ? Math.round(linea.montoBruto * tipoCambio) : Math.round(linea.montoBruto);
+        // Eventos Online/Presenciales reconocen el ingreso en la Fecha del Evento, no en la fecha de venta
+        // del lote — la venta y la ejecución del servicio pueden ser fechas distintas. Para todo lo demás,
+        // coinciden.
+        const fechaIngreso = linea.fechaEvento || data.fechaInicio;
+        // Cada línea guarda su propio id — se usa para etiquetar SUS comisiones/anticipo (no el lote
+        // completo), así que editar o eliminar una línea individual solo toca lo que es de ella, nunca lo de
+        // sus hermanas dentro del mismo lote.
+        const contratoId = uid('contrato');
         state.contratosDevengados.push({
-          id: uid('contrato'), loteId, nombre: linea.nombre, montoTotal,
+          id: contratoId, loteId, nombre: linea.nombre, montoTotal,
           montoTotalUSD: esUSD ? linea.montoBruto : undefined,
           tipoCambio: esUSD ? tipoCambio : null,
           formaPago: linea.formaPago || 'usd',
-          tipoServicio: linea.tipoServicio, duracionMeses: linea.duracionMeses,
-          fechaInicio: data.fechaInicio, fechaCreacion: todayISO()
+          tipoIngreso: linea.tipoIngreso, duracionMeses: linea.duracionMeses,
+          fechaInicio: fechaIngreso, fechaVentaLote: data.fechaInicio, fechaCreacion: todayISO(),
+          // Se guardan tal cual (en su moneda original) para poder editar la línea después sin perder datos.
+          numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
+          anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD
         });
 
         const numCuotas = Math.max(Number(linea.numeroCuotasPago)||1, 1);
@@ -7106,7 +7232,7 @@
             state.gastos.push({
               id: uid('gas'), fecha: fechaCuota, categoria: CAT_COSTO_COMISIONES, proveedor: linea.nombre,
               descripcion: `Comisión ${esUSD?'pasarela internacional':'pasarela'} — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
-              monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: loteId
+              monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: contratoId
             });
             seGeneraronGastos = true;
           }
@@ -7114,7 +7240,7 @@
             state.gastos.push({
               id: uid('gas'), fecha: fechaCuota, categoria: CAT_GASTO_COSTO_LIQUIDEZ, proveedor: linea.nombre,
               descripcion: `Anticipo de fondos — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
-              monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: loteId
+              monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: contratoId
             });
             seGeneraronGastos = true;
           }
