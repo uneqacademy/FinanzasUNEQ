@@ -558,6 +558,23 @@
     { id:'coproduccion', label:'Co-Producciones', duracion:1, comisionBloqueada:true },
     { id:'afiliacion', label:'Afiliación', duracion:1, comisionBloqueada:true }
   ];
+  // Rentabilidad por Unidad de Negocio (Agencia vs Academia): a qué unidad pertenece cada Tipo de Ingreso del
+  // catálogo. Los que no aparecen acá (Evento Presencial, Afiliación) quedan FUERA del comparativo a
+  // propósito — Felipe pidió excluirlos explícitamente.
+  const UNIDAD_NEGOCIO_POR_TIPO = {
+    fee_agencia: 'agencia', coproduccion: 'agencia',
+    mentoria: 'academia', sinergia: 'academia', membresia_anual: 'academia', membresia_semestral: 'academia',
+    membresia_trimestral: 'academia', membresia_mensual: 'academia', curso_autogestionado: 'academia', evento_online: 'academia'
+  };
+  // Costeo ABC simplificado para Gastos Operacionales compartidos (no ligados a una línea de venta): cada
+  // gasto se puede etiquetar 100% Agencia, 100% Academia, o Compartido (50/50) — si no se etiqueta, queda
+  // FUERA del comparativo (a propósito, así lo pidió Felipe para no ensuciar el análisis con datos viejos).
+  const ASIGNACIONES_GASTO_UNIDAD = [
+    { id:'', label:'Sin asignar (no entra al comparativo de unidades)' },
+    { id:'agencia', label:'100% Agencia' },
+    { id:'academia', label:'100% Academia' },
+    { id:'compartido', label:'OpEx Compartido (50/50)' }
+  ];
   // Forma de Pago de cada línea del lote — define en qué moneda se ingresa el monto y cómo se comportan
   // comisión/anticipo. 'usd' = pasarela internacional (Hotmart/Stripe), con tipo de cambio, comisión y
   // anticipo, todo en USD. 'clp_transferencia' = pago directo, sin pasarela de por medio: nunca hay comisión
@@ -796,6 +813,90 @@
     return montos;
   }
 
+  // A qué Unidad de Negocio pertenece un Tipo de Ingreso — 'agencia' | 'academia' | null (excluido a propósito).
+  function getUnidadNegocio(tipoIngreso){
+    return UNIDAD_NEGOCIO_POR_TIPO[tipoIngreso] || null;
+  }
+
+  // Costeo ABC: qué fracción de un gasto va a cada unidad. Prioriza la dedicación fija congelada al generar
+  // el gasto (Plantilla de Gastos Fijos, % Agencia/% Academia); si no la tiene, usa la etiqueta manual de 3
+  // opciones (100% Agencia / 100% Academia / Compartido 50-50). Si no tiene ninguna de las dos, devuelve
+  // null — ese gasto queda FUERA del comparativo hasta que se etiquete a mano.
+  function getFraccionesUnidadGasto(gasto){
+    if(gasto.pctDedicacionAgencia !== undefined && gasto.pctDedicacionAgencia !== null){
+      return { agencia: (Number(gasto.pctDedicacionAgencia)||0)/100, academia: (Number(gasto.pctDedicacionAcademia)||0)/100 };
+    }
+    if(gasto.asignacionUnidad === 'agencia') return { agencia:1, academia:0 };
+    if(gasto.asignacionUnidad === 'academia') return { agencia:0, academia:1 };
+    if(gasto.asignacionUnidad === 'compartido') return { agencia:0.5, academia:0.5 };
+    return null;
+  }
+
+  // Rentabilidad por Unidad de Negocio (Agencia vs Academia) de un mes específico — Costeo ABC simplificado:
+  // los Costos Directos se rastrean exacto vía la línea de venta que los generó (origenContrato); los Gastos
+  // Operacionales compartidos usan la fracción fija de dedicación (Plantilla) o la etiqueta manual del gasto.
+  // Evento Presencial y Afiliación quedan fuera a propósito (getUnidadNegocio devuelve null para ellos).
+  function getRentabilidadPorUnidadMensual(anio, mesIdx){
+    const resultado = {
+      agencia: { ingresos:0, costosDirectos:0, gastosOperacionales:0 },
+      academia: { ingresos:0, costosDirectos:0, gastosOperacionales:0 }
+    };
+
+    state.contratosDevengados.forEach(c=>{
+      const unidad = getUnidadNegocio(c.tipoIngreso);
+      if(!unidad || !c.fechaInicio) return;
+      const inicio = new Date(c.fechaInicio+'T00:00:00');
+      const montos = getProrrateoContrato(c);
+      montos.forEach((monto,i)=>{
+        const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
+        if(d.getFullYear()===anio && d.getMonth()===mesIdx) resultado[unidad].ingresos += monto;
+      });
+    });
+
+    state.gastos.forEach(g=>{
+      if(!g.fecha) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const monto = montoNegocioGasto(g); // respeta no-venta y desglose interés/capital ya construidos
+
+      if(g.origenContrato){
+        // Costo Directo ligado a una línea de venta específica — se atribuye 100% a SU unidad, exacto.
+        const linea = state.contratosDevengados.find(c=>c.id===g.origenContrato);
+        if(!linea) return;
+        const unidad = getUnidadNegocio(linea.tipoIngreso);
+        if(!unidad) return; // la línea es de una unidad excluida -> su comisión tampoco cuenta
+        resultado[unidad].costosDirectos += monto;
+        return;
+      }
+      const fracciones = getFraccionesUnidadGasto(g);
+      if(!fracciones) return; // sin asignar -> excluido del comparativo
+      resultado.agencia.gastosOperacionales += monto * fracciones.agencia;
+      resultado.academia.gastosOperacionales += monto * fracciones.academia;
+    });
+
+    ['agencia','academia'].forEach(u=>{
+      const r = resultado[u];
+      r.rentabilidadNeta = r.ingresos - r.costosDirectos - r.gastosOperacionales;
+    });
+    return resultado;
+  }
+
+  // Multiplicador de Nómina (Labor Efficiency Ratio): cuántos pesos de Ingreso Devengado genera la empresa
+  // por cada peso gastado en Nómina Equipo ese mes. Si el mes no tiene gastos de Nómina registrados, no hay
+  // ratio que calcular (devuelve null en vez de dividir por cero).
+  function getLER(anio, mesIdx){
+    const ingresosDevengados = getEstadoResultadosMensual(anio)[mesIdx].ingresosDevengados;
+    const gastosNomina = state.gastos
+      .filter(g=>{
+        if(g.categoria !== 'Nómina Equipo' || !g.fecha) return false;
+        const d = new Date(g.fecha+'T00:00:00');
+        return d.getFullYear()===anio && d.getMonth()===mesIdx;
+      })
+      .reduce((s,g)=> s + montoNegocioGasto(g), 0);
+    const ratio = gastosNomina > 0 ? ingresosDevengados / gastosNomina : null;
+    return { ingresosDevengados, gastosNomina, ratio };
+  }
+
   // Calcula, mes a mes de un año, el Estado de Resultados completo en base devengada: Ingresos Devengados
   // (prorrateados desde los contratos), Costos Directos, Margen Bruto, Gastos Operacionales, Utilidad
   // Operativa, Gastos Financieros (alimentados automáticamente desde Gestión de Deudas) y Utilidad Neta.
@@ -835,6 +936,8 @@
       m.puntoEquilibrio = ratioCostoDirecto < 1 ? Math.round(m.gastosOperacionales / (1 - ratioCostoDirecto)) : null;
       // Margen de Rentabilidad: qué % de cada peso devengado termina siendo Utilidad Neta real.
       m.margenRentabilidad = m.ingresosDevengados > 0 ? (m.utilidadNeta / m.ingresosDevengados) * 100 : null;
+      // Margen Bruto %: qué % del ingreso devengado queda después de los Costos Directos (antes de OpEx).
+      m.margenBrutoPct = m.ingresosDevengados > 0 ? (m.margenBruto / m.ingresosDevengados) * 100 : null;
     });
 
     return meses;
@@ -861,7 +964,10 @@
         state.gastos.push({
           id: uid('gas'), fecha: fechaGasto, categoria: p.categoria,
           proveedor: p.nombre, descripcion: `Gasto fijo: ${p.nombre}`, monto: p.montoMensual,
-          estado: 'Pendiente', montoPagado: 0, origenPlantilla: p.id, metodo: 'Transferencia'
+          estado: 'Pendiente', montoPagado: 0, origenPlantilla: p.id, metodo: 'Transferencia',
+          // Se congela la dedicación de ESTE momento — si la plantilla cambia después, no altera meses ya
+          // generados, mismo principio que el resto de la app (nunca hacia atrás).
+          pctDedicacionAgencia: p.pctDedicacionAgencia, pctDedicacionAcademia: p.pctDedicacionAcademia
         });
         generados = true;
       }
@@ -3600,6 +3706,7 @@
     const usoCredito = getUsoCreditoRevolvente();
     const runway = getRunway();
     const ventaBruta = getVentaBrutaConCrecimiento();
+    const lerDashboard = getLER(anio, mesActualIdx);
 
     return `
       <div class="fa-topbar">
@@ -3650,6 +3757,10 @@
         <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; background:${equilibrioCubierto?'#F0FFF4':'#FFF9EC'}; border:1px solid ${equilibrioCubierto?'var(--income)':'#E8B84B'};">
           <span style="font-size:20px;">${equilibrioCubierto?'✅':'⏳'}</span>
           <span style="font-size:13px; font-weight:600;">${equilibrioCubierto ? 'Punto de equilibrio cubierto — ya facturaste lo suficiente para pagar los gastos fijos del equipo este mes.' : (mesActual.puntoEquilibrio!==null ? `Faltan ${fmtMoney(mesActual.puntoEquilibrio - mesActual.ingresosDevengados)} para cubrir el punto de equilibrio de este mes.` : 'Aún no hay suficiente información para calcular el punto de equilibrio.')}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; margin-top:8px; background:${lerDashboard.ratio===null?'#F8F9FA':(lerDashboard.ratio<2.5?'#FFF5F5':'#F0FFF4')}; border:1px solid ${lerDashboard.ratio===null?'var(--border)':(lerDashboard.ratio<2.5?'var(--expense)':'var(--income)')};">
+          <span style="font-size:20px;">${lerDashboard.ratio===null?'—':(lerDashboard.ratio<2.5?'⚠️':'💪')}</span>
+          <span style="font-size:13px; font-weight:600;">Multiplicador de Nómina: <strong>${lerDashboard.ratio!==null?lerDashboard.ratio.toFixed(1)+'x':'—'}</strong>${lerDashboard.ratio!==null&&lerDashboard.ratio<2.5?' — bajo 2.5x, alerta de ineficiencia operativa':''}</span>
         </div>
       </div>
 
@@ -3731,6 +3842,8 @@
     }, { ingresosDevengados:0, costosDirectos:0, margenBruto:0, gastosOperacionales:0, utilidadOperativa:0, gastosFinancieros:0, utilidadNeta:0 });
 
     const gastosTotalesPorMes = meses.map(m=> m.costosDirectos + m.gastosOperacionales + m.gastosFinancieros);
+    const ler = getLER(anio, mesActualIdx);
+    const rentabilidadUnidad = getRentabilidadPorUnidadMensual(anio, mesActualIdx);
 
     return `
       <div class="fa-topbar">
@@ -3747,7 +3860,35 @@
         <div class="fa-kpi ${mesActual.utilidadNeta>=0?'income':'expense'}"><div class="fa-kpi-label">Utilidad Neta (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.utilidadNeta>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadNeta)}</div></div>
         <div class="fa-kpi ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}"><div class="fa-kpi-label">Margen de Rentabilidad (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}">${mesActual.margenRentabilidad!==null?mesActual.margenRentabilidad.toFixed(1)+'%':'—'}</div></div>
       </div>
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(2,1fr); max-width:520px; margin-top:12px;">
+        <div class="fa-kpi ${mesActual.margenBrutoPct!==null&&mesActual.margenBrutoPct>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto % (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.margenBrutoPct!==null&&mesActual.margenBrutoPct>=0?'income':'expense'}">${mesActual.margenBrutoPct!==null?mesActual.margenBrutoPct.toFixed(1)+'%':'—'}</div></div>
+        <div class="fa-kpi ${ler.ratio===null?'':(ler.ratio<2.5?'expense':'income')}">
+          <div class="fa-kpi-label">Multiplicador de Nómina (LER)</div>
+          <div class="fa-kpi-value ${ler.ratio===null?'':(ler.ratio<2.5?'expense':'income')}">${ler.ratio!==null?ler.ratio.toFixed(1)+'x':'—'}</div>
+          ${ler.ratio!==null && ler.ratio<2.5 ? `<div class="fa-hint" style="color:var(--expense); margin-top:2px;">⚠️ Bajo 2.5x — alerta de ineficiencia operativa</div>` : ''}
+        </div>
+      </div>
       ${mesActual.puntoEquilibrio!==null ? `<div class="fa-hint">Este mes necesitas facturar (devengado) al menos ${fmtMoneyC(mesActual.puntoEquilibrio)} para cubrir tus Gastos Operacionales — llevas ${fmtMoneyC(mesActual.ingresosDevengados)}.</div>` : `<div class="fa-hint">Sin ingresos devengados este mes todavía, no se puede estimar el punto de equilibrio con costo variable.</div>`}
+
+      <div class="fa-card">
+        <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — ${MESES[mesActualIdx]}</div>
+        <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Evento Presencial y Afiliación quedan fuera de este comparativo. Los gastos operacionales sin asignación de unidad (o sin % de dedicación en su Plantilla) tampoco cuentan aquí todavía.</div>
+        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-top:10px;">
+          ${['agencia','academia'].map(u=>{
+            const r = rentabilidadUnidad[u];
+            const label = u==='agencia' ? '🤝 Agencia' : '🎓 Academia';
+            return `
+            <div style="border:1.5px solid ${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'}; border-radius:12px; padding:16px; ${r.rentabilidadNeta>=0?'background:#F0FFF4;':'background:#FFF5F5;'}">
+              <div style="font-weight:700; font-size:15px; margin-bottom:8px;">${label}</div>
+              <div class="fa-hint" style="margin:0;">Ingresos: <strong>${fmtMoney(r.ingresos)}</strong></div>
+              <div class="fa-hint" style="margin:2px 0;">Costos Directos: <strong style="color:var(--expense);">${fmtMoney(r.costosDirectos)}</strong></div>
+              <div class="fa-hint" style="margin:0 0 8px 0;">Gastos Operacionales Asignados: <strong style="color:var(--expense);">${fmtMoney(r.gastosOperacionales)}</strong></div>
+              <div style="font-size:20px; font-weight:800; color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoneyC(r.rentabilidadNeta)}</div>
+              <div class="fa-hint" style="margin:0;">Rentabilidad Neta</div>
+            </div>
+          `;}).join('')}
+        </div>
+      </div>
 
       <div class="fa-card">
         <div class="fa-card-title">Ingresos Devengados vs. Gastos Totales — ${anio}</div>
@@ -3993,7 +4134,10 @@
               <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
+            <div class="fa-field"><label>% Dedicación Agencia</label><input type="number" name="pctDedicacionAgencia" min="0" max="100" step="1" placeholder="Ej: 50" value="${editingP&&editingP.pctDedicacionAgencia!==undefined?editingP.pctDedicacionAgencia:''}"></div>
+            <div class="fa-field"><label>% Dedicación Academia</label><input type="number" name="pctDedicacionAcademia" min="0" max="100" step="1" placeholder="Ej: 50" value="${editingP&&editingP.pctDedicacionAcademia!==undefined?editingP.pctDedicacionAcademia:''}"></div>
           </div>
+          <div class="fa-hint">Los 2 porcentajes deben sumar 100% — así se reparte el costo de esta persona entre Agencia y Academia cada mes, para el comparativo de Rentabilidad por Unidad de Negocio.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
             ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
@@ -4065,6 +4209,11 @@
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field"><label>Asignación de Unidad de Negocio</label>
+              <select name="asignacionUnidad">
+                ${ASIGNACIONES_GASTO_UNIDAD.map(a=>`<option value="${a.id}" ${(editingG&&(editingG.asignacionUnidad||'')===a.id)?'selected':''}>${escapeHtml(a.label)}</option>`).join('')}
               </select>
             </div>
           </div>
@@ -8153,13 +8302,27 @@
       const montoMensual = Number(data.montoMensual) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la plantilla.'); return; }
       if(montoMensual <= 0){ showToast('Ingresa el monto mensual.'); return; }
+      // Los % de Dedicación son opcionales — si se dejan en blanco, esta plantilla queda "sin asignar" y
+      // fuera del comparativo de Rentabilidad por Unidad hasta que se completen. Pero si se llena AL MENOS
+      // uno, ambos deben sumar 100% exacto.
+      const tienePctAgencia = data.pctDedicacionAgencia !== '';
+      const tienePctAcademia = data.pctDedicacionAcademia !== '';
+      let pctDedicacionAgencia, pctDedicacionAcademia;
+      if(tienePctAgencia || tienePctAcademia){
+        pctDedicacionAgencia = Number(data.pctDedicacionAgencia) || 0;
+        pctDedicacionAcademia = Number(data.pctDedicacionAcademia) || 0;
+        if(Math.round((pctDedicacionAgencia+pctDedicacionAcademia)*10)/10 !== 100){
+          showToast(`% Dedicación Agencia + Academia deben sumar 100% — hoy suman ${pctDedicacionAgencia+pctDedicacionAcademia}%.`);
+          return;
+        }
+      }
       const editId = state.editingPlantillaId;
       if(editId){
         const idx = state.plantillasGastosFijos.findIndex(p=>p.id===editId);
-        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual };
+        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual, pctDedicacionAgencia, pctDedicacionAcademia };
         state.editingPlantillaId = null;
       } else {
-        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, activa:true, fechaCreacion: todayISO() });
+        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, pctDedicacionAgencia, pctDedicacionAcademia, activa:true, fechaCreacion: todayISO() });
       }
       await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
       showToast(editId?'Plantilla actualizada':'Plantilla agregada — se generará su gasto Pendiente la próxima vez que abras la app (o el mes que corresponda)');
