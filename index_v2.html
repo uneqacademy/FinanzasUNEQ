@@ -2106,7 +2106,7 @@
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
-    'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
+    'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
@@ -6364,13 +6364,38 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Categorías de ingresos</div>
+        <div class="fa-card-title">Categorías de Ingresos</div>
         <div class="fa-chip-group">
           ${state.config.categoriasIngresos.map(c=>`<span class="fa-chip">${escapeHtml(c)}<button data-action="remove-cat-ingreso" data-cat="${escapeHtml(c)}">&times;</button></span>`).join('')}
         </div>
         <div class="fa-add-chip-row" data-form="add-cat-ingreso">
           <input type="text" name="nuevaCategoria" placeholder="Nueva categoría de ingreso">
           <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-ingreso">Agregar</button>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Categorías de Costos Directos</div>
+        <div class="fa-section-note">Gastos que solo ocurren porque hubo una venta (Ads, comisiones de pasarela, afiliados) — se restan del Margen Bruto en Estado de Resultados.</div>
+        <div class="fa-chip-group">
+          ${(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).map(c=>`<span class="fa-chip">${escapeHtml(c)}<button data-action="remove-cat-costo-directo" data-cat="${escapeHtml(c)}">&times;</button></span>`).join('')}
+        </div>
+        <div class="fa-add-chip-row" data-form="add-cat-costo-directo">
+          <input type="text" name="nuevaCategoria" placeholder="Nueva categoría de costo directo">
+          <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-costo-directo">Agregar</button>
+        </div>
+        <div class="fa-hint">Si quitas una de aquí, no desaparece de la app — pasa a contar como Gasto Operacional en su lugar.</div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Categorías de Gastos Operacionales</div>
+        <div class="fa-section-note">Lo que cuesta mantener viva la empresa, venda o no venda (Nómina, Software, Arriendo, etc.).</div>
+        <div class="fa-chip-group">
+          ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO && c!==CAT_GASTO_COSTO_LIQUIDEZ).map(c=>`<span class="fa-chip">${escapeHtml(c)}<button data-action="remove-cat-gasto" data-cat="${escapeHtml(c)}">&times;</button></span>`).join('')}
+        </div>
+        <div class="fa-add-chip-row" data-form="add-cat-gasto">
+          <input type="text" name="nuevaCategoria" placeholder="Nueva categoría de gasto operacional">
+          <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-gasto">Agregar</button>
         </div>
       </div>
 
@@ -6387,17 +6412,6 @@
           }).join('')}
         </div>
         <div class="fa-hint">"${CAT_INGRESO_CREDITO_COMERCIAL}" y "${CAT_INGRESO_APORTE_INVERSIONISTA}" aparecen desmarcados a propósito (y se mantienen así aunque los marques, se corrigen solos al recargar): no son venta, pero sí es plata real que entra al banco — cuentan en Flujo de Caja y Cuenta Corriente. "${CAT_INGRESO_NO_VENTA}" en cambio se queda solo en Cuenta Corriente, fuera de Flujo también.</div>
-      </div>
-
-      <div class="fa-card">
-        <div class="fa-card-title">Categorías de gastos</div>
-        <div class="fa-chip-group">
-          ${state.config.categoriasGastos.map(c=>`<span class="fa-chip">${escapeHtml(c)}<button data-action="remove-cat-gasto" data-cat="${escapeHtml(c)}">&times;</button></span>`).join('')}
-        </div>
-        <div class="fa-add-chip-row" data-form="add-cat-gasto">
-          <input type="text" name="nuevaCategoria" placeholder="Nueva categoría de gasto">
-          <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-gasto">Agregar</button>
-        </div>
       </div>
 
       <div class="fa-card">
@@ -8637,6 +8651,29 @@
         state.config.categoriasGastos.push(val);
         await saveKey('config', state.config);
         showToast('Categoría agregada');
+        render();
+      }
+    }
+    else if(action === 'add-cat-costo-directo'){
+      const data = readFields(btn.closest('[data-form="add-cat-costo-directo"]'));
+      const val = (data.nuevaCategoria||'').trim();
+      if(!val){ showToast('Escribe el nombre de la categoría.'); return; }
+      if(!state.config.categoriasCostoDirecto) state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice();
+      let cambio = false;
+      if(!state.config.categoriasGastos.includes(val)){ state.config.categoriasGastos.push(val); cambio = true; }
+      if(!state.config.categoriasCostoDirecto.includes(val)){ state.config.categoriasCostoDirecto.push(val); cambio = true; }
+      if(cambio){
+        await saveKey('config', state.config);
+        showToast('Categoría de Costo Directo agregada');
+        render();
+      }
+    }
+    else if(action === 'remove-cat-costo-directo'){
+      const cat = btn.dataset.cat;
+      if(state.config.categoriasCostoDirecto){
+        state.config.categoriasCostoDirecto = state.config.categoriasCostoDirecto.filter(c=>c!==cat);
+        await saveKey('config', state.config);
+        showToast('Ahora cuenta como Gasto Operacional en vez de Costo Directo');
         render();
       }
     }
