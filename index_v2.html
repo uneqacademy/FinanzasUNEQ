@@ -4480,7 +4480,7 @@
         <div data-form="deuda">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado" value="${editingD?escapeHtml(editingD.nombre):''}"></div>
-            <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0" value="${editingD?editingD.montoOriginal:''}"></div>
+            <div class="fa-field"><label>${editingD&&editingD.esCargaInicial?'Saldo Insoluto al Día Cero':'Monto Total Adeudado'}</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0" value="${editingD?editingD.montoOriginal:''}"></div>
             <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5" value="${editingD?editingD.tasaInteres:''}"></div>
             <div class="fa-field"><label>Período de la tasa</label>
               <select name="tasaInteresPeriodo">
@@ -4493,6 +4493,11 @@
             <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito" value="${editingD?escapeHtml(editingD.categoria||''):''}"></div>
             <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica" value="${editingD&&editingD.cupo?editingD.cupo:''}"></div>
           </div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:8px;">
+            <input type="checkbox" name="esCargaInicial" ${editingD&&editingD.esCargaInicial?'checked':''}>
+            Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
+          </label>
+          <div class="fa-hint">Sus pagos SIEMPRE saldrán de Operación (sin poder elegir otra bóveda) y nunca generarán un nuevo Gasto Financiero en Estado de Resultados — su costo ya es histórico, anterior al Día Cero.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">${state.editingDeudaId?'Guardar cambios':'Agregar deuda'}</button>
             ${state.editingDeudaId?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-deuda">Cancelar</button>`:''}
@@ -4510,29 +4515,37 @@
     const deuda = state.deudas.inventario.find(d=>d.id===m.deudaId);
     if(!deuda) return '';
     const saldo = getSaldoDeuda(deuda.id);
+    const esCarga = !!deuda.esCargaInicial;
     return `
       <div class="fa-modal-overlay" data-action="cerrar-pago-deuda">
         <div class="fa-modal" data-action="confirm-noop">
           <div class="fa-modal-title">Registrar pago — ${escapeHtml(deuda.nombre)}</div>
           <div class="fa-hint" style="margin-top:0;">Saldo actual: ${fmtMoneyC(saldo)}</div>
+          ${esCarga ? `<div class="fa-hint">📌 Carga Inicial de Pasivos — este pago sale siempre de Operación y no genera Gasto Financiero en Estado de Resultados (ese costo ya es histórico).</div>` : ''}
           <div data-form="pago-deuda">
             <div class="fa-field" style="margin-bottom:10px;"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Total Pagado</label><input type="number" name="montoTotal" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" placeholder="0"></div>
+            ${esCarga ? '' : `
             <div class="fa-form-grid" style="grid-template-columns:1fr 1fr;">
               <div class="fa-field"><label>¿Cuánto es CAPITAL?</label><input type="number" name="capital" min="0" step="1" placeholder="0"></div>
               <div class="fa-field"><label>¿Cuánto es INTERÉS/Comisiones?</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
             </div>
             <div class="fa-hint">Capital + Interés debe sumar exactamente el Monto Total Pagado.</div>
+            `}
+            ${esCarga ? `
+            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label><input type="text" value="Operación (fija — las Cargas Iniciales siempre pagan de ahí)" disabled style="background:#F1F2F4;"></div>
+            ` : `
             <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label>
               <select name="cuentaOrigen">
                 <option value="operacion">Operación (cuota mínima)</option>
                 <option value="ganancia">Ganancia (abono extra, Bola de Nieve)</option>
               </select>
             </div>
-          </div>
-          <div class="fa-modal-actions">
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pago-deuda">Cancelar</button>
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-deuda" data-id="${deuda.id}">Confirmar pago</button>
+            `}
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pago-deuda">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-deuda" data-id="${deuda.id}">Confirmar pago</button>
+            </div>
           </div>
         </div>
       </div>
@@ -4558,6 +4571,7 @@
           <div class="fa-hint" style="margin-top:0;">Monto Total del gasto: ${fmtMoneyC(gasto.monto)}${yaPagado>0?` — ya pagado: ${fmtMoney(yaPagado)}, restante: ${fmtMoney(restante)}`:''}. Este monto ya cuenta 100% en Estado de Resultados, sin importar cuánto retires ahora.</div>
           ${esSueldoDuenos ? `<div class="fa-hint">Disponible hoy en la bóveda Sueldo Dueños: <strong>${fmtMoney(saldoSueldoDuenos)}</strong>. Si retiras menos por falta de liquidez, la diferencia queda como "Sueldos Dueños por Pagar" — no tienes que retirar todo, la bóveda puede seguir acumulando.</div>` : ''}
           <div data-form="procesar-gasto">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha del pago</label><input type="date" name="fechaPago" value="${todayISO()}"></div>
             <div class="fa-field" style="margin-bottom:10px;"><label>${esSueldoDuenos?'Monto Retirado Realmente (ahora)':'Monto Pagado Realmente (ahora)'}</label><input type="number" name="montoPagadoAhora" min="0" step="1" placeholder="0"></div>
             ${esSueldoDuenos ? `
             <div class="fa-field"><label>Bóveda de origen</label><input type="text" value="Sueldo Dueños (fija — este retiro siempre sale de ahí)" disabled style="background:#F1F2F4;"></div>
@@ -4569,11 +4583,11 @@
               </select>
             </div>
             `}
-          </div>
-          <div class="fa-hint">Si ${esSueldoDuenos?'retiras':'pagas'} menos que el restante, la diferencia se crea automáticamente como una Cuenta por Pagar en Gestión de Deudas${esSueldoDuenos?' ("Sueldos Dueños por Pagar")':''}.</div>
-          <div class="fa-modal-actions">
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-procesar-gasto">Cancelar</button>
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-procesar-gasto" data-id="${gasto.id}">Confirmar</button>
+            <div class="fa-hint">Si ${esSueldoDuenos?'retiras':'pagas'} menos que el restante, la diferencia se crea automáticamente como una Cuenta por Pagar en Gestión de Deudas${esSueldoDuenos?' ("Sueldos Dueños por Pagar")':''}.</div>
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-procesar-gasto">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-procesar-gasto" data-id="${gasto.id}">Confirmar</button>
+            </div>
           </div>
         </div>
       </div>
@@ -4602,10 +4616,10 @@
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
-          </div>
-          <div class="fa-modal-actions">
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pagar-saldo-ctapagar">Cancelar</button>
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pagar-saldo-ctapagar" data-id="${cta.id}">Confirmar pago</button>
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pagar-saldo-ctapagar">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pagar-saldo-ctapagar" data-id="${cta.id}">Confirmar pago</button>
+            </div>
           </div>
         </div>
       </div>
@@ -4632,10 +4646,10 @@
               <div class="fa-field"><label>Interés de la cuota</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
               <div class="fa-field"><label>Capital de la cuota</label><input type="number" name="capital" min="0" step="1" placeholder="0"></div>
             </div>
-          </div>
-          <div class="fa-modal-actions">
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-cuota-atrasada">Cancelar</button>
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-cuota-atrasada" data-id="${deuda.id}">Registrar atraso</button>
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-cuota-atrasada">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-cuota-atrasada" data-id="${deuda.id}">Registrar atraso</button>
+            </div>
           </div>
         </div>
       </div>
@@ -7785,6 +7799,7 @@
         fechaVencimiento: data.fechaVencimiento || '',
         categoria: data.categoria || '',
         cupo: Number(data.cupo) || null, // solo relevante para tarjetas/líneas de crédito — si no se define, el Dashboard usa montoOriginal como aproximación
+        esCargaInicial: !!data.esCargaInicial, // deuda de arrastre: sus pagos siempre salen de Operación y nunca generan Gasto Financiero
         fechaCreacion: editId ? deudaAnterior.fechaCreacion : todayISO(),
         activa: editId ? deudaAnterior.activa : true // al editar, no se reactiva sola ni se desactiva sola
       };
@@ -7898,14 +7913,25 @@
       if(!deuda) return;
       const data = readFields(btn.closest('[data-form="pago-deuda"]'));
       const montoTotal = Number(data.montoTotal) || 0;
-      const capital = Number(data.capital) || 0;
-      const interes = Number(data.interes) || 0;
       if(!data.fecha){ showToast('Elige una fecha para el pago.'); return; }
-      if(montoTotal <= 0){ showToast('Ingresa el monto total pagado.'); return; }
-      // Desglose obligatorio: capital + interés debe sumar exactamente el monto total, sin excepción.
-      if(capital + interes !== montoTotal){ showToast(`Capital + Interés debe sumar exactamente ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes)}.`); return; }
+      if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
 
-      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen: data.cuentaOrigen };
+      // Carga Inicial de Pasivos: el 100% del pago reduce capital, nunca hay interés (su costo ya es
+      // histórico, anterior al Día Cero) — y siempre sale de Operación, sin poder elegir otra bóveda.
+      let capital, interes, cuentaOrigen;
+      if(deuda.esCargaInicial){
+        capital = montoTotal;
+        interes = 0;
+        cuentaOrigen = 'operacion';
+      } else {
+        capital = Number(data.capital) || 0;
+        interes = Number(data.interes) || 0;
+        cuentaOrigen = data.cuentaOrigen;
+        // Desglose obligatorio: capital + interés debe sumar exactamente el monto total, sin excepción.
+        if(capital + interes !== montoTotal){ showToast(`Capital + Interés debe sumar exactamente ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes)}.`); return; }
+      }
+
+      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen };
       state.deudas.pagos.push(pago);
 
       const saldoRestante = getSaldoDeuda(deudaId);
@@ -7918,7 +7944,7 @@
 
       // El monto total (capital + interés) es una salida real de la bóveda elegida en Tesorería.
       state.tesoreria.movimientos.push({
-        id: uid('tes'), fecha: data.fecha, boveda: data.cuentaOrigen, tipo:'salida', monto: montoTotal,
+        id: uid('tes'), fecha: data.fecha, boveda: cuentaOrigen, tipo:'salida', monto: montoTotal,
         descripcion: `Pago cuota — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
@@ -8367,6 +8393,7 @@
       const gasto = state.gastos.find(g=>g.id===gastoId);
       if(!gasto){ showToast('No se encontró el gasto.'); return; }
       const data = readFields(btn.closest('[data-form="procesar-gasto"]'));
+      if(!data.fechaPago){ showToast('Elige la fecha del pago.'); return; }
       const montoPagado = Number(data.montoPagadoAhora) || 0;
       // El retiro de Sueldo Dueños SIEMPRE sale de esa bóveda específica — no es elegible, a diferencia de
       // un Gasto Fijo normal donde sí se elige de dónde pagar.
@@ -8381,10 +8408,11 @@
       await saveKey('gastos', state.gastos);
 
       // Acción B (Tesorería): solo el monto REALMENTE pagado sale del banco — nunca el Monto Total del gasto,
-      // que ya cuenta 100% en Estado de Resultados desde que se generó (base devengada).
+      // que ya cuenta 100% en Estado de Resultados desde que se generó (base devengada). La fecha es la del
+      // pago real, que puede ser distinta a la fecha en que se generó el gasto (el día 1 del mes).
       if(montoPagado > 0){
         state.tesoreria.movimientos.push({
-          id: uid('tes'), fecha: gasto.fecha, boveda, tipo:'salida', monto: montoPagado,
+          id: uid('tes'), fecha: data.fechaPago, boveda, tipo:'salida', monto: montoPagado,
           descripcion: `${gasto.origenSueldoDuenos?'Retiro Sueldo Dueños':'Pago'} de "${gasto.proveedor||gasto.categoria}"`, origen:`gastoprocesado:${gasto.id}`
         });
         await saveKey('tesoreria', state.tesoreria, {silent:true});
@@ -8397,7 +8425,7 @@
         state.cuentasPorPagar.items.push({
           id: uid('ctapagar'),
           nombre: gasto.origenSueldoDuenos ? `Sueldo Pendiente — ${gasto.proveedor}` : (gasto.proveedor || gasto.descripcion || gasto.categoria),
-          montoOriginal: diferencia, origenGasto: gasto.id, esSueldoDuenos: !!gasto.origenSueldoDuenos, fechaCreacion: gasto.fecha, activa: true
+          montoOriginal: diferencia, origenGasto: gasto.id, esSueldoDuenos: !!gasto.origenSueldoDuenos, fechaCreacion: data.fechaPago, activa: true
         });
         await saveKey('cuentasPorPagar', state.cuentasPorPagar);
       }
