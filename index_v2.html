@@ -2662,6 +2662,27 @@
       }
     });
 
+    // Pagos de deuda: el interés ya cuenta arriba (vía su gasto vinculado, categoría "Gasto Financiero"),
+    // pero el CAPITAL nunca se guarda como gasto — es plata real saliendo del banco de todas formas, así que
+    // se suma aparte para que Flujo de Caja no la deje afuera.
+    (state.deudas.pagos||[]).forEach(p=>{
+      if(!p.fecha || !esMovimientoVigente({fecha: p.fecha})) return;
+      const d = new Date(p.fecha+'T00:00:00');
+      if(d.getFullYear() !== year) return;
+      months[d.getMonth()].gastosFlujo += Number(p.capital)||0;
+    });
+
+    // Uso de Línea de Crédito: plata real entrando a Operación como financiamiento — no es venta, así que
+    // nunca fue un "ingreso", pero igual mueve el banco. Los giros de tarjeta y cuota atrasada NO se suman
+    // acá a propósito: esos nunca tocan Tesorería (compra con tarjeta se paga después; cuota atrasada no se
+    // pagó todavía).
+    (state.deudas.giros||[]).forEach(g=>{
+      if(g.origen !== 'linea_credito' || !g.fecha || !esMovimientoVigente({fecha: g.fecha})) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear() !== year) return;
+      months[d.getMonth()].ingresosCobradosFlujo += Number(g.monto)||0;
+    });
+
     // Saldo real de Cuenta Corriente: incluye TODO ingreso (venta o no) y TODO gasto (incluso los marcados
     // "Solo Cuenta Corriente") — es la plata real que entra y sale del banco. Vive aquí para reutilizar el
     // mismo cálculo mes a mes que ya existía.
