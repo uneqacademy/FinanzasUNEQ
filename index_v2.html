@@ -867,14 +867,15 @@
       }
     });
 
-    // Sueldo Dueños: mismo mecanismo, pero como un ítem único y fijo (no un catálogo) — el retiro real
-    // SIEMPRE sale de la bóveda "sueldoDuenos" específicamente, nunca de otra (a diferencia de un Gasto Fijo
-    // normal, donde se elige la bóveda al procesar). Se reconoce como Gasto Operacional constante, se retire
-    // o no — la bóveda puede acumular excedentes sin que esto fuerce nada.
-    const sueldoFijo = Number(state.config.sueldoDuenosFijoMensual) || 0;
-    if(sueldoFijo > 0){
+    // Sueldo Dueños: uno por CADA SOCIO, no un ítem combinado — así cada uno se retira por separado, con su
+    // propio monto (pueden ser distintos según el cargo). El retiro real SIEMPRE sale de la bóveda
+    // "sueldoDuenos" — es compartida entre los socios, cada uno retira su parte de ahí. Se reconoce como
+    // Gasto Operacional constante, se retire o no — la bóveda puede acumular excedentes sin forzar nada.
+    (state.config.socios||[]).forEach(socio=>{
+      const sueldoFijo = Number(socio.sueldoMensual) || 0;
+      if(sueldoFijo <= 0) return;
       const yaExisteSueldo = state.gastos.some(g=>{
-        if(!g.origenSueldoDuenos || !g.fecha) return false;
+        if(g.socioId !== socio.id || !g.origenSueldoDuenos || !g.fecha) return false;
         const d = new Date(g.fecha+'T00:00:00');
         return d.getFullYear()===anio && d.getMonth()===mes;
       });
@@ -882,12 +883,12 @@
         const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
         state.gastos.push({
           id: uid('gas'), fecha: fechaGasto, categoria: 'Sueldo Operativo Socios',
-          proveedor: 'Sueldo Dueños', descripcion: 'Sueldo Dueños del mes (fijo acordado)', monto: sueldoFijo,
-          estado: 'Pendiente', montoPagado: 0, origenSueldoDuenos: true, metodo: 'Transferencia'
+          proveedor: socio.nombre, descripcion: `Sueldo Dueños del mes — ${socio.nombre}`, monto: sueldoFijo,
+          estado: 'Pendiente', montoPagado: 0, origenSueldoDuenos: true, socioId: socio.id, metodo: 'Transferencia'
         });
         generados = true;
       }
-    }
+    });
 
     return generados;
   }
@@ -1790,6 +1791,7 @@
     // Plantilla de Gastos Fijos: catálogo que se genera solo cada mes (Pendiente) al abrir la app.
     plantillasGastosFijos: [],
     editingPlantillaId: null,
+    editingSocioId: null,
     procesandoGastoId: null, // qué gasto Pendiente se está procesando (ingresando el Monto Pagado Realmente)
     // Cuentas por Pagar: sección APARTE de Gestión de Deudas (no son créditos, no tienen interés) — nacen
     // automáticamente cuando un gasto se paga parcialmente.
@@ -1996,7 +1998,7 @@
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
-    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','save-sueldo-duenos-config',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
@@ -2318,6 +2320,7 @@
       if (state.config.saldoInicialUSD === undefined) state.config.saldoInicialUSD = 0;
       if (!state.config.distribucionPorcentajes) state.config.distribucionPorcentajes = {...DISTRIBUCION_DEFAULT};
       if (!state.config.fechaDiaCero) state.config.fechaDiaCero = '2026-09-01';
+      if (!state.config.socios) state.config.socios = [];
       const categoriasNoVentaCambiaron = ensureCategoriasNoVenta(state.config);
       // "Gasto Financiero" (Módulo 5): cuenta como gasto operacional normal — no es no-venta, así que no pasa
       // por ensureCategoriasNoVenta, solo se asegura que exista en la lista si un respaldo viejo no la trae.
@@ -6128,12 +6131,43 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Sueldo Dueños — Regla de Acumulación</div>
-        <div class="fa-section-note">La bóveda "Sueldo Dueños" acumula sin forzar retiro — es tu fondo de reserva exclusivo para nómina directiva. Estado de Resultados igual reconoce este monto como Gasto Fijo constante cada mes, se retire o no.</div>
-        <div data-form="sueldo-duenos-config">
-          <div class="fa-field" style="max-width:280px;"><label>Sueldo Fijo Acordado (mensual)</label><input type="number" name="sueldoDuenosFijoMensual" min="0" step="1" value="${state.config.sueldoDuenosFijoMensual||0}"></div>
-          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="save-sueldo-duenos-config">Guardar</button></div>
+        <div class="fa-card-title">Sueldo Dueños — Socios</div>
+        <div class="fa-section-note">La bóveda "Sueldo Dueños" es una sola, compartida — cada socio retira su parte de ahí. Cada mes se genera un gasto "Pendiente" POR SEPARADO para cada socio (no uno combinado), así puedes retirar el de cada uno en su momento, con su propio monto. Estado de Resultados igual reconoce el sueldo de cada socio como Gasto Fijo constante, se retire o no.</div>
+        ${(() => {
+          const editingS = state.editingSocioId ? (state.config.socios||[]).find(s=>s.id===state.editingSocioId) : null;
+          return `
+        <div data-form="socio-config">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre del Socio</label><input type="text" name="nombre" placeholder="Ej: Felipe" value="${editingS?escapeHtml(editingS.nombre):''}"></div>
+            <div class="fa-field"><label>Sueldo Mensual Acordado</label><input type="number" name="sueldoMensual" min="0" step="1" placeholder="0" value="${editingS?editingS.sueldoMensual:''}"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-socio-config">${editingS?'Guardar cambios':'Agregar socio'}</button>
+            ${editingS?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-socio">Cancelar</button>`:''}
+          </div>
         </div>
+        ${(state.config.socios||[]).length>0 ? `
+        <div class="fa-table-wrap" style="margin-top:14px;">
+          <table class="fa-table">
+            <thead><tr><th>Nombre</th><th class="num">Sueldo Mensual</th><th></th></tr></thead>
+            <tbody>
+              ${state.config.socios.map(s=>`
+                <tr>
+                  <td>${escapeHtml(s.nombre)}</td>
+                  <td class="num money">${fmtMoneyC(s.sueldoMensual)}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="edit-socio" data-id="${s.id}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-socio" data-id="${s.id}">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>` : `<div class="fa-hint">Aún no agregas ningún socio.</div>`}
+          `;
+        })()}
       </div>
 
       <div class="fa-card">
@@ -6884,6 +6918,12 @@
         state.plantillasGastosFijos = state.plantillasGastosFijos.filter(p=>p.id!==cd.data);
         await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
         showToast('Plantilla eliminada');
+        render();
+      }
+      else if(cd.action === 'do-delete-socio'){
+        state.config.socios = (state.config.socios||[]).filter(s=>s.id!==cd.data);
+        await saveKey('config', state.config);
+        showToast('Socio eliminado');
         render();
       }
       else if(cd.action === 'do-submit-gasto-historico'){
@@ -8175,12 +8215,12 @@
       }
 
       // Acción C (Gestión de Deudas): la diferencia se convierte en una Cuenta por Pagar nueva — etiquetada
-      // "Sueldos Dueños por Pagar" cuando corresponde, para distinguirla de un gasto fijo común.
+      // con el nombre del socio cuando corresponde a Sueldo Dueños, para distinguir de cuál de los socios es.
       const diferencia = gasto.monto - montoPagado;
       if(diferencia > 0){
         state.cuentasPorPagar.items.push({
           id: uid('ctapagar'),
-          nombre: gasto.origenSueldoDuenos ? 'Sueldos Dueños por Pagar' : (gasto.proveedor || gasto.descripcion || gasto.categoria),
+          nombre: gasto.origenSueldoDuenos ? `Sueldo Pendiente — ${gasto.proveedor}` : (gasto.proveedor || gasto.descripcion || gasto.categoria),
           montoOriginal: diferencia, origenGasto: gasto.id, esSueldoDuenos: !!gasto.origenSueldoDuenos, fechaCreacion: gasto.fecha, activa: true
         });
         await saveKey('cuentasPorPagar', state.cuentasPorPagar);
@@ -8325,11 +8365,38 @@
       showToast('Día Cero guardado — el saldo inicial ya aparece en Tesorería y en Flujo de Caja');
       render();
     }
-    else if(action === 'save-sueldo-duenos-config'){
-      const data = readFields(btn.closest('[data-form="sueldo-duenos-config"]'));
-      state.config.sueldoDuenosFijoMensual = Number(data.sueldoDuenosFijoMensual) || 0;
+    else if(action === 'submit-socio-config'){
+      const data = readFields(btn.closest('[data-form="socio-config"]'));
+      const sueldoMensual = Number(data.sueldoMensual) || 0;
+      if(!data.nombre){ showToast('Ponle un nombre al socio.'); return; }
+      if(!state.config.socios) state.config.socios = [];
+      const editId = state.editingSocioId;
+      if(editId){
+        const idx = state.config.socios.findIndex(s=>s.id===editId);
+        if(idx>-1) state.config.socios[idx] = { ...state.config.socios[idx], nombre: data.nombre, sueldoMensual };
+        state.editingSocioId = null;
+      } else {
+        state.config.socios.push({ id: uid('socio'), nombre: data.nombre, sueldoMensual });
+      }
       await saveKey('config', state.config);
-      showToast('Sueldo Fijo Acordado guardado — se generará su gasto Pendiente cada mes en Estado de Resultados');
+      showToast(editId ? 'Socio actualizado' : 'Socio agregado — se generará su gasto Pendiente cada mes en Estado de Resultados');
+      render();
+    }
+    else if(action === 'edit-socio'){
+      state.editingSocioId = btn.dataset.id;
+      render();
+    }
+    else if(action === 'cancel-edit-socio'){
+      state.editingSocioId = null;
+      render();
+    }
+    else if(action === 'delete-socio'){
+      state.confirmDialog = {
+        message: '¿Eliminar este socio? Ya no se generará su sueldo mensual automáticamente. Los gastos que ya se generaron para él quedan intactos.',
+        action: 'do-delete-socio',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
       render();
     }
     else if(action === 'add-cat-ingreso'){
