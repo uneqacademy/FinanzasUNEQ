@@ -1998,7 +1998,7 @@
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
-    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
@@ -6171,6 +6171,19 @@
       </div>
 
       <div class="fa-card">
+        <div class="fa-card-title">Distribución Profit First — Porcentajes</div>
+        <div class="fa-section-note">Cómo se reparte el Margen Neto Restante entre las 4 bóvedas cuando confirmas un ingreso en "Ingresos y Distribución". Un cambio aquí solo afecta a los ingresos que registres DE AQUÍ EN ADELANTE — nunca altera los que ya confirmaste, porque cada uno guarda sus propios porcentajes al momento de crearse.</div>
+        <div data-form="distribucion-config">
+          <div class="fa-form-grid">
+            ${BOVEDAS_PAGABLES.map(b=>`
+              <div class="fa-field"><label>${escapeHtml(b.label)} (%)</label><input type="number" name="pct_${b.id}" min="0" max="100" step="0.1" value="${(state.config.distribucionPorcentajes||DISTRIBUCION_DEFAULT)[b.id]}"></div>
+            `).join('')}
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="save-distribucion-config">Guardar Porcentajes</button></div>
+        </div>
+      </div>
+
+      <div class="fa-card">
         <div class="fa-card-title">Datos generales</div>
         <div class="fa-field" style="max-width:220px; margin-bottom:14px;">
           <label>Año activo</label>
@@ -8363,6 +8376,21 @@
       await saveKey('config', state.config);
       await saveKey('tesoreria', state.tesoreria);
       showToast('Día Cero guardado — el saldo inicial ya aparece en Tesorería y en Flujo de Caja');
+      render();
+    }
+    else if(action === 'save-distribucion-config'){
+      const data = readFields(btn.closest('[data-form="distribucion-config"]'));
+      const nuevosPct = {};
+      let suma = 0;
+      BOVEDAS_PAGABLES.forEach(b=>{
+        const v = Number(data['pct_'+b.id]) || 0;
+        nuevosPct[b.id] = v;
+        suma += v;
+      });
+      if(Math.round(suma*10)/10 !== 100){ showToast(`Los porcentajes deben sumar 100% — hoy suman ${suma}%.`); return; }
+      state.config.distribucionPorcentajes = nuevosPct;
+      await saveKey('config', state.config);
+      showToast('Porcentajes guardados — solo aplican a los ingresos que confirmes de aquí en adelante, los anteriores no cambian');
       render();
     }
     else if(action === 'submit-socio-config'){
