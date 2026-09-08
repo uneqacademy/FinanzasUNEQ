@@ -4755,7 +4755,7 @@
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editing?editing.fecha:todayISO()}"></div>
             <div class="fa-field"><label>Origen del Ingreso</label>
-              <select name="categoria">${ORIGENES_INGRESO_PF.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+              <select name="categoria">${state.config.categoriasIngresos.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
             <div class="fa-field"><label>Pasarela / Medio de Pago</label>
