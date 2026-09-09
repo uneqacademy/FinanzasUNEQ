@@ -558,23 +558,32 @@
     { id:'coproduccion', label:'Co-Producciones', duracion:1, comisionBloqueada:true },
     { id:'afiliacion', label:'Afiliación', duracion:1, comisionBloqueada:true }
   ];
-  // Rentabilidad por Unidad de Negocio (Agencia vs Academia): a qué unidad pertenece cada Tipo de Ingreso del
-  // catálogo. Los que no aparecen acá (Evento Presencial, Afiliación) quedan FUERA del comparativo a
-  // propósito — Felipe pidió excluirlos explícitamente.
+  // Las 4 Líneas de Negocio de UNEQ, y a qué unidad pertenece cada Tipo de Ingreso del catálogo. Ya no hay
+  // tipos excluidos: Evento Presencial (rebautizado "Sinergia on Stage" para este comparativo) y Afiliación
+  // ahora tienen su propia unidad, igual que Agencia y Academia.
+  const UNIDADES_NEGOCIO = [
+    { id:'agencia', label:'Agencia' },
+    { id:'academia', label:'Academia' },
+    { id:'afiliacion', label:'Afiliación' },
+    { id:'sinergia_on_stage', label:'Sinergia on Stage' }
+  ];
   const UNIDAD_NEGOCIO_POR_TIPO = {
     fee_agencia: 'agencia', coproduccion: 'agencia',
     mentoria: 'academia', sinergia: 'academia', membresia_anual: 'academia', membresia_semestral: 'academia',
-    membresia_trimestral: 'academia', membresia_mensual: 'academia', curso_autogestionado: 'academia', evento_online: 'academia'
+    membresia_trimestral: 'academia', membresia_mensual: 'academia', curso_autogestionado: 'academia', evento_online: 'academia',
+    afiliacion: 'afiliacion',
+    evento_presencial: 'sinergia_on_stage'
   };
-  // Costeo ABC simplificado para Gastos Operacionales compartidos (no ligados a una línea de venta): cada
-  // gasto se puede etiquetar 100% Agencia, 100% Academia, o Compartido (50/50) — si no se etiqueta, queda
-  // FUERA del comparativo (a propósito, así lo pidió Felipe para no ensuciar el análisis con datos viejos).
-  const ASIGNACIONES_GASTO_UNIDAD = [
-    { id:'', label:'Sin asignar (no entra al comparativo de unidades)' },
-    { id:'agencia', label:'100% Agencia' },
-    { id:'academia', label:'100% Academia' },
-    { id:'compartido', label:'OpEx Compartido (50/50)' }
-  ];
+  // Costeo ABC para Gastos Operacionales compartidos (no ligados a una línea de venta): cada gasto recibe un
+  // % exacto para CADA una de las 4 unidades (deben sumar 100 entre las 4 si se asigna algo) — si todos
+  // quedan en 0, el gasto queda FUERA del comparativo (a propósito, para no ensuciarlo con datos viejos).
+  function getFraccionesUnidadGasto(gasto){
+    const suma = UNIDADES_NEGOCIO.reduce((s,u)=> s + (Number(gasto['pct_'+u.id])||0), 0);
+    if(suma <= 0) return null;
+    const fracciones = {};
+    UNIDADES_NEGOCIO.forEach(u=> fracciones[u.id] = (Number(gasto['pct_'+u.id])||0)/100);
+    return fracciones;
+  }
   // Forma de Pago de cada línea del lote — define en qué moneda se ingresa el monto y cómo se comportan
   // comisión/anticipo. 'usd' = pasarela internacional (Hotmart/Stripe), con tipo de cambio, comisión y
   // anticipo, todo en USD. 'clp_transferencia' = pago directo, sin pasarela de por medio: nunca hay comisión
@@ -585,6 +594,7 @@
     { id:'usd', label:'USD — Pasarela Internacional (Hotmart/Stripe)', moneda:'USD', tieneComision:true, tieneAnticipo:true },
     { id:'paypal', label:'USD — PayPal', moneda:'USD', tieneComision:true, tieneAnticipo:true },
     { id:'payoneer', label:'USD — Payoneer', moneda:'USD', tieneComision:true, tieneAnticipo:true },
+    { id:'binance', label:'Binance (USDT)', moneda:'USD', tieneComision:true, tieneAnticipo:false },
     { id:'clp_transferencia', label:'CLP — Transferencia directa', moneda:'CLP', tieneComision:false, tieneAnticipo:false },
     { id:'clp_pasarela', label:'CLP — Pasarela de Pago (Transbank/Flow/etc.)', moneda:'CLP', tieneComision:true, tieneAnticipo:false }
   ];
@@ -858,29 +868,13 @@
     return UNIDAD_NEGOCIO_POR_TIPO[tipoIngreso] || null;
   }
 
-  // Costeo ABC: qué fracción de un gasto va a cada unidad. Prioriza la dedicación fija congelada al generar
-  // el gasto (Plantilla de Gastos Fijos, % Agencia/% Academia); si no la tiene, usa la etiqueta manual de 3
-  // opciones (100% Agencia / 100% Academia / Compartido 50-50). Si no tiene ninguna de las dos, devuelve
-  // null — ese gasto queda FUERA del comparativo hasta que se etiquete a mano.
-  function getFraccionesUnidadGasto(gasto){
-    if(gasto.pctDedicacionAgencia !== undefined && gasto.pctDedicacionAgencia !== null){
-      return { agencia: (Number(gasto.pctDedicacionAgencia)||0)/100, academia: (Number(gasto.pctDedicacionAcademia)||0)/100 };
-    }
-    if(gasto.asignacionUnidad === 'agencia') return { agencia:1, academia:0 };
-    if(gasto.asignacionUnidad === 'academia') return { agencia:0, academia:1 };
-    if(gasto.asignacionUnidad === 'compartido') return { agencia:0.5, academia:0.5 };
-    return null;
-  }
-
   // Rentabilidad por Unidad de Negocio (Agencia vs Academia) de un mes específico — Costeo ABC simplificado:
   // los Costos Directos se rastrean exacto vía la línea de venta que los generó (origenContrato); los Gastos
   // Operacionales compartidos usan la fracción fija de dedicación (Plantilla) o la etiqueta manual del gasto.
   // Evento Presencial y Afiliación quedan fuera a propósito (getUnidadNegocio devuelve null para ellos).
   function getRentabilidadPorUnidadMensual(anio, mesIdx){
-    const resultado = {
-      agencia: { ingresos:0, costosDirectos:0, gastosOperacionales:0 },
-      academia: { ingresos:0, costosDirectos:0, gastosOperacionales:0 }
-    };
+    const resultado = {};
+    UNIDADES_NEGOCIO.forEach(u=> resultado[u.id] = { ingresos:0, costosDirectos:0, gastosOperacionales:0 });
 
     state.contratosDevengados.forEach(c=>{
       const unidad = getUnidadNegocio(c.tipoIngreso);
@@ -904,21 +898,49 @@
         const linea = state.contratosDevengados.find(c=>c.id===g.origenContrato);
         if(!linea) return;
         const unidad = getUnidadNegocio(linea.tipoIngreso);
-        if(!unidad) return; // la línea es de una unidad excluida -> su comisión tampoco cuenta
+        if(!unidad) return;
         resultado[unidad].costosDirectos += monto;
         return;
       }
       const fracciones = getFraccionesUnidadGasto(g);
       if(!fracciones) return; // sin asignar -> excluido del comparativo
-      resultado.agencia.gastosOperacionales += monto * fracciones.agencia;
-      resultado.academia.gastosOperacionales += monto * fracciones.academia;
+      UNIDADES_NEGOCIO.forEach(u=> resultado[u.id].gastosOperacionales += monto * (fracciones[u.id]||0));
     });
 
-    ['agencia','academia'].forEach(u=>{
-      const r = resultado[u];
-      r.rentabilidadNeta = r.ingresos - r.costosDirectos - r.gastosOperacionales;
+    UNIDADES_NEGOCIO.forEach(u=>{
+      const r = resultado[u.id];
+      r.margenBruto = r.ingresos - r.costosDirectos;
+      r.rentabilidadNeta = r.margenBruto - r.gastosOperacionales;
     });
     return resultado;
+  }
+
+  // Las 9 métricas de Rentabilidad por Unidad de Negocio, mes a mes, para toda la tabla anual — reutiliza
+  // getRentabilidadPorUnidadMensual (12 veces, una por mes) y le agrega los 4 porcentajes que Felipe pidió
+  // ver junto a cada monto.
+  function getRentabilidadPorUnidadAnual(anio){
+    const meses = [];
+    for(let m=0; m<12; m++){
+      const datosMes = getRentabilidadPorUnidadMensual(anio, m);
+      const totalIngresosMes = UNIDADES_NEGOCIO.reduce((s,u)=> s + datosMes[u.id].ingresos, 0);
+      const conPct = {};
+      UNIDADES_NEGOCIO.forEach(u=>{
+        const r = datosMes[u.id];
+        conPct[u.id] = {
+          ingresos: r.ingresos,
+          pctIngresosSobreTotal: totalIngresosMes>0 ? (r.ingresos/totalIngresosMes*100) : null,
+          costosDirectos: r.costosDirectos,
+          gastosOperacionales: r.gastosOperacionales,
+          pctGastosOperacionales: r.ingresos>0 ? (r.gastosOperacionales/r.ingresos*100) : null,
+          rentabilidadNeta: r.rentabilidadNeta,
+          pctRentabilidadNeta: r.ingresos>0 ? (r.rentabilidadNeta/r.ingresos*100) : null,
+          margenBruto: r.margenBruto,
+          pctMargenBruto: r.ingresos>0 ? (r.margenBruto/r.ingresos*100) : null
+        };
+      });
+      meses.push(conPct);
+    }
+    return meses;
   }
 
   // Multiplicador de Nómina (Labor Efficiency Ratio): cuántos pesos de Ingreso Devengado genera la empresa
@@ -1001,13 +1023,15 @@
       });
       if(!yaExiste){
         const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
+        const pctsCongelados = {};
+        UNIDADES_NEGOCIO.forEach(u=> pctsCongelados['pct_'+u.id] = p['pct_'+u.id]);
         state.gastos.push({
           id: uid('gas'), fecha: fechaGasto, categoria: p.categoria,
           proveedor: p.nombre, descripcion: `Gasto fijo: ${p.nombre}`, monto: p.montoMensual,
           estado: 'Pendiente', montoPagado: 0, origenPlantilla: p.id, metodo: 'Transferencia',
           // Se congela la dedicación de ESTE momento — si la plantilla cambia después, no altera meses ya
           // generados, mismo principio que el resto de la app (nunca hacia atrás).
-          pctDedicacionAgencia: p.pctDedicacionAgencia, pctDedicacionAcademia: p.pctDedicacionAcademia
+          ...pctsCongelados
         });
         generados = true;
       }
@@ -2145,7 +2169,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-metodo',
@@ -3496,34 +3520,27 @@
   //   (disabled) con ese valor ya preseleccionado — así siempre queda claro cuánto dura, sin poder tocarlo.
   // - Si usaFechaEvento, muestra el campo "Fecha del Evento" (el ingreso cuenta ahí, no en la venta).
   // - Si comisionBloqueada ("Dinero Limpio"), deshabilita y fuerza en 0 la Comisión por Cuota.
-  // Muestra los campos correctos según el Tipo de Deuda elegido al crearla: Persona/Proveedor pregunta si se
-  // repactó en cuotas (opcional); Banco siempre pide el cronograma directo (número de cuotas restantes).
-  window.faToggleTipoDeudaCronograma = function(){
-    const tipo = document.getElementById('fa-deuda-tipo-cronograma');
+  // Muestra el bloque de campos correcto según el Tipo de Deuda elegido al crearla: Genérica (como siempre
+  // fue), Persona/Proveedor, o Banco — cada uno con su propio conjunto de campos.
+  window.faToggleTipoDeuda = function(){
+    const tipo = document.getElementById('fa-deuda-tipo');
+    const genericaWrap = document.getElementById('fa-deuda-generica-wrap');
     const personaWrap = document.getElementById('fa-deuda-persona-wrap');
-    const cuotasWrap = document.getElementById('fa-deuda-cuotas-wrap');
-    const numCuotasLabel = document.getElementById('fa-deuda-num-cuotas-label');
-    const cuotasHint = document.getElementById('fa-deuda-cuotas-hint');
-    const repactada = document.getElementById('fa-deuda-repactada');
+    const bancoWrap = document.getElementById('fa-deuda-banco-wrap');
     if(!tipo) return;
+    genericaWrap.style.display = tipo.value === 'generica' ? '' : 'none';
     personaWrap.style.display = tipo.value === 'persona' ? '' : 'none';
-    if(tipo.value === 'banco'){
-      cuotasWrap.style.display = '';
-      numCuotasLabel.textContent = 'Número de Cuotas Restantes';
-      cuotasHint.textContent = 'La "Cuota Mínima Mensual" de arriba se usa tal cual, fija, en cada una de estas cuotas — al pagarlas, ingresas cuánto de esa cuota es interés y el sistema separa el capital solo.';
-    } else if(tipo.value === 'persona'){
-      cuotasWrap.style.display = (repactada && repactada.checked) ? '' : 'none';
-      numCuotasLabel.textContent = 'Número de Cuotas';
-      cuotasHint.textContent = 'El "Monto Total Adeudado" de arriba se reparte en partes iguales entre las cuotas — puedes editar cada una después si no calzan exacto. Estas deudas no llevan interés.';
-    } else {
-      cuotasWrap.style.display = 'none';
-    }
+    bancoWrap.style.display = tipo.value === 'banco' ? '' : 'none';
   };
-  window.faToggleRepactada = function(){
-    const repactada = document.getElementById('fa-deuda-repactada');
-    const cuotasWrap = document.getElementById('fa-deuda-cuotas-wrap');
-    if(!repactada || !cuotasWrap) return;
-    cuotasWrap.style.display = repactada.checked ? '' : 'none';
+  // Dentro de Persona/Proveedor: si se paga en cuotas, pide Monto por Cuota + Fecha de la Cuota 1; si no,
+  // solo pide la Fecha de Pago Comprometida y el interés esperado (informativo).
+  window.faTogglePersonaCuotas = function(){
+    const check = document.getElementById('fa-persona-con-cuotas');
+    const conCuotas = document.getElementById('fa-persona-con-cuotas-wrap');
+    const sinCuotas = document.getElementById('fa-persona-sin-cuotas-wrap');
+    if(!check) return;
+    conCuotas.style.display = check.checked ? '' : 'none';
+    sinCuotas.style.display = check.checked ? 'none' : '';
   };
 
   window.faToggleTipoIngresoLinea = function(){
@@ -3605,6 +3622,11 @@
 
   // ---------------- Render dispatch ----------------
   function render(){
+    // Guarda dónde estabas viendo ANTES de reconstruir todo el HTML — sin esto, cada acción (editar, guardar,
+    // agregar una línea) te manda de vuelta arriba de la pantalla, perdiendo el lugar donde trabajabas.
+    const mainScrollElAntes = root.querySelector('.fa-main');
+    const scrollTopGuardado = mainScrollElAntes ? mainScrollElAntes.scrollTop : 0;
+
     if(!state.authChecked){
       root.innerHTML = `<div class="fa-loading">Verificando sesión…</div>`;
       return;
@@ -3643,6 +3665,9 @@
       ${renderPagarSaldoCtaPorPagarModal()}
       ${renderCuotaAtrasadaModal()}
     `;
+    // El innerHTML de arriba creó un .fa-main NUEVO — ahí es donde se restaura la posición guardada.
+    const mainScrollElDespues = root.querySelector('.fa-main');
+    if(mainScrollElDespues) mainScrollElDespues.scrollTop = scrollTopGuardado;
   }
 
   function renderLogin(){
@@ -3967,22 +3992,75 @@
 
       <div class="fa-card">
         <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — ${MESES[mesActualIdx]}</div>
-        <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Evento Presencial y Afiliación quedan fuera de este comparativo. Los gastos operacionales sin asignación de unidad (o sin % de dedicación en su Plantilla) tampoco cuentan aquí todavía.</div>
-        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-top:10px;">
-          ${['agencia','academia'].map(u=>{
-            const r = rentabilidadUnidad[u];
-            const label = u==='agencia' ? '🤝 Agencia' : '🎓 Academia';
+        <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Afiliación y Sinergia on Stage (Evento Presencial) tienen su propia unidad. Los gastos operacionales sin % asignado (o sin dedicación en su Plantilla) no cuentan aquí todavía.</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-top:10px;">
+          ${UNIDADES_NEGOCIO.map(u=>{
+            const r = rentabilidadUnidad[u.id];
+            const emoji = u.id==='agencia'?'🤝':u.id==='academia'?'🎓':u.id==='afiliacion'?'🔗':'🎤';
             return `
             <div style="border:1.5px solid ${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'}; border-radius:12px; padding:16px; ${r.rentabilidadNeta>=0?'background:#F0FFF4;':'background:#FFF5F5;'}">
-              <div style="font-weight:700; font-size:15px; margin-bottom:8px;">${label}</div>
+              <div style="font-weight:700; font-size:15px; margin-bottom:8px;">${emoji} ${escapeHtml(u.label)}</div>
               <div class="fa-hint" style="margin:0;">Ingresos: <strong>${fmtMoney(r.ingresos)}</strong></div>
               <div class="fa-hint" style="margin:2px 0;">Costos Directos: <strong style="color:var(--expense);">${fmtMoney(r.costosDirectos)}</strong></div>
-              <div class="fa-hint" style="margin:0 0 8px 0;">Gastos Operacionales Asignados: <strong style="color:var(--expense);">${fmtMoney(r.gastosOperacionales)}</strong></div>
+              <div class="fa-hint" style="margin:0 0 8px 0;">Gastos Operacionales: <strong style="color:var(--expense);">${fmtMoney(r.gastosOperacionales)}</strong></div>
               <div style="font-size:20px; font-weight:800; color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoneyC(r.rentabilidadNeta)}</div>
               <div class="fa-hint" style="margin:0;">Rentabilidad Neta</div>
             </div>
           `;}).join('')}
         </div>
+
+        <div class="fa-card-title" style="margin-top:20px;">📊 Historial anual por Línea de Negocio — ${anio}</div>
+        ${(() => {
+          const anual = getRentabilidadPorUnidadAnual(anio);
+          return UNIDADES_NEGOCIO.map(u=>{
+            const totalesU = anual.reduce((acc,mes)=>{
+              const r = mes[u.id];
+              acc.ingresos += r.ingresos; acc.costosDirectos += r.costosDirectos;
+              acc.gastosOperacionales += r.gastosOperacionales; acc.rentabilidadNeta += r.rentabilidadNeta;
+              acc.margenBruto += r.margenBruto;
+              return acc;
+            }, { ingresos:0, costosDirectos:0, gastosOperacionales:0, rentabilidadNeta:0, margenBruto:0 });
+            return `
+          <div class="fa-table-wrap" style="margin-top:10px;">
+            <div class="fa-hint" style="font-weight:700; margin:0 0 4px 0;">${escapeHtml(u.label)}</div>
+            <table class="fa-table">
+              <thead><tr>
+                <th>Mes</th><th class="num">Ingreso Total</th><th class="num">% Ingresos</th><th class="num">Costos Directos</th>
+                <th class="num">Gastos Op.</th><th class="num">% Gastos Op.</th><th class="num">Rentabilidad Neta</th><th class="num">% Rentabilidad</th>
+                <th class="num">Margen Bruto</th><th class="num">% Margen Bruto</th>
+              </tr></thead>
+              <tbody>
+                ${anual.map((mes,i)=>{ const r = mes[u.id]; return `
+                <tr>
+                  <td>${MESES_CORTO[i]}</td>
+                  <td class="num money">${fmtMoney(r.ingresos)}</td>
+                  <td class="num">${r.pctIngresosSobreTotal!==null?r.pctIngresosSobreTotal.toFixed(1)+'%':'—'}</td>
+                  <td class="num money">${fmtMoney(r.costosDirectos)}</td>
+                  <td class="num money">${fmtMoney(r.gastosOperacionales)}</td>
+                  <td class="num">${r.pctGastosOperacionales!==null?r.pctGastosOperacionales.toFixed(1)+'%':'—'}</td>
+                  <td class="num money" style="color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoney(r.rentabilidadNeta)}</td>
+                  <td class="num">${r.pctRentabilidadNeta!==null?r.pctRentabilidadNeta.toFixed(1)+'%':'—'}</td>
+                  <td class="num money">${fmtMoney(r.margenBruto)}</td>
+                  <td class="num">${r.pctMargenBruto!==null?r.pctMargenBruto.toFixed(1)+'%':'—'}</td>
+                </tr>
+              `;}).join('')}
+                <tr style="font-weight:700; background:#F8F9FA;">
+                  <td>Total año</td>
+                  <td class="num money">${fmtMoney(totalesU.ingresos)}</td>
+                  <td class="num">—</td>
+                  <td class="num money">${fmtMoney(totalesU.costosDirectos)}</td>
+                  <td class="num money">${fmtMoney(totalesU.gastosOperacionales)}</td>
+                  <td class="num">${totalesU.ingresos>0?(totalesU.gastosOperacionales/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
+                  <td class="num money">${fmtMoney(totalesU.rentabilidadNeta)}</td>
+                  <td class="num">${totalesU.ingresos>0?(totalesU.rentabilidadNeta/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
+                  <td class="num money">${fmtMoney(totalesU.margenBruto)}</td>
+                  <td class="num">${totalesU.ingresos>0?(totalesU.margenBruto/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        `;}).join('');
+        })()}
       </div>
 
       <div class="fa-card">
@@ -3995,8 +4073,8 @@
         <div class="fa-table-wrap">
           <table class="fa-table">
             <thead><tr>
-              <th>Mes</th><th class="num">Ingresos Devengados</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th>
-              <th class="num">Gastos Operacionales</th><th class="num">Utilidad Operativa</th><th class="num">Gastos Financieros</th><th class="num">Utilidad Neta</th>
+              <th>Mes</th><th class="num">Ingresos Devengados</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th><th class="num">Margen Bruto %</th>
+              <th class="num">Gastos Operacionales</th><th class="num">Utilidad Operativa</th><th class="num">Gastos Financieros</th><th class="num">Utilidad Neta</th><th class="num">Margen Rentabilidad %</th>
             </tr></thead>
             <tbody>
               ${meses.map((m,i)=>`
@@ -4005,10 +4083,12 @@
                   <td class="num money" style="color:var(--income);">${fmtMoney(m.ingresosDevengados)}</td>
                   <td class="num money" style="color:var(--expense);">${fmtMoney(m.costosDirectos)}</td>
                   <td class="num money">${fmtMoney(m.margenBruto)}</td>
+                  <td class="num">${m.margenBrutoPct!==null?m.margenBrutoPct.toFixed(1)+'%':'—'}</td>
                   <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosOperacionales)}</td>
                   <td class="num money" style="font-weight:700; color:${m.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${m.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoney(m.utilidadOperativa)}</td>
                   <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosFinancieros)}</td>
                   <td class="num money" style="font-weight:700;">${fmtMoney(m.utilidadNeta)}</td>
+                  <td class="num">${m.margenRentabilidad!==null?m.margenRentabilidad.toFixed(1)+'%':'—'}</td>
                 </tr>
               `).join('')}
               <tr style="font-weight:700; background:#F8F9FA;">
@@ -4016,10 +4096,12 @@
                 <td class="num money" style="color:var(--income);">${fmtMoney(totales.ingresosDevengados)}</td>
                 <td class="num money" style="color:var(--expense);">${fmtMoney(totales.costosDirectos)}</td>
                 <td class="num money">${fmtMoney(totales.margenBruto)}</td>
+                <td class="num">${totales.ingresosDevengados>0?(totales.margenBruto/totales.ingresosDevengados*100).toFixed(1)+'%':'—'}</td>
                 <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosOperacionales)}</td>
                 <td class="num money">${fmtMoney(totales.utilidadOperativa)}</td>
                 <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosFinancieros)}</td>
                 <td class="num money">${fmtMoney(totales.utilidadNeta)}</td>
+                <td class="num">${totales.ingresosDevengados>0?(totales.utilidadNeta/totales.ingresosDevengados*100).toFixed(1)+'%':'—'}</td>
               </tr>
             </tbody>
           </table>
@@ -4230,10 +4312,11 @@
               <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
-            <div class="fa-field"><label>% Dedicación Agencia</label><input type="number" name="pctDedicacionAgencia" min="0" max="100" step="1" placeholder="Ej: 50" value="${editingP&&editingP.pctDedicacionAgencia!==undefined?editingP.pctDedicacionAgencia:''}"></div>
-            <div class="fa-field"><label>% Dedicación Academia</label><input type="number" name="pctDedicacionAcademia" min="0" max="100" step="1" placeholder="Ej: 50" value="${editingP&&editingP.pctDedicacionAcademia!==undefined?editingP.pctDedicacionAcademia:''}"></div>
+            ${UNIDADES_NEGOCIO.map(u=>`
+            <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}"></div>
+            `).join('')}
           </div>
-          <div class="fa-hint">Los 2 porcentajes deben sumar 100% — así se reparte el costo de esta persona entre Agencia y Academia cada mes, para el comparativo de Rentabilidad por Unidad de Negocio.</div>
+          <div class="fa-hint">Los 4 porcentajes deben sumar 100% entre todos (o dejarlos todos vacíos si no aplica) — así se reparte el costo de esta persona entre las 4 Líneas de Negocio cada mes, para el comparativo de Rentabilidad por Unidad.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
             ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
@@ -4307,12 +4390,13 @@
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field"><label>Asignación de Unidad de Negocio</label>
-              <select name="asignacionUnidad">
-                ${ASIGNACIONES_GASTO_UNIDAD.map(a=>`<option value="${a.id}" ${(editingG&&(editingG.asignacionUnidad||'')===a.id)?'selected':''}>${escapeHtml(a.label)}</option>`).join('')}
-              </select>
-            </div>
           </div>
+          <div class="fa-form-grid" style="margin-top:6px;">
+            ${UNIDADES_NEGOCIO.map(u=>`
+            <div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingG&&editingG['pct_'+u.id]!==undefined?editingG['pct_'+u.id]:''}"></div>
+            `).join('')}
+          </div>
+          <div class="fa-hint">Opcional — solo si quieres que este gasto cuente en el comparativo de Rentabilidad por Unidad de Negocio. Déjalos todos vacíos si no aplica, o complétalos sumando 100% entre las 4.</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">${editingG?'Guardar cambios':'Registrar gasto'}</button>
             ${editingG?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-gasto">Cancelar</button>`:''}
@@ -4424,7 +4508,7 @@
               </div>` : ''}
               ${(d.cronogramaCuotas&&d.cronogramaCuotas.length>0) ? `
               <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
-                <div style="font-size:12px; font-weight:700; margin-bottom:6px;">📅 Cronograma de Cuotas${d.tipoDeudaCronograma==='banco'?' (Banco)':' (Persona/Proveedor)'}</div>
+                <div style="font-size:12px; font-weight:700; margin-bottom:6px;">📅 Cronograma de Cuotas${d.tipoDeuda==='banco'?' (Banco)':' (Persona/Proveedor)'}</div>
                 ${d.cronogramaCuotas.map(c=>{
                   const atrasada = esCuotaAtrasada(c);
                   const colorEstado = c.estado==='Pagada' ? 'var(--income)' : (atrasada ? 'var(--expense)' : 'var(--ink-soft)');
@@ -4562,28 +4646,6 @@
           <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto-tarjeta-credito">Registrar gasto con tarjeta</button></div>
         </div>`}
       </div>
-
-      <div class="fa-card">
-        <div class="fa-card-title">🏦 Pago de Intereses / Comisión</div>
-        <div class="fa-section-note">Para cuando el banco cobra una comisión o interés que no es parte de una cuota normal — va 100% a Gastos Financieros en Estado de Resultados, no reduce el capital de la deuda.</div>
-        ${todasActivas.length===0 ? `<div class="fa-hint">No tienes deudas activas registradas.</div>` : `
-        <div data-form="pago-interes">
-          <div class="fa-form-grid">
-            <div class="fa-field"><label>Deuda</label>
-              <select name="deudaId">${todasActivas.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
-            </div>
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field"><label>Monto (todo es interés)</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
-            <div class="fa-field"><label>Cuenta de Origen</label>
-              <select name="cuentaOrigen">
-                <option value="operacion">Operación</option>
-                <option value="ganancia">Ganancia</option>
-              </select>
-            </div>
-          </div>
-          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-interes">Registrar interés/comisión</button></div>
-        </div>`}
-      </div>
         `;
       })()}
 
@@ -4591,56 +4653,115 @@
         <div class="fa-card-title">${state.editingDeudaId ? 'Editar deuda' : 'Agregar deuda al inventario'}</div>
         ${(() => {
           const editingD = state.editingDeudaId ? state.deudas.inventario.find(d=>d.id===state.editingDeudaId) : null;
+          if(editingD){
+            // Editar: solo los datos básicos, sin tocar el cronograma ya generado (evita pisar cuotas ya pagadas).
+            return `
+        <div data-form="deuda">
+          <div class="fa-hint" style="margin-top:0;">Tipo: ${editingD.tipoDeuda==='banco'?'Banco':editingD.tipoDeuda==='persona'?'Persona / Proveedor':'Genérica'} (no se puede cambiar después de creada).</div>
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" value="${escapeHtml(editingD.nombre)}"></div>
+            <div class="fa-field"><label>${editingD.esCargaInicial?'Saldo Insoluto al Día Cero':(editingD.tipoDeuda==='banco'?'Saldo Insoluto':'Monto Total')}</label><input type="number" name="montoOriginal" min="0" step="1" value="${editingD.montoOriginal}"></div>
+            ${editingD.tipoDeuda==='generica' ? `
+            <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" value="${editingD.tasaInteres}"></div>
+            <div class="fa-field"><label>Período de la tasa</label>
+              <select name="tasaInteresPeriodo">
+                <option value="mensual" ${editingD.tasaInteresPeriodo==='mensual'?'selected':''}>Mensual</option>
+                <option value="anual" ${editingD.tasaInteresPeriodo==='anual'?'selected':''}>Anual</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" value="${editingD.cuotaMinima}"></div>
+            <div class="fa-field"><label>Cupo total</label><input type="number" name="cupo" min="0" step="1" value="${editingD.cupo||''}"></div>
+            ` : ''}
+            <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento" value="${editingD.fechaVencimiento||''}"></div>
+            <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" value="${escapeHtml(editingD.categoria||'')}"></div>
+          </div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:8px;">
+            <input type="checkbox" name="esCargaInicial" ${editingD.esCargaInicial?'checked':''}>
+            Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
+          </label>
+          <div class="fa-form-actions" style="margin-top:10px;">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Guardar cambios</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-deuda">Cancelar</button>
+          </div>
+        </div>`;
+          }
           return `
         <div data-form="deuda">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado" value="${editingD?escapeHtml(editingD.nombre):''}"></div>
-            <div class="fa-field"><label>${editingD&&editingD.esCargaInicial?'Saldo Insoluto al Día Cero':'Monto Total Adeudado'}</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0" value="${editingD?editingD.montoOriginal:''}"></div>
-            <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5" value="${editingD?editingD.tasaInteres:''}"></div>
-            <div class="fa-field"><label>Período de la tasa</label>
-              <select name="tasaInteresPeriodo">
-                <option value="mensual" ${editingD&&editingD.tasaInteresPeriodo==='mensual'?'selected':''}>Mensual</option>
-                <option value="anual" ${editingD&&editingD.tasaInteresPeriodo==='anual'?'selected':''}>Anual</option>
+            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado"></div>
+            <div class="fa-field"><label>Tipo de Deuda</label>
+              <select name="tipoDeuda" id="fa-deuda-tipo" onchange="window.faToggleTipoDeuda()">
+                <option value="generica">Genérica (Tarjeta/Línea de Crédito, etc.)</option>
+                <option value="persona">Persona / Proveedor</option>
+                <option value="banco">Banco</option>
               </select>
             </div>
-            <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0" value="${editingD?editingD.cuotaMinima:''}"></div>
-            <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento" value="${editingD?editingD.fechaVencimiento||'':''}"></div>
-            <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito" value="${editingD?escapeHtml(editingD.categoria||''):''}"></div>
-            <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica" value="${editingD&&editingD.cupo?editingD.cupo:''}"></div>
           </div>
-          ${!state.editingDeudaId ? `
-          <div class="fa-field" style="max-width:320px; margin-top:8px;"><label>Tipo de Deuda</label>
-            <select name="tipoDeudaCronograma" id="fa-deuda-tipo-cronograma" onchange="window.faToggleTipoDeudaCronograma()">
-              <option value="">Genérica (sin cronograma de cuotas)</option>
-              <option value="persona">Persona / Proveedor</option>
-              <option value="banco">Banco</option>
-            </select>
-          </div>
-          <div id="fa-deuda-persona-wrap" style="display:none; margin-top:8px;">
-            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
-              <input type="checkbox" name="repactadaEnCuotas" id="fa-deuda-repactada" onchange="window.faToggleRepactada()">
-              ¿Se repactó en cuotas?
-            </label>
-          </div>
-          <div id="fa-deuda-cuotas-wrap" style="display:none; margin-top:8px;">
+
+          <div id="fa-deuda-generica-wrap">
             <div class="fa-form-grid">
-              <div class="fa-field"><label id="fa-deuda-num-cuotas-label">Número de Cuotas</label><input type="number" name="numeroCuotasCronograma" min="1" step="1" placeholder="Ej: 6"></div>
-              <div class="fa-field"><label>Fecha de Inicio (primera cuota)</label><input type="date" name="fechaInicioCronograma" value="${todayISO()}"></div>
+              <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5"></div>
+              <div class="fa-field"><label>Período de la tasa</label>
+                <select name="tasaInteresPeriodo">
+                  <option value="mensual">Mensual</option>
+                  <option value="anual">Anual</option>
+                </select>
+              </div>
+              <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento"></div>
+              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito"></div>
+              <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica"></div>
             </div>
-            <div class="fa-hint" id="fa-deuda-cuotas-hint">El monto total ("Monto Total Adeudado" arriba) se reparte en partes iguales entre las cuotas — puedes editar cada una después si no calzan exacto.</div>
           </div>
-          ` : ''}
-          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:8px;">
-            <input type="checkbox" name="esCargaInicial" ${editingD&&editingD.esCargaInicial?'checked':''}>
+
+          <div id="fa-deuda-persona-wrap" style="display:none;">
+            <div class="fa-form-grid">
+              <div class="fa-field"><label>Monto Total Deuda</label><input type="number" name="montoTotalPersona" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Fecha de Vencimiento (opcional)</label><input type="date" name="fechaVencimiento"></div>
+              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Deuda con proveedor"></div>
+            </div>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:6px;">
+              <input type="checkbox" name="personaConCuotas" id="fa-persona-con-cuotas" onchange="window.faTogglePersonaCuotas()">
+              ¿Se paga en cuotas?
+            </label>
+            <div id="fa-persona-con-cuotas-wrap" style="display:none; margin-top:8px;">
+              <div class="fa-form-grid">
+                <div class="fa-field"><label>Monto por Cuota (aprox.)</label><input type="number" name="montoPorCuotaPersona" min="0" step="1" placeholder="Ej: 300000"></div>
+                <div class="fa-field"><label>Fecha de la Cuota 1</label><input type="date" name="fechaCuota1Persona" value="${todayISO()}"></div>
+              </div>
+              <div class="fa-hint">El sistema calcula cuántas cuotas hacen falta (redondeando hacia arriba) y reparte el Monto Total exacto entre ellas — el monto real de cada cuota puede quedar un poco distinto al que escribiste aquí. Editable después, cuota por cuota, si no calzan como esperabas.</div>
+            </div>
+            <div id="fa-persona-sin-cuotas-wrap" style="display:none; margin-top:8px;">
+              <div class="fa-form-grid">
+                <div class="fa-field"><label>Fecha de Pago Comprometida</label><input type="date" name="fechaCompromisoPersona" value="${todayISO()}"></div>
+                <div class="fa-field"><label>Interés a Pagar (opcional)</label><input type="number" name="interesComprometidoPersona" min="0" step="1" placeholder="0"></div>
+              </div>
+              <div class="fa-hint">Solo informativo — al pagarla de verdad, usas "Registrar pago" e ingresas el capital/interés real de ese momento.</div>
+            </div>
+          </div>
+
+          <div id="fa-deuda-banco-wrap" style="display:none;">
+            <div class="fa-form-grid">
+              <div class="fa-field"><label>Saldo Insoluto</label><input type="number" name="saldoInsolutoBanco" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Cuotas por Pagar</label><input type="number" name="cuotasPorPagarBanco" min="1" step="1" placeholder="Ej: 12"></div>
+              <div class="fa-field"><label>Monto Total Cuota (fijo, se repite en todas)</label><input type="number" name="montoCuotaBanco" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Fecha de la Cuota 1</label><input type="date" name="fechaCuota1Banco" value="${todayISO()}"></div>
+              <div class="fa-field"><label>Fecha de Vencimiento final (opcional)</label><input type="date" name="fechaVencimiento"></div>
+              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Crédito Consumo Banco Estado"></div>
+            </div>
+            <div class="fa-hint">El Monto Total de la Cuota nunca cambia — al pagar cada una, desglosas Capital / Interés / Interés por Mora (editable si el desglose cambia).</div>
+          </div>
+
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:10px;">
+            <input type="checkbox" name="esCargaInicial">
             Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
           </label>
           <div class="fa-hint">Sus pagos SIEMPRE saldrán de Operación (sin poder elegir otra bóveda) y nunca generarán un nuevo Gasto Financiero en Estado de Resultados — su costo ya es histórico, anterior al Día Cero.</div>
           <div class="fa-form-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">${state.editingDeudaId?'Guardar cambios':'Agregar deuda'}</button>
-            ${state.editingDeudaId?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-deuda">Cancelar</button>`:''}
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Agregar deuda</button>
           </div>
-        </div>
-          `;
+        </div>`;
         })()}
       </div>
     `;
@@ -4699,19 +4820,24 @@
     if(!deuda) return '';
     const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===m.cuotaId);
     if(!cuota) return '';
-    const pideInteres = deuda.tipoDeudaCronograma === 'banco' && !deuda.esCargaInicial;
+    const esBanco = deuda.tipoDeuda === 'banco' && !deuda.esCargaInicial;
     return `
       <div class="fa-modal-overlay" data-action="cerrar-marcar-cuota-pagada">
         <div class="fa-modal" data-action="confirm-noop">
           <div class="fa-modal-title">Marcar Cuota ${cuota.numero} pagada — ${escapeHtml(deuda.nombre)}</div>
-          <div class="fa-hint" style="margin-top:0;">Monto esperado: ${fmtMoneyC(cuota.montoEsperado)} (vencía ${fmtDate(cuota.fechaEsperada)})</div>
+          <div class="fa-hint" style="margin-top:0;">Vencía ${fmtDate(cuota.fechaEsperada)}</div>
           <div data-form="marcar-cuota-pagada">
             <div class="fa-field" style="margin-bottom:10px;"><label>Fecha real de pago</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" value="${cuota.montoEsperado}"></div>
-            ${pideInteres ? `
-            <div class="fa-field"><label>¿Cuánto de esta cuota es INTERÉS?</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
-            <div class="fa-hint">El capital se calcula solo: Monto Pagado − Interés.</div>
+            ${esBanco ? `
+            <div class="fa-hint" style="margin-top:0;">Monto Total de la Cuota (fijo, no cambia): <strong>${fmtMoneyC(cuota.montoEsperado)}</strong></div>
+            <div class="fa-form-grid" style="grid-template-columns:1fr 1fr 1fr;">
+              <div class="fa-field"><label>Capital</label><input type="number" name="capital" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Interés Cuota</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Interés por Mora</label><input type="number" name="interesMora" min="0" step="1" placeholder="0"></div>
+            </div>
+            <div class="fa-hint">Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoney(cuota.montoEsperado)}. Ambos intereses van a Gastos Financieros en Estado de Resultados; el Capital amortiza el Saldo Insoluto.</div>
             ` : `
+            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" value="${cuota.montoEsperado}"></div>
             <div class="fa-hint">${deuda.esCargaInicial ? 'Carga Inicial de Pasivos — sin interés, el 100% reduce el saldo.' : 'Esta deuda no lleva interés — el 100% de lo pagado reduce el saldo.'}</div>
             `}
             ${deuda.esCargaInicial ? `
@@ -8003,58 +8129,101 @@
     }
     else if(action === 'submit-deuda'){
       const data = readFields(btn.closest('[data-form="deuda"]'));
-      const montoOriginal = Number(data.montoOriginal) || 0;
-      const tasaInteres = Number(data.tasaInteres) || 0;
-      const cuotaMinima = Number(data.cuotaMinima) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la deuda.'); return; }
-      if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
       const editId = state.editingDeudaId;
       const deudaAnterior = editId ? state.deudas.inventario.find(d=>d.id===editId) : null;
 
-      // Cronograma de Cuotas: solo aplica al CREAR una deuda nueva (no al editar una ya existente, para no
-      // arriesgar pisar cuotas que ya se pagaron). Persona/Proveedor reparte el total en partes iguales sin
-      // interés; Banco repite fija la Cuota Mínima Mensual, con interés que se ingresa cuota por cuota al
-      // pagarlas (no acá).
-      let cronogramaCuotas = null;
-      let tipoDeudaCronograma = '';
-      if(!editId && data.tipoDeudaCronograma){
-        const numCuotas = Math.max(Number(data.numeroCuotasCronograma)||0, 0);
-        if(data.tipoDeudaCronograma === 'persona' && data.repactadaEnCuotas){
-          if(numCuotas <= 0){ showToast('Ingresa el número de cuotas de la repactación.'); return; }
-          if(!data.fechaInicioCronograma){ showToast('Elige la fecha de inicio de la primera cuota.'); return; }
-          cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaInicioCronograma, { montoTotal: montoOriginal });
-          tipoDeudaCronograma = 'persona';
-        } else if(data.tipoDeudaCronograma === 'banco'){
-          if(numCuotas <= 0){ showToast('Ingresa el número de cuotas restantes.'); return; }
-          if(!data.fechaInicioCronograma){ showToast('Elige la fecha de inicio de la próxima cuota.'); return; }
-          if(cuotaMinima <= 0){ showToast('Ingresa el Monto de la Cuota Mensual (campo "Cuota Mínima Mensual" arriba).'); return; }
-          cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaInicioCronograma, { montoPorCuota: cuotaMinima });
-          tipoDeudaCronograma = 'banco';
-        }
-      }
-
-      const deuda = {
-        id: editId || uid('deuda'),
-        nombre: data.nombre,
-        montoOriginal,
-        tasaInteres,
-        tasaInteresPeriodo: data.tasaInteresPeriodo || 'mensual',
-        cuotaMinima,
-        fechaVencimiento: data.fechaVencimiento || '',
-        categoria: data.categoria || '',
-        cupo: Number(data.cupo) || null, // solo relevante para tarjetas/líneas de crédito — si no se define, el Dashboard usa montoOriginal como aproximación
-        esCargaInicial: !!data.esCargaInicial, // deuda de arrastre: sus pagos siempre salen de Operación y nunca generan Gasto Financiero
-        fechaCreacion: editId ? deudaAnterior.fechaCreacion : todayISO(),
-        activa: editId ? deudaAnterior.activa : true, // al editar, no se reactiva sola ni se desactiva sola
-        ...(editId ? {} : { tipoDeudaCronograma, cronogramaCuotas })
-      };
       if(editId){
+        // Editar: solo datos básicos, el tipo y su cronograma (si tiene) no se tocan — evita pisar cuotas ya
+        // pagadas o cambiar las reglas de una deuda a mitad de camino.
+        const montoOriginal = Number(data.montoOriginal) || 0;
+        if(montoOriginal <= 0){ showToast('Ingresa el monto.'); return; }
+        const deuda = {
+          ...deudaAnterior,
+          nombre: data.nombre, montoOriginal,
+          fechaVencimiento: data.fechaVencimiento || '',
+          categoria: data.categoria || '',
+          esCargaInicial: !!data.esCargaInicial,
+          ...(deudaAnterior.tipoDeuda === 'generica' ? {
+            tasaInteres: Number(data.tasaInteres) || 0,
+            tasaInteresPeriodo: data.tasaInteresPeriodo || 'mensual',
+            cuotaMinima: Number(data.cuotaMinima) || 0,
+            cupo: Number(data.cupo) || null
+          } : {})
+        };
         const idx = state.deudas.inventario.findIndex(d=>d.id===editId);
         if(idx>-1) state.deudas.inventario[idx] = deuda;
         state.editingDeudaId = null;
-      } else {
-        state.deudas.inventario.push(deuda);
+        await saveKey('deudas', state.deudas);
+        showToast('Deuda actualizada');
+        render();
+        return;
       }
+
+      // Crear nueva — el Tipo de Deuda decide qué campos importan y cómo se arma el cronograma de cuotas.
+      const tipoDeuda = data.tipoDeuda || 'generica';
+      let deuda = null;
+
+      if(tipoDeuda === 'generica'){
+        const montoOriginal = Number(data.montoOriginal) || 0;
+        if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
+        deuda = {
+          id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal,
+          tasaInteres: Number(data.tasaInteres) || 0,
+          tasaInteresPeriodo: data.tasaInteresPeriodo || 'mensual',
+          cuotaMinima: Number(data.cuotaMinima) || 0,
+          fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '',
+          cupo: Number(data.cupo) || null,
+          cronogramaCuotas: null
+        };
+      } else if(tipoDeuda === 'persona'){
+        const montoTotalPersona = Number(data.montoTotalPersona) || 0;
+        if(montoTotalPersona <= 0){ showToast('Ingresa el Monto Total de la Deuda.'); return; }
+        if(data.personaConCuotas){
+          const montoPorCuotaDeseado = Number(data.montoPorCuotaPersona) || 0;
+          if(montoPorCuotaDeseado <= 0){ showToast('Ingresa el Monto por Cuota.'); return; }
+          if(!data.fechaCuota1Persona){ showToast('Elige la Fecha de la Cuota 1.'); return; }
+          // El monto por cuota es aproximado: define cuántas cuotas hacen falta (redondeando hacia arriba),
+          // y el Monto Total se reparte EXACTO entre esa cantidad — cada cuota queda editable después.
+          const numCuotas = Math.ceil(montoTotalPersona / montoPorCuotaDeseado);
+          const cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaCuota1Persona, { montoTotal: montoTotalPersona });
+          deuda = {
+            id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: montoTotalPersona,
+            tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: 0,
+            fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '', cupo: null,
+            cronogramaCuotas
+          };
+        } else {
+          if(!data.fechaCompromisoPersona){ showToast('Elige la Fecha de Pago Comprometida.'); return; }
+          deuda = {
+            id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: montoTotalPersona,
+            tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: 0,
+            fechaVencimiento: data.fechaCompromisoPersona, categoria: data.categoria || '', cupo: null,
+            interesComprometido: Number(data.interesComprometidoPersona) || 0,
+            cronogramaCuotas: null
+          };
+        }
+      } else if(tipoDeuda === 'banco'){
+        const saldoInsolutoBanco = Number(data.saldoInsolutoBanco) || 0;
+        const numCuotas = Math.max(Number(data.cuotasPorPagarBanco)||0, 0);
+        const montoCuotaBanco = Number(data.montoCuotaBanco) || 0;
+        if(saldoInsolutoBanco <= 0){ showToast('Ingresa el Saldo Insoluto.'); return; }
+        if(numCuotas <= 0){ showToast('Ingresa las Cuotas por Pagar.'); return; }
+        if(montoCuotaBanco <= 0){ showToast('Ingresa el Monto Total de la Cuota.'); return; }
+        if(!data.fechaCuota1Banco){ showToast('Elige la Fecha de la Cuota 1.'); return; }
+        const cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaCuota1Banco, { montoPorCuota: montoCuotaBanco });
+        deuda = {
+          id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: saldoInsolutoBanco,
+          tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: montoCuotaBanco,
+          fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '', cupo: null,
+          cronogramaCuotas
+        };
+      }
+      if(!deuda) return;
+      deuda.esCargaInicial = !!data.esCargaInicial;
+      deuda.fechaCreacion = todayISO();
+      deuda.activa = true;
+      state.deudas.inventario.push(deuda);
       await saveKey('deudas', state.deudas);
       showToast(editId ? 'Deuda actualizada' : 'Deuda agregada al inventario');
       render();
@@ -8109,35 +8278,6 @@
       // Acción C: bloqueo explícito — no se toca Tesorería aquí. Eso ocurre solo al "Registrar pago" de esta
       // tarjeta más abajo, cuando pagues la facturación real en el banco.
       showToast('Gasto registrado en Estado de Resultados — tu Cuenta de Operación NO se movió todavía');
-      render();
-    }
-    else if(action === 'submit-pago-interes'){
-      const data = readFields(btn.closest('[data-form="pago-interes"]'));
-      const deuda = state.deudas.inventario.find(d=>d.id===data.deudaId);
-      if(!deuda){ showToast('Elige una deuda.'); return; }
-      const monto = Number(data.monto) || 0;
-      if(!data.fecha){ showToast('Elige una fecha.'); return; }
-      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
-
-      // Es un pago normal donde el 100% es interés (capital: 0) — mismo mecanismo que "Registrar pago", solo
-      // que acá no hay que desglosar nada a mano porque ya sabemos que todo es interés/comisión.
-      const pago = { id: uid('pagodeuda'), deudaId: deuda.id, fecha: data.fecha, montoTotal: monto, capital: 0, interes: monto, cuentaOrigen: data.cuentaOrigen };
-      state.deudas.pagos.push(pago);
-      await saveKey('deudas', state.deudas);
-
-      state.tesoreria.movimientos.push({
-        id: uid('tes'), fecha: data.fecha, boveda: data.cuentaOrigen, tipo:'salida', monto,
-        descripcion: `Interés/Comisión — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
-      });
-      await saveKey('tesoreria', state.tesoreria, {silent:true});
-
-      state.gastos.push({
-        id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO, proveedor: deuda.nombre,
-        descripcion: `Interés/Comisión — ${deuda.nombre}`, monto, metodo: 'Transferencia', origenPagoDeuda: pago.id
-      });
-      await saveKey('gastos', state.gastos);
-
-      showToast('Interés/comisión registrado como Gasto Financiero');
       render();
     }
     else if(action === 'abrir-pago-deuda'){
@@ -8238,27 +8378,35 @@
       const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===cuotaId);
       if(!cuota){ showToast('No se encontró la cuota.'); return; }
       const data = readFields(btn.closest('[data-form="marcar-cuota-pagada"]'));
-      const montoTotal = Number(data.montoTotal) || 0;
       if(!data.fecha){ showToast('Elige la fecha real de pago.'); return; }
-      if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
 
       // Mismas reglas que "Registrar pago": Carga Inicial fuerza Operación sin interés; Persona/Proveedor
-      // nunca tiene interés; Banco pide el interés de ESTA cuota puntual y calcula el capital solo.
-      let capital, interes, cuentaOrigen;
+      // nunca tiene interés; Banco desglosa la cuota FIJA en Capital + Interés Cuota + Interés por Mora.
+      let montoTotal, capital, interes, interesMora, cuentaOrigen;
       if(deuda.esCargaInicial){
-        capital = montoTotal; interes = 0; cuentaOrigen = 'operacion';
-      } else if(deuda.tipoDeudaCronograma === 'banco'){
+        montoTotal = Number(data.montoTotal) || 0;
+        if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
+        capital = montoTotal; interes = 0; interesMora = 0; cuentaOrigen = 'operacion';
+      } else if(deuda.tipoDeuda === 'banco'){
+        // El Monto Total de la Cuota NUNCA cambia — siempre es el que quedó fijado al crear la deuda.
+        montoTotal = cuota.montoEsperado;
+        capital = Number(data.capital) || 0;
         interes = Number(data.interes) || 0;
-        if(interes > montoTotal){ showToast('El interés no puede ser mayor al Monto Pagado.'); return; }
-        capital = montoTotal - interes;
+        interesMora = Number(data.interesMora) || 0;
+        if(capital + interes + interesMora !== montoTotal){
+          showToast(`Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes+interesMora)}.`);
+          return;
+        }
         cuentaOrigen = data.cuentaOrigen;
         if(!cuentaOrigen){ showToast('Elige de qué bóveda sale el pago.'); return; }
       } else {
-        capital = montoTotal; interes = 0; cuentaOrigen = data.cuentaOrigen;
+        montoTotal = Number(data.montoTotal) || 0;
+        if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
+        capital = montoTotal; interes = 0; interesMora = 0; cuentaOrigen = data.cuentaOrigen;
         if(!cuentaOrigen){ showToast('Elige de qué bóveda sale el pago.'); return; }
       }
 
-      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen, cuotaCronogramaId: cuota.id };
+      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, interesMora, cuentaOrigen, cuotaCronogramaId: cuota.id };
       state.deudas.pagos.push(pago);
       cuota.estado = 'Pagada';
       cuota.pagoId = pago.id;
@@ -8277,14 +8425,26 @@
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
+      // Interés Cuota E Interés por Mora van AMBOS a Gastos Financieros — se guardan como líneas separadas
+      // para que quede claro cuál es cuál si Felipe revisa el detalle después.
+      let huboGastoFinanciero = false;
       if(interes > 0){
         state.gastos.push({
           id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO,
           proveedor: deuda.nombre, descripcion: `Interés cuota ${cuota.numero} — ${deuda.nombre}`, monto: interes,
           metodo: 'Transferencia', origenPagoDeuda: pago.id
         });
-        await saveKey('gastos', state.gastos);
+        huboGastoFinanciero = true;
       }
+      if(interesMora > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO,
+          proveedor: deuda.nombre, descripcion: `Interés por mora cuota ${cuota.numero} — ${deuda.nombre}`, monto: interesMora,
+          metodo: 'Transferencia', origenPagoDeuda: pago.id
+        });
+        huboGastoFinanciero = true;
+      }
+      if(huboGastoFinanciero) await saveKey('gastos', state.gastos);
 
       state.marcarCuotaPagadaModal = null;
       if(recienLiquidada){
@@ -8672,27 +8832,28 @@
       const montoMensual = Number(data.montoMensual) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la plantilla.'); return; }
       if(montoMensual <= 0){ showToast('Ingresa el monto mensual.'); return; }
-      // Los % de Dedicación son opcionales — si se dejan en blanco, esta plantilla queda "sin asignar" y
-      // fuera del comparativo de Rentabilidad por Unidad hasta que se completen. Pero si se llena AL MENOS
-      // uno, ambos deben sumar 100% exacto.
-      const tienePctAgencia = data.pctDedicacionAgencia !== '';
-      const tienePctAcademia = data.pctDedicacionAcademia !== '';
-      let pctDedicacionAgencia, pctDedicacionAcademia;
-      if(tienePctAgencia || tienePctAcademia){
-        pctDedicacionAgencia = Number(data.pctDedicacionAgencia) || 0;
-        pctDedicacionAcademia = Number(data.pctDedicacionAcademia) || 0;
-        if(Math.round((pctDedicacionAgencia+pctDedicacionAcademia)*10)/10 !== 100){
-          showToast(`% Dedicación Agencia + Academia deben sumar 100% — hoy suman ${pctDedicacionAgencia+pctDedicacionAcademia}%.`);
+      // Los % de Dedicación son opcionales — si se dejan todos en blanco, esta plantilla queda "sin asignar"
+      // y fuera del comparativo de Rentabilidad por Unidad hasta que se completen. Pero si se llena AL MENOS
+      // uno, los 4 deben sumar 100% exacto entre todos.
+      const algunoLleno = UNIDADES_NEGOCIO.some(u=> data['pct_'+u.id] !== '');
+      const pcts = {};
+      if(algunoLleno){
+        let suma = 0;
+        UNIDADES_NEGOCIO.forEach(u=>{ pcts['pct_'+u.id] = Number(data['pct_'+u.id]) || 0; suma += pcts['pct_'+u.id]; });
+        if(Math.round(suma*10)/10 !== 100){
+          showToast(`Los % de dedicación deben sumar 100% entre las 4 líneas — hoy suman ${suma}%.`);
           return;
         }
+      } else {
+        UNIDADES_NEGOCIO.forEach(u=> pcts['pct_'+u.id] = undefined);
       }
       const editId = state.editingPlantillaId;
       if(editId){
         const idx = state.plantillasGastosFijos.findIndex(p=>p.id===editId);
-        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual, pctDedicacionAgencia, pctDedicacionAcademia };
+        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual, ...pcts };
         state.editingPlantillaId = null;
       } else {
-        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, pctDedicacionAgencia, pctDedicacionAcademia, activa:true, fechaCreacion: todayISO() });
+        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, ...pcts, activa:true, fechaCreacion: todayISO() });
       }
       await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
       showToast(editId?'Plantilla actualizada':'Plantilla agregada — se generará su gasto Pendiente la próxima vez que abras la app (o el mes que corresponda)');
@@ -8784,6 +8945,19 @@
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
       if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+
+      // Los % de Unidad de Negocio son opcionales — si se llena AL MENOS uno, los 4 deben sumar 100% exacto.
+      const algunPctLleno = UNIDADES_NEGOCIO.some(u=> data['pct_'+u.id] !== '');
+      if(algunPctLleno){
+        let sumaPct = 0;
+        UNIDADES_NEGOCIO.forEach(u=>{ data['pct_'+u.id] = Number(data['pct_'+u.id]) || 0; sumaPct += data['pct_'+u.id]; });
+        if(Math.round(sumaPct*10)/10 !== 100){
+          showToast(`Los % de Unidad de Negocio deben sumar 100% entre las 4 — hoy suman ${sumaPct}%.`);
+          return;
+        }
+      } else {
+        UNIDADES_NEGOCIO.forEach(u=> delete data['pct_'+u.id]);
+      }
 
       // Firewall Histórico: aviso, no bloqueo — si la fecha es anterior al Día Cero, este gasto va a alterar
       // el saldo ACTUAL de Tesorería con un movimiento retroactivo. Se avisa antes de proceder, pero el
