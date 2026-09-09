@@ -777,8 +777,9 @@
   // Procesa UNA línea (ya sea de un lote o de un Ingreso Único): crea su contratoDevengado y genera sus
   // gastos de comisión/anticipo (uno por cuota, mes a mes desde fechaInicioVenta). Devuelve true si generó
   // algún gasto, para saber si hace falta guardar 'gastos' además de 'contratosDevengados'.
-  function procesarLineaDevengada(linea, loteId, tipoCambio){
+  function procesarLineaDevengada(linea, loteId){
     const esUSD = esFormaPagoUSD(linea.formaPago);
+    const tipoCambio = linea.tipoCambio; // por línea, ya no compartido por lote
     const montoTotal = esUSD ? Math.round(linea.montoBruto * tipoCambio) : Math.round(linea.montoBruto);
     // Cada línea usa SU PROPIA fecha de venta (linea.fechaInicio) — ya no un parámetro compartido del lote.
     const fechaIngreso = linea.fechaEvento || linea.fechaInicio;
@@ -834,6 +835,10 @@
     if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return null; }
     if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio de esta línea.'); return null; }
     if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda} de la línea.`); return null; }
+    // El Tipo de Cambio también es por línea — cada una puede haberse cobrado con un dólar distinto. Solo
+    // hace falta si ESTA línea específica paga en USD; si es CLP, nunca se pide ni se guarda.
+    const tipoCambio = esFormaPagoUSD(formaPago) ? (Number(data.tipoCambio) || 0) : null;
+    if(esFormaPagoUSD(formaPago) && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio de esta línea (búscalo o escríbelo a mano) — paga en USD.'); return null; }
     const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
     const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
     const duracionMeses = ti.duracion === 'input' ? Math.min(Math.max(Number(data.duracionMeses)||1, 1), 12) : ti.duracion;
@@ -842,7 +847,7 @@
     const comisionPorCuota = (fp.tieneComision && !ti.comisionBloqueada) ? (Number(data.comisionPorCuota) || 0) : 0;
     const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
     return {
-      id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoIngreso, duracionMeses,
+      id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoIngreso, duracionMeses, tipoCambio,
       // Cada línea guarda SU PROPIA fecha de venta — distintas líneas de un mismo lote pueden haberse vendido
       // en días distintos, así que ya no depende de un campo compartido que se leía solo al confirmar el lote.
       fechaInicio: data.fechaInicio,
@@ -7934,16 +7939,14 @@
       render();
     }
     else if(action === 'registrar-ingreso-unico'){
-      // Atajo de un solo clic: lee la línea (con su propia fecha) del MISMO formulario, y la procesa de
-      // inmediato como un "lote de 1" — sin pasar por el constructor de varias líneas.
+      // Atajo de un solo clic: lee la línea (con su propia fecha y tipo de cambio) del MISMO formulario, y la
+      // procesa de inmediato como un "lote de 1" — sin pasar por el constructor de varias líneas.
       const data = readFields(btn.closest('[data-form="linea-lote"]'));
       const linea = leerYValidarLinea(data);
       if(!linea) return;
-      const tipoCambio = Number(data.tipoCambio) || 0;
-      if(esFormaPagoUSD(linea.formaPago) && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — esta línea paga en USD.'); return; }
 
       const loteId = uid('lote');
-      const seGeneraronGastos = procesarLineaDevengada(linea, loteId, tipoCambio);
+      const seGeneraronGastos = procesarLineaDevengada(linea, loteId);
       await saveKey('contratosDevengados', state.contratosDevengados);
       if(seGeneraronGastos) await saveKey('gastos', state.gastos);
 
@@ -7951,20 +7954,15 @@
       render();
     }
     else if(action === 'confirmar-lote-devengado'){
+      // Ya NO depende de ningún dato compartido del lote — cada línea ya trae su propia fecha y su propio
+      // tipo de cambio (capturados al agregarla). Si todas las líneas están completas, el lote confirma.
       const lineas = (state.loteEnConstruccion && state.loteEnConstruccion.lineas) || [];
       if(lineas.length === 0){ showToast('Agrega al menos una línea al lote antes de confirmar.'); return; }
-      const data = readFields(btn.closest('[data-form="linea-lote"]'));
-      const tipoCambio = Number(data.tipoCambio) || 0;
-      // La fecha ya no es compartida por lote — cada línea trae la suya propia (capturada al agregarla).
-      // El Tipo de Cambio solo hace falta si AL MENOS una línea del lote paga en USD — si todas son CLP
-      // (transferencia o pasarela local), no tiene sentido pedirlo.
-      const necesitaTipoCambio = lineas.some(l => esFormaPagoUSD(l.formaPago));
-      if(necesitaTipoCambio && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — al menos una línea paga en USD.'); return; }
 
       const loteId = uid('lote');
       let seGeneraronGastos = false;
       lineas.forEach(linea=>{
-        if(procesarLineaDevengada(linea, loteId, tipoCambio)) seGeneraronGastos = true;
+        if(procesarLineaDevengada(linea, loteId)) seGeneraronGastos = true;
       });
       await saveKey('contratosDevengados', state.contratosDevengados);
       if(seGeneraronGastos) await saveKey('gastos', state.gastos);
