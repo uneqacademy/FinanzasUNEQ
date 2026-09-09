@@ -1961,6 +1961,7 @@
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
     marcarCuotaPagadaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está marcando pagada
     editarCuotaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está editando (fecha/monto)
+    lineaNegocioExpandida: null, // id de la Línea de Negocio con su tabla anual abierta (acordeón: solo una a la vez)
     contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
     editingContratoId: null,
     loteEnConstruccion: { lineas: [] }, // Lote de Ventas: líneas que se van agregando antes de confirmar el lote completo
@@ -4018,6 +4019,7 @@
         ${(() => {
           const anual = getRentabilidadPorUnidadAnual(anio);
           return UNIDADES_NEGOCIO.map(u=>{
+            const expandida = state.lineaNegocioExpandida === u.id;
             const totalesU = anual.reduce((acc,mes)=>{
               const r = mes[u.id];
               acc.ingresos += r.ingresos; acc.costosDirectos += r.costosDirectos;
@@ -4027,7 +4029,11 @@
             }, { ingresos:0, costosDirectos:0, gastosOperacionales:0, rentabilidadNeta:0, margenBruto:0 });
             return `
           <div class="fa-table-wrap" style="margin-top:10px;">
-            <div class="fa-hint" style="font-weight:700; margin:0 0 4px 0;">${escapeHtml(u.label)}</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin:0 0 6px 0;">
+              <div class="fa-hint" style="font-weight:700; margin:0;">${escapeHtml(u.label)}</div>
+              <button type="button" class="fa-btn ${expandida?'fa-btn-ghost':'fa-btn-primary'}" style="padding:4px 12px; font-size:12px;" data-action="toggle-linea-negocio-tabla" data-linea="${u.id}">${expandida?'Cerrar':'Ver más'}</button>
+            </div>
+            ${!expandida ? '' : `
             <table class="fa-table">
               <thead><tr>
                 <th>Mes</th><th class="num">Ingreso Total</th><th class="num">% Ingresos</th><th class="num">Costos Directos</th>
@@ -4063,6 +4069,7 @@
                 </tr>
               </tbody>
             </table>
+            `}
           </div>
         `;}).join('');
         })()}
@@ -8300,6 +8307,13 @@
     }
     else if(action === 'cerrar-editar-cuota-cronograma'){
       state.editarCuotaModal = null;
+      render();
+    }
+    else if(action === 'toggle-linea-negocio-tabla'){
+      const linea = btn.dataset.linea;
+      // Acordeón: si ya estaba abierta esta misma, se cierra; si era otra (o ninguna), se abre esta y
+      // cualquier otra que estuviera abierta se reemplaza sola (solo una tabla visible a la vez).
+      state.lineaNegocioExpandida = (state.lineaNegocioExpandida === linea) ? null : linea;
       render();
     }
     else if(action === 'cerrar-celebracion-deuda'){
