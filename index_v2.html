@@ -713,6 +713,41 @@
     state.deudas.inventario = state.deudas.inventario.filter(d=>d.id!==deudaId);
   }
 
+  // Genera el Cronograma de Cuotas de una deuda: 'montoTotal' se reparte en partes iguales (Persona/Proveedor
+  // repactada, la última cuota absorbe el redondeo), o 'montoPorCuota' se repite fijo en cada una (Banco, tal
+  // como Felipe ya conoce por su cartola). Ambas quedan mensuales y consecutivas desde fechaInicio.
+  function generarCronogramaCuotas(numCuotas, fechaInicio, opts){
+    const inicio = new Date(fechaInicio+'T00:00:00');
+    const cuotas = [];
+    let montos;
+    if(opts.montoTotal !== undefined){
+      const base = Math.round(opts.montoTotal / numCuotas);
+      montos = Array.from({length:numCuotas}, ()=> base);
+      const suma = base*numCuotas;
+      montos[numCuotas-1] += (opts.montoTotal - suma);
+    } else {
+      montos = Array.from({length:numCuotas}, ()=> opts.montoPorCuota);
+    }
+    for(let i=0;i<numCuotas;i++){
+      const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, inicio.getDate());
+      cuotas.push({
+        id: uid('cuota'),
+        numero: i+1,
+        fechaEsperada: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,
+        montoEsperado: montos[i],
+        estado: 'Pendiente',
+        pagoId: null
+      });
+    }
+    return cuotas;
+  }
+
+  // Una cuota del cronograma se muestra "Atrasada" si sigue Pendiente y su fecha esperada ya pasó — es un
+  // estado calculado al vuelo (nunca se guarda), así que se corrige solo apenas se paga o cambia el día.
+  function esCuotaAtrasada(cuota){
+    return cuota.estado === 'Pendiente' && cuota.fechaEsperada < todayISO();
+  }
+
   // ---- Cuentas por Pagar (sección aparte de Deudas — nacen de gastos pagados parcialmente, sin interés) ----
   function getSaldoCtaPorPagar(ctaId){
     const cta = state.cuentasPorPagar.items.find(c=>c.id===ctaId);
@@ -732,10 +767,11 @@
   // Procesa UNA línea (ya sea de un lote o de un Ingreso Único): crea su contratoDevengado y genera sus
   // gastos de comisión/anticipo (uno por cuota, mes a mes desde fechaInicioVenta). Devuelve true si generó
   // algún gasto, para saber si hace falta guardar 'gastos' además de 'contratosDevengados'.
-  function procesarLineaDevengada(linea, loteId, fechaInicioVenta, tipoCambio){
+  function procesarLineaDevengada(linea, loteId, tipoCambio){
     const esUSD = esFormaPagoUSD(linea.formaPago);
     const montoTotal = esUSD ? Math.round(linea.montoBruto * tipoCambio) : Math.round(linea.montoBruto);
-    const fechaIngreso = linea.fechaEvento || fechaInicioVenta;
+    // Cada línea usa SU PROPIA fecha de venta (linea.fechaInicio) — ya no un parámetro compartido del lote.
+    const fechaIngreso = linea.fechaEvento || linea.fechaInicio;
     const contratoId = uid('contrato');
     state.contratosDevengados.push({
       id: contratoId, loteId, nombre: linea.nombre, montoTotal,
@@ -743,7 +779,7 @@
       tipoCambio: esUSD ? tipoCambio : null,
       formaPago: linea.formaPago || 'usd',
       tipoIngreso: linea.tipoIngreso, duracionMeses: linea.duracionMeses,
-      fechaInicio: fechaIngreso, fechaVentaLote: fechaInicioVenta, fechaCreacion: todayISO(),
+      fechaInicio: fechaIngreso, fechaVentaLote: linea.fechaInicio, fechaCreacion: todayISO(),
       numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
       anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD
     });
@@ -753,7 +789,7 @@
       ? Math.round((Number(linea.comisionPorCuota)||0) * tipoCambio)
       : Math.round(Number(linea.comisionPorCuota)||0);
     const anticipoPorCuotaCLP = esUSD ? Math.round((Number(linea.anticipoPorCuotaUSD)||0) * tipoCambio) : 0;
-    const inicio = new Date(fechaInicioVenta+'T00:00:00');
+    const inicio = new Date(linea.fechaInicio+'T00:00:00');
     let seGeneraronGastos = false;
     for(let i=0; i<numCuotas; i++){
       const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
@@ -786,6 +822,7 @@
     const fp = FORMAS_PAGO_LINEA.find(f=>f.id===formaPago) || FORMAS_PAGO_LINEA[0];
     const montoBruto = Number(data.montoBruto) || 0;
     if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return null; }
+    if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio de esta línea.'); return null; }
     if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda} de la línea.`); return null; }
     const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
     const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
@@ -796,6 +833,9 @@
     const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
     return {
       id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoIngreso, duracionMeses,
+      // Cada línea guarda SU PROPIA fecha de venta — distintas líneas de un mismo lote pueden haberse vendido
+      // en días distintos, así que ya no depende de un campo compartido que se leía solo al confirmar el lote.
+      fechaInicio: data.fechaInicio,
       fechaEvento: ti.usaFechaEvento ? data.fechaEvento : null,
       numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
     };
@@ -1890,6 +1930,8 @@
     // nunca se guarda como campo fijo, para que nunca se desincronice de los pagos reales.
     deudas: { inventario: [], pagos: [], giros: [] },
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
+    marcarCuotaPagadaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está marcando pagada
+    editarCuotaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está editando (fecha/monto)
     contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
     editingContratoId: null,
     loteEnConstruccion: { lineas: [] }, // Lote de Ventas: líneas que se van agregando antes de confirmar el lote completo
@@ -2104,7 +2146,7 @@
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','submit-pago-interes','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
-    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
@@ -3454,6 +3496,36 @@
   //   (disabled) con ese valor ya preseleccionado — así siempre queda claro cuánto dura, sin poder tocarlo.
   // - Si usaFechaEvento, muestra el campo "Fecha del Evento" (el ingreso cuenta ahí, no en la venta).
   // - Si comisionBloqueada ("Dinero Limpio"), deshabilita y fuerza en 0 la Comisión por Cuota.
+  // Muestra los campos correctos según el Tipo de Deuda elegido al crearla: Persona/Proveedor pregunta si se
+  // repactó en cuotas (opcional); Banco siempre pide el cronograma directo (número de cuotas restantes).
+  window.faToggleTipoDeudaCronograma = function(){
+    const tipo = document.getElementById('fa-deuda-tipo-cronograma');
+    const personaWrap = document.getElementById('fa-deuda-persona-wrap');
+    const cuotasWrap = document.getElementById('fa-deuda-cuotas-wrap');
+    const numCuotasLabel = document.getElementById('fa-deuda-num-cuotas-label');
+    const cuotasHint = document.getElementById('fa-deuda-cuotas-hint');
+    const repactada = document.getElementById('fa-deuda-repactada');
+    if(!tipo) return;
+    personaWrap.style.display = tipo.value === 'persona' ? '' : 'none';
+    if(tipo.value === 'banco'){
+      cuotasWrap.style.display = '';
+      numCuotasLabel.textContent = 'Número de Cuotas Restantes';
+      cuotasHint.textContent = 'La "Cuota Mínima Mensual" de arriba se usa tal cual, fija, en cada una de estas cuotas — al pagarlas, ingresas cuánto de esa cuota es interés y el sistema separa el capital solo.';
+    } else if(tipo.value === 'persona'){
+      cuotasWrap.style.display = (repactada && repactada.checked) ? '' : 'none';
+      numCuotasLabel.textContent = 'Número de Cuotas';
+      cuotasHint.textContent = 'El "Monto Total Adeudado" de arriba se reparte en partes iguales entre las cuotas — puedes editar cada una después si no calzan exacto. Estas deudas no llevan interés.';
+    } else {
+      cuotasWrap.style.display = 'none';
+    }
+  };
+  window.faToggleRepactada = function(){
+    const repactada = document.getElementById('fa-deuda-repactada');
+    const cuotasWrap = document.getElementById('fa-deuda-cuotas-wrap');
+    if(!repactada || !cuotasWrap) return;
+    cuotasWrap.style.display = repactada.checked ? '' : 'none';
+  };
+
   window.faToggleTipoIngresoLinea = function(){
     const select = document.getElementById('fa-linea-tipo-ingreso');
     const duracionInput = document.getElementById('fa-linea-duracion-input');
@@ -3565,6 +3637,8 @@
       ${renderConfirmModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
+      ${renderMarcarCuotaPagadaModal()}
+      ${renderEditarCuotaModal()}
       ${renderProcesarGastoModal()}
       ${renderPagarSaldoCtaPorPagarModal()}
       ${renderCuotaAtrasadaModal()}
@@ -4059,7 +4133,7 @@
         ${lote.lineas.length>0 ? `
         <div class="fa-table-wrap" style="margin:14px 0;">
           <table class="fa-table">
-            <thead><tr><th>Proyecto/Cliente</th><th>Forma de Pago</th><th>Tipo</th><th>Duración</th><th class="num">Monto</th><th>Cuotas</th><th></th></tr></thead>
+            <thead><tr><th>Proyecto/Cliente</th><th>Fecha</th><th>Forma de Pago</th><th>Tipo</th><th>Duración</th><th class="num">Monto</th><th>Cuotas</th><th></th></tr></thead>
             <tbody>
               ${lote.lineas.map((l,i)=>{
                 const fp = FORMAS_PAGO_LINEA.find(f=>f.id===l.formaPago) || FORMAS_PAGO_LINEA[0];
@@ -4067,6 +4141,7 @@
                 return `
                 <tr>
                   <td>${escapeHtml(l.nombre)}</td>
+                  <td>${fmtDate(l.fechaInicio)}</td>
                   <td>${fp.moneda}</td>
                   <td>${escapeHtml(ti.label)}${l.fechaEvento?` (evento: ${fmtDate(l.fechaEvento)})`:''}</td>
                   <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
@@ -4075,7 +4150,7 @@
                   <td><button class="fa-icon-btn danger" data-action="quitar-linea-lote" data-index="${i}">Quitar</button></td>
                 </tr>
               `;}).join('')}
-              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="4">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSD(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
+              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="5">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSD(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
             </tbody>
           </table>
         </div>
@@ -4347,6 +4422,25 @@
                   </div>
                 `).join('')}
               </div>` : ''}
+              ${(d.cronogramaCuotas&&d.cronogramaCuotas.length>0) ? `
+              <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
+                <div style="font-size:12px; font-weight:700; margin-bottom:6px;">📅 Cronograma de Cuotas${d.tipoDeudaCronograma==='banco'?' (Banco)':' (Persona/Proveedor)'}</div>
+                ${d.cronogramaCuotas.map(c=>{
+                  const atrasada = esCuotaAtrasada(c);
+                  const colorEstado = c.estado==='Pagada' ? 'var(--income)' : (atrasada ? 'var(--expense)' : 'var(--ink-soft)');
+                  const labelEstado = c.estado==='Pagada' ? '✓ Pagada' : (atrasada ? '⚠️ Atrasada' : 'Pendiente');
+                  return `
+                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; margin-bottom:4px; gap:6px;">
+                    <span>Cuota ${c.numero} — ${fmtDate(c.fechaEsperada)} — ${fmtMoney(c.montoEsperado)} — <strong style="color:${colorEstado};">${labelEstado}</strong></span>
+                    ${c.estado==='Pendiente' ? `
+                    <span style="display:flex; gap:4px; flex-shrink:0;">
+                      <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px;" data-action="abrir-editar-cuota-cronograma" data-id="${d.id}" data-cuota="${c.id}">Editar</button>
+                      <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px; background:var(--income); color:#fff;" data-action="abrir-marcar-cuota-pagada" data-id="${d.id}" data-cuota="${c.id}">Marcar pagada</button>
+                    </span>
+                    ` : ''}
+                  </div>
+                `;}).join('')}
+              </div>` : ''}
               <div class="fa-form-actions" style="margin-top:12px;">
                 <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
                 <button type="button" class="fa-btn fa-btn-ghost" data-action="abrir-cuota-atrasada" data-id="${d.id}">⚠️ Cuota atrasada</button>
@@ -4514,6 +4608,28 @@
             <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito" value="${editingD?escapeHtml(editingD.categoria||''):''}"></div>
             <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica" value="${editingD&&editingD.cupo?editingD.cupo:''}"></div>
           </div>
+          ${!state.editingDeudaId ? `
+          <div class="fa-field" style="max-width:320px; margin-top:8px;"><label>Tipo de Deuda</label>
+            <select name="tipoDeudaCronograma" id="fa-deuda-tipo-cronograma" onchange="window.faToggleTipoDeudaCronograma()">
+              <option value="">Genérica (sin cronograma de cuotas)</option>
+              <option value="persona">Persona / Proveedor</option>
+              <option value="banco">Banco</option>
+            </select>
+          </div>
+          <div id="fa-deuda-persona-wrap" style="display:none; margin-top:8px;">
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="checkbox" name="repactadaEnCuotas" id="fa-deuda-repactada" onchange="window.faToggleRepactada()">
+              ¿Se repactó en cuotas?
+            </label>
+          </div>
+          <div id="fa-deuda-cuotas-wrap" style="display:none; margin-top:8px;">
+            <div class="fa-form-grid">
+              <div class="fa-field"><label id="fa-deuda-num-cuotas-label">Número de Cuotas</label><input type="number" name="numeroCuotasCronograma" min="1" step="1" placeholder="Ej: 6"></div>
+              <div class="fa-field"><label>Fecha de Inicio (primera cuota)</label><input type="date" name="fechaInicioCronograma" value="${todayISO()}"></div>
+            </div>
+            <div class="fa-hint" id="fa-deuda-cuotas-hint">El monto total ("Monto Total Adeudado" arriba) se reparte en partes iguales entre las cuotas — puedes editar cada una después si no calzan exacto.</div>
+          </div>
+          ` : ''}
           <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:8px;">
             <input type="checkbox" name="esCargaInicial" ${editingD&&editingD.esCargaInicial?'checked':''}>
             Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
@@ -4566,6 +4682,77 @@
             <div class="fa-modal-actions">
               <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-pago-deuda">Cancelar</button>
               <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-deuda" data-id="${deuda.id}">Confirmar pago</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "Marcar cuota pagada" — Persona/Proveedor no pide interés (siempre capital=100%); Banco pide el
+  // interés de ESA cuota específica y calcula el capital solo (monto esperado - interés). Si la deuda además
+  // es Carga Inicial, se fuerza Operación y sin interés, igual que en "Registrar pago".
+  function renderMarcarCuotaPagadaModal(){
+    const m = state.marcarCuotaPagadaModal;
+    if(!m) return '';
+    const deuda = state.deudas.inventario.find(d=>d.id===m.deudaId);
+    if(!deuda) return '';
+    const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===m.cuotaId);
+    if(!cuota) return '';
+    const pideInteres = deuda.tipoDeudaCronograma === 'banco' && !deuda.esCargaInicial;
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-marcar-cuota-pagada">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">Marcar Cuota ${cuota.numero} pagada — ${escapeHtml(deuda.nombre)}</div>
+          <div class="fa-hint" style="margin-top:0;">Monto esperado: ${fmtMoneyC(cuota.montoEsperado)} (vencía ${fmtDate(cuota.fechaEsperada)})</div>
+          <div data-form="marcar-cuota-pagada">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha real de pago</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" value="${cuota.montoEsperado}"></div>
+            ${pideInteres ? `
+            <div class="fa-field"><label>¿Cuánto de esta cuota es INTERÉS?</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
+            <div class="fa-hint">El capital se calcula solo: Monto Pagado − Interés.</div>
+            ` : `
+            <div class="fa-hint">${deuda.esCargaInicial ? 'Carga Inicial de Pasivos — sin interés, el 100% reduce el saldo.' : 'Esta deuda no lleva interés — el 100% de lo pagado reduce el saldo.'}</div>
+            `}
+            ${deuda.esCargaInicial ? `
+            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label><input type="text" value="Operación (fija — las Cargas Iniciales siempre pagan de ahí)" disabled style="background:#F1F2F4;"></div>
+            ` : `
+            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label>
+              <select name="cuentaOrigen">
+                <option value="operacion">Operación (cuota mínima)</option>
+                <option value="ganancia">Ganancia (abono extra, Bola de Nieve)</option>
+              </select>
+            </div>
+            `}
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-marcar-cuota-pagada">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-marcar-cuota-pagada" data-id="${deuda.id}" data-cuota="${cuota.id}">Confirmar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "Editar cuota" — ajusta fecha/monto de UNA cuota Pendiente del cronograma (por si el reparto en
+  // partes iguales no calzó exacto con lo pactado, o cambió la fecha).
+  function renderEditarCuotaModal(){
+    const m = state.editarCuotaModal;
+    if(!m) return '';
+    const deuda = state.deudas.inventario.find(d=>d.id===m.deudaId);
+    if(!deuda) return '';
+    const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===m.cuotaId);
+    if(!cuota) return '';
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-editar-cuota-cronograma">
+        <div class="fa-modal" data-action="confirm-noop">
+          <div class="fa-modal-title">Editar Cuota ${cuota.numero} — ${escapeHtml(deuda.nombre)}</div>
+          <div data-form="editar-cuota-cronograma">
+            <div class="fa-field" style="margin-bottom:10px;"><label>Fecha Esperada</label><input type="date" name="fechaEsperada" value="${cuota.fechaEsperada}"></div>
+            <div class="fa-field"><label>Monto Esperado</label><input type="number" name="montoEsperado" min="0" step="1" value="${cuota.montoEsperado}"></div>
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-editar-cuota-cronograma">Cancelar</button>
+              <button type="button" class="fa-btn fa-btn-primary" data-action="submit-editar-cuota-cronograma" data-id="${deuda.id}" data-cuota="${cuota.id}">Guardar</button>
             </div>
           </div>
         </div>
@@ -7621,17 +7808,16 @@
       render();
     }
     else if(action === 'registrar-ingreso-unico'){
-      // Atajo de un solo clic: lee la línea Y los datos de fecha/tipo de cambio del MISMO formulario, y la
-      // procesa de inmediato como un "lote de 1" — sin pasar por el constructor de varias líneas.
+      // Atajo de un solo clic: lee la línea (con su propia fecha) del MISMO formulario, y la procesa de
+      // inmediato como un "lote de 1" — sin pasar por el constructor de varias líneas.
       const data = readFields(btn.closest('[data-form="linea-lote"]'));
       const linea = leerYValidarLinea(data);
       if(!linea) return;
       const tipoCambio = Number(data.tipoCambio) || 0;
-      if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio (fecha de la venta).'); return; }
       if(esFormaPagoUSD(linea.formaPago) && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — esta línea paga en USD.'); return; }
 
       const loteId = uid('lote');
-      const seGeneraronGastos = procesarLineaDevengada(linea, loteId, data.fechaInicio, tipoCambio);
+      const seGeneraronGastos = procesarLineaDevengada(linea, loteId, tipoCambio);
       await saveKey('contratosDevengados', state.contratosDevengados);
       if(seGeneraronGastos) await saveKey('gastos', state.gastos);
 
@@ -7643,7 +7829,7 @@
       if(lineas.length === 0){ showToast('Agrega al menos una línea al lote antes de confirmar.'); return; }
       const data = readFields(btn.closest('[data-form="linea-lote"]'));
       const tipoCambio = Number(data.tipoCambio) || 0;
-      if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio del lote.'); return; }
+      // La fecha ya no es compartida por lote — cada línea trae la suya propia (capturada al agregarla).
       // El Tipo de Cambio solo hace falta si AL MENOS una línea del lote paga en USD — si todas son CLP
       // (transferencia o pasarela local), no tiene sentido pedirlo.
       const necesitaTipoCambio = lineas.some(l => esFormaPagoUSD(l.formaPago));
@@ -7652,7 +7838,7 @@
       const loteId = uid('lote');
       let seGeneraronGastos = false;
       lineas.forEach(linea=>{
-        if(procesarLineaDevengada(linea, loteId, data.fechaInicio, tipoCambio)) seGeneraronGastos = true;
+        if(procesarLineaDevengada(linea, loteId, tipoCambio)) seGeneraronGastos = true;
       });
       await saveKey('contratosDevengados', state.contratosDevengados);
       if(seGeneraronGastos) await saveKey('gastos', state.gastos);
@@ -7824,6 +8010,29 @@
       if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
       const editId = state.editingDeudaId;
       const deudaAnterior = editId ? state.deudas.inventario.find(d=>d.id===editId) : null;
+
+      // Cronograma de Cuotas: solo aplica al CREAR una deuda nueva (no al editar una ya existente, para no
+      // arriesgar pisar cuotas que ya se pagaron). Persona/Proveedor reparte el total en partes iguales sin
+      // interés; Banco repite fija la Cuota Mínima Mensual, con interés que se ingresa cuota por cuota al
+      // pagarlas (no acá).
+      let cronogramaCuotas = null;
+      let tipoDeudaCronograma = '';
+      if(!editId && data.tipoDeudaCronograma){
+        const numCuotas = Math.max(Number(data.numeroCuotasCronograma)||0, 0);
+        if(data.tipoDeudaCronograma === 'persona' && data.repactadaEnCuotas){
+          if(numCuotas <= 0){ showToast('Ingresa el número de cuotas de la repactación.'); return; }
+          if(!data.fechaInicioCronograma){ showToast('Elige la fecha de inicio de la primera cuota.'); return; }
+          cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaInicioCronograma, { montoTotal: montoOriginal });
+          tipoDeudaCronograma = 'persona';
+        } else if(data.tipoDeudaCronograma === 'banco'){
+          if(numCuotas <= 0){ showToast('Ingresa el número de cuotas restantes.'); return; }
+          if(!data.fechaInicioCronograma){ showToast('Elige la fecha de inicio de la próxima cuota.'); return; }
+          if(cuotaMinima <= 0){ showToast('Ingresa el Monto de la Cuota Mensual (campo "Cuota Mínima Mensual" arriba).'); return; }
+          cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaInicioCronograma, { montoPorCuota: cuotaMinima });
+          tipoDeudaCronograma = 'banco';
+        }
+      }
+
       const deuda = {
         id: editId || uid('deuda'),
         nombre: data.nombre,
@@ -7836,7 +8045,8 @@
         cupo: Number(data.cupo) || null, // solo relevante para tarjetas/líneas de crédito — si no se define, el Dashboard usa montoOriginal como aproximación
         esCargaInicial: !!data.esCargaInicial, // deuda de arrastre: sus pagos siempre salen de Operación y nunca generan Gasto Financiero
         fechaCreacion: editId ? deudaAnterior.fechaCreacion : todayISO(),
-        activa: editId ? deudaAnterior.activa : true // al editar, no se reactiva sola ni se desactiva sola
+        activa: editId ? deudaAnterior.activa : true, // al editar, no se reactiva sola ni se desactiva sola
+        ...(editId ? {} : { tipoDeudaCronograma, cronogramaCuotas })
       };
       if(editId){
         const idx = state.deudas.inventario.findIndex(d=>d.id===editId);
@@ -7938,6 +8148,22 @@
       state.pagoDeudaModal = null;
       render();
     }
+    else if(action === 'abrir-marcar-cuota-pagada'){
+      state.marcarCuotaPagadaModal = { deudaId: btn.dataset.id, cuotaId: btn.dataset.cuota };
+      render();
+    }
+    else if(action === 'cerrar-marcar-cuota-pagada'){
+      state.marcarCuotaPagadaModal = null;
+      render();
+    }
+    else if(action === 'abrir-editar-cuota-cronograma'){
+      state.editarCuotaModal = { deudaId: btn.dataset.id, cuotaId: btn.dataset.cuota };
+      render();
+    }
+    else if(action === 'cerrar-editar-cuota-cronograma'){
+      state.editarCuotaModal = null;
+      render();
+    }
     else if(action === 'cerrar-celebracion-deuda'){
       state.deudaRecienLiquidada = null;
       render();
@@ -8002,6 +8228,89 @@
       } else {
         showToast('Pago registrado');
       }
+      render();
+    }
+    else if(action === 'submit-marcar-cuota-pagada'){
+      const deudaId = btn.dataset.id;
+      const cuotaId = btn.dataset.cuota;
+      const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+      if(!deuda) return;
+      const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===cuotaId);
+      if(!cuota){ showToast('No se encontró la cuota.'); return; }
+      const data = readFields(btn.closest('[data-form="marcar-cuota-pagada"]'));
+      const montoTotal = Number(data.montoTotal) || 0;
+      if(!data.fecha){ showToast('Elige la fecha real de pago.'); return; }
+      if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
+
+      // Mismas reglas que "Registrar pago": Carga Inicial fuerza Operación sin interés; Persona/Proveedor
+      // nunca tiene interés; Banco pide el interés de ESTA cuota puntual y calcula el capital solo.
+      let capital, interes, cuentaOrigen;
+      if(deuda.esCargaInicial){
+        capital = montoTotal; interes = 0; cuentaOrigen = 'operacion';
+      } else if(deuda.tipoDeudaCronograma === 'banco'){
+        interes = Number(data.interes) || 0;
+        if(interes > montoTotal){ showToast('El interés no puede ser mayor al Monto Pagado.'); return; }
+        capital = montoTotal - interes;
+        cuentaOrigen = data.cuentaOrigen;
+        if(!cuentaOrigen){ showToast('Elige de qué bóveda sale el pago.'); return; }
+      } else {
+        capital = montoTotal; interes = 0; cuentaOrigen = data.cuentaOrigen;
+        if(!cuentaOrigen){ showToast('Elige de qué bóveda sale el pago.'); return; }
+      }
+
+      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen, cuotaCronogramaId: cuota.id };
+      state.deudas.pagos.push(pago);
+      cuota.estado = 'Pagada';
+      cuota.pagoId = pago.id;
+
+      const saldoRestante = getSaldoDeuda(deudaId);
+      let recienLiquidada = false;
+      if(saldoRestante <= 0){
+        deuda.activa = false;
+        recienLiquidada = true;
+      }
+      await saveKey('deudas', state.deudas);
+
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda: cuentaOrigen, tipo:'salida', monto: montoTotal,
+        descripcion: `Pago cuota ${cuota.numero} — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      if(interes > 0){
+        state.gastos.push({
+          id: uid('gas'), fecha: data.fecha, categoria: CAT_GASTO_FINANCIERO,
+          proveedor: deuda.nombre, descripcion: `Interés cuota ${cuota.numero} — ${deuda.nombre}`, monto: interes,
+          metodo: 'Transferencia', origenPagoDeuda: pago.id
+        });
+        await saveKey('gastos', state.gastos);
+      }
+
+      state.marcarCuotaPagadaModal = null;
+      if(recienLiquidada){
+        state.deudaRecienLiquidada = { nombre: deuda.nombre };
+        showToast(`¡${deuda.nombre} liquidada!`);
+      } else {
+        showToast(`Cuota ${cuota.numero} marcada como pagada`);
+      }
+      render();
+    }
+    else if(action === 'submit-editar-cuota-cronograma'){
+      const deudaId = btn.dataset.id;
+      const cuotaId = btn.dataset.cuota;
+      const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
+      if(!deuda) return;
+      const cuota = (deuda.cronogramaCuotas||[]).find(c=>c.id===cuotaId);
+      if(!cuota){ showToast('No se encontró la cuota.'); return; }
+      const data = readFields(btn.closest('[data-form="editar-cuota-cronograma"]'));
+      const montoEsperado = Number(data.montoEsperado) || 0;
+      if(!data.fechaEsperada){ showToast('Elige la fecha esperada.'); return; }
+      if(montoEsperado <= 0){ showToast('Ingresa el monto esperado de la cuota.'); return; }
+      cuota.fechaEsperada = data.fechaEsperada;
+      cuota.montoEsperado = montoEsperado;
+      await saveKey('deudas', state.deudas);
+      state.editarCuotaModal = null;
+      showToast(`Cuota ${cuota.numero} actualizada`);
       render();
     }
     else if(action === 'asesor-enviar'){
