@@ -8971,10 +8971,12 @@
         UNIDADES_NEGOCIO.forEach(u=> delete data['pct_'+u.id]);
       }
 
-      // Firewall Histórico: aviso, no bloqueo — si la fecha es anterior al Día Cero, este gasto va a alterar
-      // el saldo ACTUAL de Tesorería con un movimiento retroactivo. Se avisa antes de proceder, pero el
-      // usuario decide si de verdad quiere hacerlo.
-      const esHistorico = state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero;
+      // Firewall Histórico: aviso, no bloqueo — SOLO al crear un gasto NUEVO con fecha vieja (ahí sí importa,
+      // porque recién se decide si afecta Tesorería). Al EDITAR uno que ya existe, no se vuelve a preguntar —
+      // así editar cosas como la distribución por Línea de Negocio en gastos históricos no tropieza con este
+      // aviso una y otra vez, ya que eso no toca Tesorería para nada.
+      const esGastoNuevo = !state.editingGastoId;
+      const esHistorico = esGastoNuevo && state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero;
       if(esHistorico){
         state.pendingGastoData = { data: {...data}, editId: state.editingGastoId };
         state.confirmDialog = {
