@@ -530,6 +530,11 @@
   const CAT_COSTO_COMISIONES = "Comisiones de Pasarelas (Stripe/Hotmart)";
   const CAT_COSTO_AFILIADOS = "Pago a Afiliados";
   const CATEGORIAS_COSTO_DIRECTO_DEFAULT = [CAT_COSTO_ADS, CAT_COSTO_COMISIONES, CAT_COSTO_AFILIADOS];
+  // Egresos de Flujo: plata real que sale de alguna bóveda, pero que por diseño NUNCA debe afectar Estado de
+  // Resultados (ni Margen Bruto ni Rentabilidad Neta) — solo importa para Tesorería (Módulo 4) y Gestión de
+  // Deudas (Módulo 5). Ej: retiros de utilidades, pago de impuestos, cuotas de deuda, gastos personales de
+  // los socios que no son costo del negocio.
+  const CATEGORIAS_EGRESO_FLUJO_DEFAULT = ["Pago Convenio TGR", "Pago F29", "Retiro de Utilidades", "Almuerzo Socios", "Estacionamientos", "Almuerzos", "Transporte"];
   // Categorías sugeridas de Gastos Operacionales (estructura fija) — no son una lista cerrada, solo se
   // aseguran de existir como opción; cualquier gasto que no sea Costo Directo ni Gasto Financiero cae acá.
   const CATEGORIAS_OPEX_SUGERIDAS = ["Nómina Equipo", "Sueldo Operativo Socios", "Software/Suscripciones", "Viáticos y Generales"];
@@ -896,6 +901,8 @@
       if(!g.fecha) return;
       const d = new Date(g.fecha+'T00:00:00');
       if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+      if(categoriasEgresoFlujo.includes(g.categoria)) return; // cortafuegos: nunca cuenta en Rentabilidad por Unidad tampoco
       const monto = montoNegocioGasto(g); // respeta no-venta y desglose interés/capital ya construidos
 
       if(g.origenContrato){
@@ -983,6 +990,7 @@
     });
 
     const categoriasCostoDirecto = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
       const d = new Date(g.fecha+'T00:00:00');
@@ -991,6 +999,10 @@
       const monto = montoNegocioGasto(g); // respeta no-venta y el desglose interés/capital ya construidos
       if(monto === 0) return;
       if(g.categoria === CAT_GASTO_FINANCIERO || g.categoria === CAT_GASTO_COSTO_LIQUIDEZ) meses[m].gastosFinancieros += monto;
+      // Egreso de Flujo: cortafuegos activo — nunca cuenta en EERR, sin importar el monto. Es plata real que
+      // sale de la empresa (retiro, impuesto, cuota de deuda, gasto personal), pero no es un costo del
+      // negocio que deba restar del Margen Bruto ni de la Rentabilidad Neta.
+      else if(categoriasEgresoFlujo.includes(g.categoria)) { /* excluido a propósito */ }
       else if(categoriasCostoDirecto.includes(g.categoria)) meses[m].costosDirectos += monto;
       else meses[m].gastosOperacionales += monto;
     });
@@ -2185,7 +2197,7 @@
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
-    'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-metodo',
+    'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
@@ -2522,7 +2534,8 @@
         gastoFinancieroCambio = true;
       }
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
-      CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).forEach(cat=>{
+      if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).concat(CATEGORIAS_EGRESO_FLUJO_DEFAULT).forEach(cat=>{
         if(!state.config.categoriasGastos.includes(cat)){ state.config.categoriasGastos.push(cat); gastoFinancieroCambio = true; }
       });
       if(categoriasNoVentaCambiaron || gastoFinancieroCambio) await saveKey('config', state.config, {silent:true});
@@ -4421,7 +4434,10 @@
                   ${(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
                 <optgroup label="Gastos Operacionales y otros">
-                  ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c)).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
+                  ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c)).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
+                </optgroup>
+                <optgroup label="Egresos de Flujo (no afecta Estado de Resultados)">
+                  ${(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
               </select>
             </div>
@@ -4525,9 +4541,11 @@
               ${filtrados.length===0 ? `<tr><td colspan="7"><div class="fa-empty">Sin gastos para este filtro.</div></td></tr>` : filtrados.map(h=>{
                 const opcionesSubcat = h.tipoElegido==='costoDirecto'
                   ? (state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT)
-                  : h.tipoElegido==='operacional'
-                    ? state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO && c!==CAT_GASTO_COSTO_LIQUIDEZ)
-                    : [];
+                  : h.tipoElegido==='egresoFlujo'
+                    ? (state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT)
+                    : h.tipoElegido==='operacional'
+                      ? state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO && c!==CAT_GASTO_COSTO_LIQUIDEZ)
+                      : [];
                 return `
                 <tr style="${h.agregado?'opacity:0.55;':''}">
                   <td>${fmtDate(h.fecha)}</td>
@@ -4539,6 +4557,7 @@
                       <option value="">— Elige —</option>
                       <option value="operacional" ${h.tipoElegido==='operacional'?'selected':''}>Gasto Operacional</option>
                       <option value="costoDirecto" ${h.tipoElegido==='costoDirecto'?'selected':''}>Costo Directo</option>
+                      <option value="egresoFlujo" ${h.tipoElegido==='egresoFlujo'?'selected':''}>Egreso de Flujo</option>
                     </select>
                   </td>
                   <td>
@@ -4730,7 +4749,9 @@
         const tarjetasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Tarjeta de Crédito');
         const todasActivas = state.deudas.inventario.filter(d=> d.activa);
         const categoriasGasto = (state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).concat(
-          state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO)
+          state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT
+        ).concat(
+          state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO)
         );
         return `
       <div class="fa-card">
@@ -6919,6 +6940,19 @@
       </div>
 
       <div class="fa-card">
+        <div class="fa-card-title">Categorías de Egresos de Flujo</div>
+        <div class="fa-section-note">Plata real que sale de una bóveda pero NO es costo del negocio (retiros, impuestos, cuotas de deuda, gastos personales) — cortafuegos activo: nunca cuenta en Estado de Resultados, solo en Tesorería y Gestión de Deudas.</div>
+        <div class="fa-chip-group">
+          ${(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).map(c=>`<span class="fa-chip">${escapeHtml(c)}<button data-action="remove-cat-egreso-flujo" data-cat="${escapeHtml(c)}">&times;</button></span>`).join('')}
+        </div>
+        <div class="fa-add-chip-row" data-form="add-cat-egreso-flujo">
+          <input type="text" name="nuevaCategoria" placeholder="Nueva subcategoría de Egreso de Flujo">
+          <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-egreso-flujo">Agregar</button>
+        </div>
+        <div class="fa-hint">Si quitas una de aquí, no desaparece de la app — pasa a contar como Gasto Operacional normal (y por lo tanto SÍ empieza a afectar Estado de Resultados).</div>
+      </div>
+
+      <div class="fa-card">
         <div class="fa-card-title">Categorías de Gastos Operacionales</div>
         <div class="fa-section-note">Lo que cuesta mantener viva la empresa, venda o no venda (Nómina, Software, Arriendo, etc.).</div>
         <div class="fa-chip-group">
@@ -7988,8 +8022,6 @@
     else if(action === 'edit-ingreso-pf'){
       state.editingIngresoId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancelar-edicion-ingreso-pf'){
       state.editingIngresoId = null;
@@ -8075,8 +8107,6 @@
     else if(action === 'edit-contrato-devengado'){
       state.editingContratoId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-contrato'){
       state.editingContratoId = null;
@@ -8227,8 +8257,6 @@
     else if(action === 'edit-deuda'){
       state.editingDeudaId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-deuda'){
       state.editingDeudaId = null;
@@ -8758,8 +8786,6 @@
     else if(action === 'edit-ingreso'){
       state.editingIngresoId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-ingreso'){
       state.editingIngresoId = null; render();
@@ -8791,8 +8817,6 @@
     else if(action === 'edit-gasto'){
       state.editingGastoId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-gasto'){
       state.editingGastoId = null; render();
@@ -8801,8 +8825,6 @@
       state.editingUSDMovId = btn.dataset.id;
       state.editingUSDMovTipo = btn.dataset.tipo;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-usd-mov'){
       state.editingUSDMovId = null;
@@ -8844,13 +8866,13 @@
       const id = btn.dataset.id;
       const h = (state.importacionHistorica||[]).find(x=>x.id===id);
       if(!h) return;
-      if(!h.tipoElegido){ showToast('Elige el Tipo (Gasto Operacional o Costo Directo).'); return; }
+      if(!h.tipoElegido){ showToast('Elige el Tipo (Gasto Operacional, Costo Directo o Egreso de Flujo).'); return; }
       if(!h.subcategoriaElegida){ showToast('Elige la Subcategoría.'); return; }
 
       // Todos van a la bóveda Operación por defecto (son históricos, anteriores al Día Cero, así que el
       // Firewall los excluye automáticamente de Tesorería y Flujo de Caja actuales — solo cuentan en Estado
-      // de Resultados). La distribución por Línea de Negocio queda sin asignar; se puede completar después
-      // editando el gasto ya creado, igual que cualquier otro.
+      // de Resultados, salvo que sean Egreso de Flujo, que por diseño nunca cuenta ahí). La distribución por
+      // Línea de Negocio queda sin asignar; se puede completar después editando el gasto ya creado.
       const nuevoGasto = {
         id: uid('gas'), fecha: h.fecha, categoria: h.subcategoriaElegida,
         proveedor: h.proveedor||'', descripcion: h.descripcion||'', monto: h.monto,
@@ -8864,7 +8886,7 @@
       h.agregado = true;
       h.gastoRealId = nuevoGasto.id;
       await saveKey('importacionHistorica', state.importacionHistorica);
-      showToast('Gasto agregado a Estado de Resultados');
+      showToast(h.tipoElegido==='egresoFlujo' ? 'Gasto agregado como Egreso de Flujo — no afecta Estado de Resultados' : 'Gasto agregado a Estado de Resultados');
       render();
     }
     else if(action === 'delete-gasto'){
@@ -8931,8 +8953,6 @@
     else if(action === 'edit-pf'){
       state.editingPFId = btn.dataset.id;
       render();
-      const card = root.querySelector('.fa-card');
-      if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
     }
     else if(action === 'cancel-edit-pf'){
       state.editingPFId = null; render();
@@ -9478,6 +9498,29 @@
         state.config.categoriasCostoDirecto = state.config.categoriasCostoDirecto.filter(c=>c!==cat);
         await saveKey('config', state.config);
         showToast('Ahora cuenta como Gasto Operacional en vez de Costo Directo');
+        render();
+      }
+    }
+    else if(action === 'add-cat-egreso-flujo'){
+      const data = readFields(btn.closest('[data-form="add-cat-egreso-flujo"]'));
+      const val = (data.nuevaCategoria||'').trim();
+      if(!val){ showToast('Escribe el nombre de la subcategoría.'); return; }
+      if(!state.config.categoriasEgresoFlujo) state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice();
+      let cambio = false;
+      if(!state.config.categoriasGastos.includes(val)){ state.config.categoriasGastos.push(val); cambio = true; }
+      if(!state.config.categoriasEgresoFlujo.includes(val)){ state.config.categoriasEgresoFlujo.push(val); cambio = true; }
+      if(cambio){
+        await saveKey('config', state.config);
+        showToast('Subcategoría de Egreso de Flujo agregada');
+        render();
+      }
+    }
+    else if(action === 'remove-cat-egreso-flujo'){
+      const cat = btn.dataset.cat;
+      if(state.config.categoriasEgresoFlujo){
+        state.config.categoriasEgresoFlujo = state.config.categoriasEgresoFlujo.filter(c=>c!==cat);
+        await saveKey('config', state.config);
+        showToast('Ahora cuenta como Gasto Operacional normal (sí afecta Estado de Resultados)');
         render();
       }
     }
