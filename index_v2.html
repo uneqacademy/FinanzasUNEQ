@@ -1980,6 +1980,7 @@
     // automáticamente cuando un gasto se paga parcialmente.
     cuentasPorPagar: { items: [], pagos: [] },
     importacionHistorica: [],
+    pagosImpuestos: [], // Pago de Impuestos / F29 — Liquidación de Pasivo Fiduciario, nunca pasa por Gastos
     pagandoCtaPorPagarId: null,
     registrandoCuotaAtrasadaId: null, // qué deuda de crédito se le está registrando una cuota atrasada
     pendingGastoData: null, // gasto en espera de confirmación cuando su fecha es anterior al Día Cero (Firewall Histórico)
@@ -2182,7 +2183,7 @@
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
-    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
@@ -2491,6 +2492,7 @@
       const plantillasGastosFijos = await loadKeySeeded('plantillasGastosFijos', []);
       const cuentasPorPagar = await loadKeySeeded('cuentasPorPagar', { items: [], pagos: [] });
       const importacionHistorica = await loadKeySeeded('importacionHistorica', SEED_IMPORTACION_HISTORICA);
+      const pagosImpuestos = await loadKeySeeded('pagosImpuestos', []);
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -2543,6 +2545,7 @@
       if(!state.cuentasPorPagar.items) state.cuentasPorPagar.items = [];
       if(!state.cuentasPorPagar.pagos) state.cuentasPorPagar.pagos = [];
       state.importacionHistorica = importacionHistorica || [];
+      state.pagosImpuestos = pagosImpuestos || [];
 
       // Plantilla de Gastos Fijos: al abrir la app, si una plantilla activa no tiene todavía su gasto del
       // mes en curso, se genera automáticamente en estado "Pendiente" — no hay servidor que lo haga solo un
@@ -6584,6 +6587,49 @@
       </div>
 
       <div class="fa-card">
+        <div class="fa-card-title">💰 Pago de Impuestos / F29</div>
+        <div class="fa-section-note">Se registra como Liquidación de Pasivo Fiduciario — reduce el saldo de la bóveda que elijas, pero NUNCA se guarda como Gasto. Nunca va a aparecer en Estado de Resultados ni va a alterar tu Margen Bruto o Rentabilidad Neta, sin importar de qué bóveda salga.</div>
+        <div data-form="pago-impuesto">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Bóveda de origen</label>
+              <select name="boveda">
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${b.id==='impuestos'?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field"><label>Detalle (opcional)</label><input type="text" name="descripcion" placeholder="Ej: F29 Agosto 2026"></div>
+          </div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-pago-impuesto">Registrar Pago de Impuestos</button>
+          </div>
+        </div>
+        ${(() => {
+          const historial = (state.pagosImpuestos||[]).slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+          if(historial.length===0) return '';
+          return `
+          <div class="fa-table-wrap" style="margin-top:14px;">
+            <table class="fa-table">
+              <thead><tr><th>Fecha</th><th>Bóveda</th><th>Detalle</th><th class="num">Monto</th><th></th></tr></thead>
+              <tbody>
+                ${historial.map(p=>{
+                  const boveda = BOVEDAS.find(b=>b.id===p.boveda);
+                  return `
+                  <tr>
+                    <td>${fmtDate(p.fecha)}</td>
+                    <td>${escapeHtml(boveda?boveda.label:p.boveda)}</td>
+                    <td>${escapeHtml(p.descripcion)||'—'}</td>
+                    <td class="num money">${fmtMoney(p.monto)}</td>
+                    <td><button class="fa-icon-btn" data-action="delete-pago-impuesto" data-id="${p.id}">Eliminar</button></td>
+                  </tr>
+                `;}).join('')}
+              </tbody>
+            </table>
+          </div>`;
+        })()}
+      </div>
+
+      <div class="fa-card">
         <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
         ${BOVEDAS.map(b=>{
           const movs = getMovimientosBoveda(b.id).slice().reverse().slice(0,8);
@@ -7571,6 +7617,14 @@
         }
         render();
       }
+      else if(cd.action === 'do-delete-pago-impuesto'){
+        state.pagosImpuestos = state.pagosImpuestos.filter(p=>p.id!==cd.data);
+        await saveKey('pagosImpuestos', state.pagosImpuestos);
+        state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoimpuesto:${cd.data}`);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+        showToast('Pago de Impuestos eliminado');
+        render();
+      }
       else if(cd.action === 'do-delete-gasto'){
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
         state.gastos = state.gastos.filter(g=>g.id!==cd.data);
@@ -7980,6 +8034,42 @@
       } else {
         showToast('Aporte depositado en Operación');
       }
+      render();
+    }
+    else if(action === 'submit-pago-impuesto'){
+      const data = readFields(btn.closest('[data-form="pago-impuesto"]'));
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      if(!data.boveda){ showToast('Elige de qué bóveda sale este pago.'); return; }
+
+      const pago = {
+        id: uid('f29'), fecha: data.fecha, boveda: data.boveda, monto,
+        descripcion: data.descripcion || ''
+      };
+      state.pagosImpuestos.push(pago);
+      await saveKey('pagosImpuestos', state.pagosImpuestos);
+
+      // Liquidación de Pasivo Fiduciario: reduce el saldo de la bóveda elegida como cualquier salida, pero
+      // NUNCA se crea un registro en state.gastos — por diseño, no por filtro, así que es estructuralmente
+      // imposible que esto llegue a afectar Estado de Resultados (que solo lee de la tabla de Gastos).
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: data.fecha, boveda: data.boveda, tipo:'salida', monto,
+        descripcion: `Liquidación de Pasivo Fiduciario — F29${data.descripcion?`: ${data.descripcion}`:''}`,
+        origen: `pagoimpuesto:${pago.id}`
+      });
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+
+      showToast('Pago de Impuestos registrado — no afecta Estado de Resultados');
+      render();
+    }
+    else if(action === 'delete-pago-impuesto'){
+      state.confirmDialog = {
+        message: '¿Eliminar este Pago de Impuestos? Esta acción no se puede deshacer.',
+        action: 'do-delete-pago-impuesto',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
       render();
     }
     else if(action === 'edit-contrato-devengado'){
