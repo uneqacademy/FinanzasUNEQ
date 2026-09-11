@@ -506,7 +506,7 @@
   // Pasarela/Medio de Pago (Módulo 2 - Ingresos y Distribución): campo puramente informativo, para dejar
   // registrado por dónde entró la plata. El monto siempre es el neto en CLP que aterrizó en el banco — este
   // campo NO dispara ninguna conversión de moneda ni cálculo distinto, solo queda guardado como referencia.
-  const PASARELAS_PAGO = ["Hotmart", "Payoneer", "PayPal", "Transferencia Bancaria", "Flow", "Mercado Pago", "Transbank"];
+  const PASARELAS_PAGO_DEFAULT = ["Hotmart", "Payoneer", "PayPal", "Transferencia Bancaria", "Flow", "Mercado Pago", "Transbank"];
 
   // Categoría de gasto para el interés de los pagos de deuda (Módulo 5) — cuenta como gasto operacional
   // real en Estado de Resultados (NO es no-venta: el interés sí es un costo del negocio, a diferencia del
@@ -782,7 +782,7 @@
   // Procesa UNA línea (ya sea de un lote o de un Ingreso Único): crea su contratoDevengado y genera sus
   // gastos de comisión/anticipo (uno por cuota, mes a mes desde fechaInicioVenta). Devuelve true si generó
   // algún gasto, para saber si hace falta guardar 'gastos' además de 'contratosDevengados'.
-  function procesarLineaDevengada(linea, loteId){
+  function procesarLineaDevengada(linea, loteId, esIngresoUnico){
     const esUSD = esFormaPagoUSD(linea.formaPago);
     const tipoCambio = linea.tipoCambio; // por línea, ya no compartido por lote
     const montoTotal = esUSD ? Math.round(linea.montoBruto * tipoCambio) : Math.round(linea.montoBruto);
@@ -797,7 +797,8 @@
       tipoIngreso: linea.tipoIngreso, duracionMeses: linea.duracionMeses,
       fechaInicio: fechaIngreso, fechaVentaLote: linea.fechaInicio, fechaCreacion: todayISO(),
       numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
-      anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD
+      anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD,
+      esIngresoUnico: !!esIngresoUnico
     });
 
     const numCuotas = Math.max(Number(linea.numeroCuotasPago)||1, 1);
@@ -953,6 +954,44 @@
       meses.push(conPct);
     }
     return meses;
+  }
+
+  // Venta Bruta de un mes, desglosada por Línea de Negocio — mismo criterio que getVentaBrutaMensual (fecha
+  // de venta real, no la de reconocimiento devengado), pero agrupado por unidad en vez del total de la empresa.
+  function getVentaBrutaPorUnidadMensual(anio, mesIdx){
+    const resultado = {};
+    UNIDADES_NEGOCIO.forEach(u=> resultado[u.id] = 0);
+    state.contratosDevengados.forEach(c=>{
+      const unidad = getUnidadNegocio(c.tipoIngreso);
+      if(!unidad) return;
+      const fechaVenta = c.fechaVentaLote || c.fechaInicio;
+      if(!fechaVenta) return;
+      const d = new Date(fechaVenta+'T00:00:00');
+      if(d.getFullYear()===anio && d.getMonth()===mesIdx) resultado[unidad] += Number(c.montoTotal)||0;
+    });
+    return resultado;
+  }
+
+  // Rentabilidad por Unidad de Negocio, pero ACUMULADA de los 12 meses del año — para las 4 tarjetas de
+  // arriba, que ahora muestran el año completo en vez de solo el mes en curso.
+  function getRentabilidadPorUnidadAcumuladaAnio(anio){
+    const resultado = {};
+    UNIDADES_NEGOCIO.forEach(u=> resultado[u.id] = { ingresos:0, costosDirectos:0, gastosOperacionales:0, margenBruto:0, rentabilidadNeta:0 });
+    for(let m=0; m<12; m++){
+      const mes = getRentabilidadPorUnidadMensual(anio, m);
+      UNIDADES_NEGOCIO.forEach(u=>{
+        resultado[u.id].ingresos += mes[u.id].ingresos;
+        resultado[u.id].costosDirectos += mes[u.id].costosDirectos;
+        resultado[u.id].gastosOperacionales += mes[u.id].gastosOperacionales;
+        resultado[u.id].margenBruto += mes[u.id].margenBruto;
+        resultado[u.id].rentabilidadNeta += mes[u.id].rentabilidadNeta;
+      });
+    }
+    UNIDADES_NEGOCIO.forEach(u=>{
+      const r = resultado[u.id];
+      r.pctRentabilidadNeta = r.ingresos>0 ? (r.rentabilidadNeta/r.ingresos*100) : null;
+    });
+    return resultado;
   }
 
   // Multiplicador de Nómina (Labor Efficiency Ratio): cuántos pesos de Ingreso Devengado genera la empresa
@@ -1976,7 +2015,9 @@
     pagoDeudaModal: null, // { deudaId } — qué deuda se está pagando en el modal, o null si está cerrado
     marcarCuotaPagadaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está marcando pagada
     editarCuotaModal: null, // { deudaId, cuotaId } — qué cuota del cronograma se está editando (fecha/monto)
-    lineaNegocioExpandida: null, // id de la Línea de Negocio con su tabla anual abierta (acordeón: solo una a la vez)
+    filtroRentabilidadUnidadMes: new Date().getMonth(), // tabla única de Rentabilidad por Unidad — mes en curso por defecto
+    editandoLineaLoteIndex: null, // índice (dentro de loteEnConstruccion.lineas) de la línea en edición, antes de confirmar el lote
+    deudaCronogramaExpandida: null, // id de la deuda con su cronograma completo desplegado (acordeón: solo una a la vez)
     editandoHistoricoId: null, // id del gasto histórico en edición (modal de Editar)
     filtroHistoricosMes: -1, // -1 = todos los meses, en la pantalla de Importar Históricos
     contratosDevengados: [], // Estado de Resultados (Módulo 3): contratos/ventas para prorratear ingresos en base devengada
@@ -2198,7 +2239,7 @@
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
     'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
-    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto',
+    'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto','add-pasarela','remove-pasarela',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
@@ -2539,6 +2580,7 @@
       }
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      if(!state.config.pasarelasPago) { state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).concat(CATEGORIAS_EGRESO_FLUJO_DEFAULT).forEach(cat=>{
         if(!state.config.categoriasGastos.includes(cat)){ state.config.categoriasGastos.push(cat); gastoFinancieroCambio = true; }
       });
@@ -2751,8 +2793,11 @@
       const monto = Number(g.monto)||0;
       months[m].gastosPagados += monto;
       // montoNegocioGasto() ya decide todo: monto completo si es venta, 0 si es no-venta, o solo el interés
-      // si el gasto trae desglose interés/capital (aunque la categoría sea no-venta, ej. créditos).
-      const montoNeg = montoNegocioGasto(g);
+      // si el gasto trae desglose interés/capital (aunque la categoría sea no-venta, ej. créditos). Egreso de
+      // Flujo también queda en 0 acá — no es "gasto de negocio" para efectos de esta Utilidad Neta (ventas)
+      // simplificada, aunque SÍ sigue sumando abajo en gastosFlujo (Flujo de Caja real).
+      const categoriasEgresoFlujoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+      const montoNeg = categoriasEgresoFlujoFlujo.includes(g.categoria) ? 0 : montoNegocioGasto(g);
       months[m].gastosNegocio += montoNeg;
       if(months[m].gastosPorCategoria[g.categoria] === undefined) months[m].gastosPorCategoria[g.categoria]=0;
       months[m].gastosPorCategoria[g.categoria] += montoNeg;
@@ -3321,11 +3366,13 @@
   // ---------------- Informe descargable (Resumen + Flujo de Caja + Rentabilidad de un período) ----------------
   // Evolución mensual de Fijos vs Variables (para ver la proporción mes a mes)
   function getComposicionMensual(anio){
+    const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
     const months = Array.from({length:12}, ()=> ({ fijos:0, variables:0 }));
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
       const d = new Date(g.fecha+'T00:00:00');
       if(d.getFullYear() !== anio) return;
+      if(categoriasEgresoFlujo.includes(g.categoria)) return; // cortafuegos: Egreso de Flujo no es parte de la estructura de costos del negocio
       const monto = montoNegocioGasto(g);
       if(monto === 0) return; // no aporta nada a Rentabilidad, no lo contamos ni como fijo ni como variable
       const m = d.getMonth();
@@ -3341,7 +3388,8 @@
 
   // Matriz de Categoría x Mes, filtrable por tipo ('fijos' | 'variables' | 'todos') — para ver $ o % de cada categoría mes a mes
   function getCategoriaMensual(anio, tipo){
-    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===anio && montoNegocioGasto(g) !== 0);
+    const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===anio && !categoriasEgresoFlujo.includes(g.categoria) && montoNegocioGasto(g) !== 0);
     const filtrados = tipo==='todos' ? gastosAnio : gastosAnio.filter(g=> tipo==='fijos' ? !!g.origenPagoFijo : !g.origenPagoFijo);
 
     const matrix = {};
@@ -3705,6 +3753,11 @@
   // Filtro de mes en Importar Históricos.
   window.faFiltrarHistoricosMes = function(valor){
     state.filtroHistoricosMes = Number(valor);
+    render();
+  };
+  // Filtro de mes en la tabla única de Rentabilidad por Unidad de Negocio.
+  window.faFiltrarRentabilidadUnidadMes = function(valor){
+    state.filtroRentabilidadUnidadMes = Number(valor);
     render();
   };
   // Actualiza el hint y la etiqueta del Monto cuando cambias Moneda en el formulario de Ingreso — no hace
@@ -4073,7 +4126,7 @@
         <div class="fa-hint">Estas 3 son "cofres blindados" — dinero acumulado que no se toca para gastos del día a día.</div>
         <div style="display:flex; align-items:center; justify-content:space-between; border:1px dashed var(--border); border-radius:10px; padding:10px 14px; margin-top:10px; background:#FAFAFA;">
           <span class="fa-hint" style="margin:0;">💵 OPEX USD (aislada, en dólares)</span>
-          <span style="font-weight:700;">${fmtMoneyUSD(getSaldoUSD())}</span>
+          <span style="font-weight:700;">${fmtMoneyUSDC(getSaldoUSD())}</span>
         </div>
       </div>
 
@@ -4085,16 +4138,16 @@
         </div>
         <div style="margin-bottom:10px;">
           <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700; color:var(--ink-soft); margin-bottom:4px;">
-            <span>Ingresos Devengados</span><span>Meta: ${meta>0?fmtMoney(meta):'sin definir'}</span>
+            <span>Ingresos Devengados</span><span>Meta: ${meta>0?fmtMoneyC(meta):'sin definir'}</span>
           </div>
           <div style="background:#F1F2F4; border-radius:6px; height:14px; overflow:hidden;">
             <div style="background:var(--income); height:100%; width:${(pctMeta*100).toFixed(0)}%;"></div>
           </div>
-          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoney(mesActual.ingresosDevengados)}${meta>0?` de ${fmtMoney(meta)} (${(pctMeta*100).toFixed(0)}%)`:' — define una meta mensual en Configuración para comparar'}</div>
+          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoneyC(mesActual.ingresosDevengados)}${meta>0?` de ${fmtMoneyC(meta)} (${(pctMeta*100).toFixed(0)}%)`:' — define una meta mensual en Configuración para comparar'}</div>
         </div>
         <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; background:${equilibrioCubierto?'#F0FFF4':'#FFF9EC'}; border:1px solid ${equilibrioCubierto?'var(--income)':'#E8B84B'};">
           <span style="font-size:20px;">${equilibrioCubierto?'✅':'⏳'}</span>
-          <span style="font-size:13px; font-weight:600;">${equilibrioCubierto ? 'Punto de equilibrio cubierto — ya facturaste lo suficiente para pagar los gastos fijos del equipo este mes.' : (mesActual.puntoEquilibrio!==null ? `Faltan ${fmtMoney(mesActual.puntoEquilibrio - mesActual.ingresosDevengados)} para cubrir el punto de equilibrio de este mes.` : 'Aún no hay suficiente información para calcular el punto de equilibrio.')}</span>
+          <span style="font-size:13px; font-weight:600;">${equilibrioCubierto ? 'Punto de equilibrio cubierto — ya facturaste lo suficiente para pagar los gastos fijos del equipo este mes.' : (mesActual.puntoEquilibrio!==null ? `Faltan ${fmtMoneyC(mesActual.puntoEquilibrio - mesActual.ingresosDevengados)} para cubrir el punto de equilibrio de este mes.` : 'Aún no hay suficiente información para calcular el punto de equilibrio.')}</span>
         </div>
         <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; margin-top:8px; background:${lerDashboard.ratio===null?'#F8F9FA':(lerDashboard.ratio<2.5?'#FFF5F5':'#F0FFF4')}; border:1px solid ${lerDashboard.ratio===null?'var(--border)':(lerDashboard.ratio<2.5?'var(--expense)':'var(--income)')};">
           <span style="font-size:20px;">${lerDashboard.ratio===null?'—':(lerDashboard.ratio<2.5?'⚠️':'💪')}</span>
@@ -4110,7 +4163,7 @@
           ${ventaBruta.crecimientoMoM!==null ? `
           <div style="display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:6px 14px; border-radius:20px; background:${ventaBruta.crecimientoMoM>=0?'#F0FFF4':'#FFF5F5'}; border:1px solid ${ventaBruta.crecimientoMoM>=0?'var(--income)':'var(--expense)'};">
             <span style="font-weight:700; color:${ventaBruta.crecimientoMoM>=0?'var(--income)':'var(--expense)'};">${ventaBruta.crecimientoMoM>=0?'▲':'▼'} ${Math.abs(ventaBruta.crecimientoMoM).toFixed(1)}%</span>
-            <span style="font-size:12px; color:var(--ink-soft);">vs. mes anterior (${fmtMoney(ventaBruta.ventaMesAnterior)})</span>
+            <span style="font-size:12px; color:var(--ink-soft);">vs. mes anterior (${fmtMoneyC(ventaBruta.ventaMesAnterior)})</span>
           </div>
           ` : `<div class="fa-hint" style="margin-top:10px;">Sin ventas el mes anterior para comparar el crecimiento.</div>`}
         </div>
@@ -4129,7 +4182,7 @@
         ${proximoPago ? `
         <div style="padding:12px 14px; border-radius:10px; background:#F8F9FA; border:1px solid var(--border); margin-bottom:14px;">
           <div style="font-size:12px; font-weight:700; color:var(--ink-soft);">⏰ Próximo pago crítico</div>
-          <div style="font-size:15px; font-weight:700; margin-top:2px;">${escapeHtml(proximoPago.nombre)} — ${fmtMoney(proximoPago.cuotaMinima)} el ${fmtDate(proximoPago.fechaVencimiento)}</div>
+          <div style="font-size:15px; font-weight:700; margin-top:2px;">${escapeHtml(proximoPago.nombre)} — ${fmtMoneyC(proximoPago.cuotaMinima)} el ${fmtDate(proximoPago.fechaVencimiento)}</div>
         </div>
         ` : `<div class="fa-hint">Sin pagos de deuda próximos registrados.</div>`}
         ${usoCredito.cupoTotal>0 ? `
@@ -4140,7 +4193,7 @@
           <div style="background:#F1F2F4; border-radius:6px; height:14px; overflow:hidden;">
             <div style="background:${usoCredito.pct>0.5?'var(--expense)':'var(--income)'}; height:100%; width:${Math.min(usoCredito.pct*100,100).toFixed(0)}%;"></div>
           </div>
-          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoney(usoCredito.saldoTotal)} usado de ${fmtMoney(usoCredito.cupoTotal)} de cupo${usoCredito.pct>0.5?' — sobre el 50%, ojo con esto':''}</div>
+          <div class="fa-hint" style="margin:4px 0 0 0;">${fmtMoneyC(usoCredito.saldoTotal)} usado de ${fmtMoneyC(usoCredito.cupoTotal)} de cupo${usoCredito.pct>0.5?' — sobre el 50%, ojo con esto':''}</div>
         </div>
         ` : `<div class="fa-hint">Sin tarjetas o líneas de crédito activas registradas.</div>`}
       </div>
@@ -4154,7 +4207,7 @@
           <div class="fa-hint" style="margin-top:6px;">
             ${runway.runwayMeses===null
               ? 'Aún no hay suficientes Gastos Operacionales registrados para estimar el runway.'
-              : `Con ${fmtMoney(runway.saldoOperacion)} en Operación y un promedio de ${fmtMoney(runway.promedioGastosOp)} en Gastos Operacionales mensuales, así de lejos llegarías si las ventas cayeran a $0 hoy mismo.`}
+              : `Con ${fmtMoneyC(runway.saldoOperacion)} en Operación y un promedio de ${fmtMoneyC(runway.promedioGastosOp)} en Gastos Operacionales mensuales, así de lejos llegarías si las ventas cayeran a $0 hoy mismo.`}
           </div>
         </div>
       </div>
@@ -4194,7 +4247,7 @@
           <div class="fa-kpi-label">${mesActual.utilidadOperativa>=0?'🟢':'🔴'} Utilidad Operativa (${MESES[mesActualIdx]})</div>
           <div class="fa-kpi-value ${mesActual.utilidadOperativa>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadOperativa)}</div>
         </div>
-        <div class="fa-kpi"><div class="fa-kpi-label">Punto de Equilibrio (${MESES[mesActualIdx]})</div><div class="fa-kpi-value money">${mesActual.puntoEquilibrio!==null ? fmtMoney(mesActual.puntoEquilibrio) : '—'}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Punto de Equilibrio (${MESES[mesActualIdx]})</div><div class="fa-kpi-value money">${mesActual.puntoEquilibrio!==null ? fmtMoneyC(mesActual.puntoEquilibrio) : '—'}</div></div>
         <div class="fa-kpi ${mesActual.utilidadNeta>=0?'income':'expense'}"><div class="fa-kpi-label">Utilidad Neta (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.utilidadNeta>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadNeta)}</div></div>
         <div class="fa-kpi ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}"><div class="fa-kpi-label">Margen de Rentabilidad (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}">${mesActual.margenRentabilidad!==null?mesActual.margenRentabilidad.toFixed(1)+'%':'—'}</div></div>
       </div>
@@ -4209,82 +4262,66 @@
       ${mesActual.puntoEquilibrio!==null ? `<div class="fa-hint">Este mes necesitas facturar (devengado) al menos ${fmtMoneyC(mesActual.puntoEquilibrio)} para cubrir tus Gastos Operacionales — llevas ${fmtMoneyC(mesActual.ingresosDevengados)}.</div>` : `<div class="fa-hint">Sin ingresos devengados este mes todavía, no se puede estimar el punto de equilibrio con costo variable.</div>`}
 
       <div class="fa-card">
-        <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — ${MESES[mesActualIdx]}</div>
+        <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — Acumulada ${anio}</div>
         <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Afiliación y Sinergia on Stage (Evento Presencial) tienen su propia unidad. Los gastos operacionales sin % asignado (o sin dedicación en su Plantilla) no cuentan aquí todavía.</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-top:10px;">
-          ${UNIDADES_NEGOCIO.map(u=>{
-            const r = rentabilidadUnidad[u.id];
-            const emoji = u.id==='agencia'?'🤝':u.id==='academia'?'🎓':u.id==='afiliacion'?'🔗':'🎤';
-            return `
-            <div style="border:1.5px solid ${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'}; border-radius:12px; padding:16px; ${r.rentabilidadNeta>=0?'background:#F0FFF4;':'background:#FFF5F5;'}">
-              <div style="font-weight:700; font-size:15px; margin-bottom:8px;">${emoji} ${escapeHtml(u.label)}</div>
-              <div class="fa-hint" style="margin:0;">Ingresos: <strong>${fmtMoney(r.ingresos)}</strong></div>
-              <div class="fa-hint" style="margin:2px 0;">Costos Directos: <strong style="color:var(--expense);">${fmtMoney(r.costosDirectos)}</strong></div>
-              <div class="fa-hint" style="margin:0 0 8px 0;">Gastos Operacionales: <strong style="color:var(--expense);">${fmtMoney(r.gastosOperacionales)}</strong></div>
-              <div style="font-size:20px; font-weight:800; color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoneyC(r.rentabilidadNeta)}</div>
-              <div class="fa-hint" style="margin:0;">Rentabilidad Neta</div>
-            </div>
-          `;}).join('')}
+          ${(() => {
+            const acumulado = getRentabilidadPorUnidadAcumuladaAnio(anio);
+            return UNIDADES_NEGOCIO.map(u=>{
+              const r = acumulado[u.id];
+              const emoji = u.id==='agencia'?'🤝':u.id==='academia'?'🎓':u.id==='afiliacion'?'🔗':'🎤';
+              return `
+              <div style="border:1.5px solid ${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'}; border-radius:12px; padding:16px; ${r.rentabilidadNeta>=0?'background:#F0FFF4;':'background:#FFF5F5;'}">
+                <div style="font-weight:700; font-size:15px; margin-bottom:8px;">${emoji} ${escapeHtml(u.label)}</div>
+                <div style="font-size:32px; font-weight:800; color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${r.pctRentabilidadNeta!==null?r.pctRentabilidadNeta.toFixed(1)+'%':'—'}</div>
+                <div class="fa-hint" style="margin:0 0 8px 0;">Rentabilidad Neta</div>
+                <div class="fa-hint" style="margin:0;">Ingresos: <strong>${fmtMoneyC(r.ingresos)}</strong></div>
+                <div class="fa-hint" style="margin:2px 0;">Costos Directos: <strong style="color:var(--expense);">${fmtMoneyC(r.costosDirectos)}</strong></div>
+                <div class="fa-hint" style="margin:0 0 4px 0;">Gastos Operacionales: <strong style="color:var(--expense);">${fmtMoneyC(r.gastosOperacionales)}</strong></div>
+                <div style="font-weight:700; color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoneyC(r.rentabilidadNeta)}</div>
+              </div>
+            `;}).join('');
+          })()}
         </div>
 
-        <div class="fa-card-title" style="margin-top:20px;">📊 Historial anual por Línea de Negocio — ${anio}</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px;">
+          <div class="fa-card-title" style="margin:0;">📊 Detalle por Línea de Negocio — ${MESES[state.filtroRentabilidadUnidadMes]} ${anio}</div>
+          <select onchange="window.faFiltrarRentabilidadUnidadMes(this.value)">
+            ${MESES.map((m,i)=>`<option value="${i}" ${state.filtroRentabilidadUnidadMes===i?'selected':''}>${m}</option>`).join('')}
+          </select>
+        </div>
         ${(() => {
           const anual = getRentabilidadPorUnidadAnual(anio);
-          return UNIDADES_NEGOCIO.map(u=>{
-            const expandida = state.lineaNegocioExpandida === u.id;
-            const totalesU = anual.reduce((acc,mes)=>{
-              const r = mes[u.id];
-              acc.ingresos += r.ingresos; acc.costosDirectos += r.costosDirectos;
-              acc.gastosOperacionales += r.gastosOperacionales; acc.rentabilidadNeta += r.rentabilidadNeta;
-              acc.margenBruto += r.margenBruto;
-              return acc;
-            }, { ingresos:0, costosDirectos:0, gastosOperacionales:0, rentabilidadNeta:0, margenBruto:0 });
-            return `
+          const mesData = anual[state.filtroRentabilidadUnidadMes];
+          const ventaBrutaUnidad = getVentaBrutaPorUnidadMensual(anio, state.filtroRentabilidadUnidadMes);
+          return `
           <div class="fa-table-wrap" style="margin-top:10px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin:0 0 6px 0;">
-              <div class="fa-hint" style="font-weight:700; margin:0;">${escapeHtml(u.label)}</div>
-              <button type="button" class="fa-btn ${expandida?'fa-btn-ghost':'fa-btn-primary'}" style="padding:4px 12px; font-size:12px;" data-action="toggle-linea-negocio-tabla" data-linea="${u.id}">${expandida?'Cerrar':'Ver más'}</button>
-            </div>
-            ${!expandida ? '' : `
             <table class="fa-table">
               <thead><tr>
-                <th>Mes</th><th class="num">Ingreso Total</th><th class="num">% Ingresos</th><th class="num">Costos Directos</th>
+                <th>Línea de Negocio</th><th class="num">Venta Bruta</th><th class="num">Ingreso Total</th><th class="num">% Ingresos</th><th class="num">Costos Directos</th>
                 <th class="num">Gastos Op.</th><th class="num">% Gastos Op.</th><th class="num">Rentabilidad Neta</th><th class="num">% Rentabilidad</th>
                 <th class="num">Margen Bruto</th><th class="num">% Margen Bruto</th>
               </tr></thead>
               <tbody>
-                ${anual.map((mes,i)=>{ const r = mes[u.id]; return `
+                ${UNIDADES_NEGOCIO.map(u=>{ const r = mesData[u.id]; return `
                 <tr>
-                  <td>${MESES_CORTO[i]}</td>
-                  <td class="num money">${fmtMoney(r.ingresos)}</td>
+                  <td style="font-weight:700;">${escapeHtml(u.label)}</td>
+                  <td class="num money">${fmtMoneyC(ventaBrutaUnidad[u.id])}</td>
+                  <td class="num money">${fmtMoneyC(r.ingresos)}</td>
                   <td class="num">${r.pctIngresosSobreTotal!==null?r.pctIngresosSobreTotal.toFixed(1)+'%':'—'}</td>
-                  <td class="num money">${fmtMoney(r.costosDirectos)}</td>
-                  <td class="num money">${fmtMoney(r.gastosOperacionales)}</td>
+                  <td class="num money">${fmtMoneyC(r.costosDirectos)}</td>
+                  <td class="num money">${fmtMoneyC(r.gastosOperacionales)}</td>
                   <td class="num">${r.pctGastosOperacionales!==null?r.pctGastosOperacionales.toFixed(1)+'%':'—'}</td>
-                  <td class="num money" style="color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoney(r.rentabilidadNeta)}</td>
+                  <td class="num money" style="color:${r.rentabilidadNeta>=0?'var(--income)':'var(--expense)'};">${fmtMoneyC(r.rentabilidadNeta)}</td>
                   <td class="num">${r.pctRentabilidadNeta!==null?r.pctRentabilidadNeta.toFixed(1)+'%':'—'}</td>
-                  <td class="num money">${fmtMoney(r.margenBruto)}</td>
+                  <td class="num money">${fmtMoneyC(r.margenBruto)}</td>
                   <td class="num">${r.pctMargenBruto!==null?r.pctMargenBruto.toFixed(1)+'%':'—'}</td>
                 </tr>
               `;}).join('')}
-                <tr style="font-weight:700; background:#F8F9FA;">
-                  <td>Total año</td>
-                  <td class="num money">${fmtMoney(totalesU.ingresos)}</td>
-                  <td class="num">—</td>
-                  <td class="num money">${fmtMoney(totalesU.costosDirectos)}</td>
-                  <td class="num money">${fmtMoney(totalesU.gastosOperacionales)}</td>
-                  <td class="num">${totalesU.ingresos>0?(totalesU.gastosOperacionales/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
-                  <td class="num money">${fmtMoney(totalesU.rentabilidadNeta)}</td>
-                  <td class="num">${totalesU.ingresos>0?(totalesU.rentabilidadNeta/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
-                  <td class="num money">${fmtMoney(totalesU.margenBruto)}</td>
-                  <td class="num">${totalesU.ingresos>0?(totalesU.margenBruto/totalesU.ingresos*100).toFixed(1)+'%':'—'}</td>
-                </tr>
               </tbody>
             </table>
-            `}
           </div>
-        `;}).join('');
-        })()}
+        `;})()}
       </div>
 
       <div class="fa-card">
@@ -4297,34 +4334,36 @@
         <div class="fa-table-wrap">
           <table class="fa-table">
             <thead><tr>
-              <th>Mes</th><th class="num">Ingresos Devengados</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th><th class="num">Margen Bruto %</th>
+              <th>Mes</th><th class="num">Venta Bruta</th><th class="num">Ingresos Devengados</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th><th class="num">Margen Bruto %</th>
               <th class="num">Gastos Operacionales</th><th class="num">Utilidad Operativa</th><th class="num">Gastos Financieros</th><th class="num">Utilidad Neta</th><th class="num">Margen Rentabilidad %</th>
             </tr></thead>
             <tbody>
-              ${meses.map((m,i)=>`
+              ${meses.map((m,i)=>{ const ventaBrutaMes = getVentaBrutaMensual(anio, i); return `
                 <tr>
                   <td>${MESES[i]}</td>
-                  <td class="num money" style="color:var(--income);">${fmtMoney(m.ingresosDevengados)}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.costosDirectos)}</td>
-                  <td class="num money">${fmtMoney(m.margenBruto)}</td>
+                  <td class="num money">${fmtMoneyC(ventaBrutaMes)}</td>
+                  <td class="num money" style="color:var(--income);">${fmtMoneyC(m.ingresosDevengados)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.costosDirectos)}</td>
+                  <td class="num money">${fmtMoneyC(m.margenBruto)}</td>
                   <td class="num">${m.margenBrutoPct!==null?m.margenBrutoPct.toFixed(1)+'%':'—'}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosOperacionales)}</td>
-                  <td class="num money" style="font-weight:700; color:${m.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${m.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoney(m.utilidadOperativa)}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoney(m.gastosFinancieros)}</td>
-                  <td class="num money" style="font-weight:700;">${fmtMoney(m.utilidadNeta)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.gastosOperacionales)}</td>
+                  <td class="num money" style="font-weight:700; color:${m.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${m.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoneyC(m.utilidadOperativa)}</td>
+                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.gastosFinancieros)}</td>
+                  <td class="num money" style="font-weight:700;">${fmtMoneyC(m.utilidadNeta)}</td>
                   <td class="num">${m.margenRentabilidad!==null?m.margenRentabilidad.toFixed(1)+'%':'—'}</td>
                 </tr>
-              `).join('')}
+              `;}).join('')}
               <tr style="font-weight:700; background:#F8F9FA;">
                 <td>Total año</td>
-                <td class="num money" style="color:var(--income);">${fmtMoney(totales.ingresosDevengados)}</td>
-                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.costosDirectos)}</td>
-                <td class="num money">${fmtMoney(totales.margenBruto)}</td>
+                <td class="num money">${fmtMoneyC(MESES.reduce((s,_,i)=>s+getVentaBrutaMensual(anio,i),0))}</td>
+                <td class="num money" style="color:var(--income);">${fmtMoneyC(totales.ingresosDevengados)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoneyC(totales.costosDirectos)}</td>
+                <td class="num money">${fmtMoneyC(totales.margenBruto)}</td>
                 <td class="num">${totales.ingresosDevengados>0?(totales.margenBruto/totales.ingresosDevengados*100).toFixed(1)+'%':'—'}</td>
-                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosOperacionales)}</td>
-                <td class="num money">${fmtMoney(totales.utilidadOperativa)}</td>
-                <td class="num money" style="color:var(--expense);">${fmtMoney(totales.gastosFinancieros)}</td>
-                <td class="num money">${fmtMoney(totales.utilidadNeta)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoneyC(totales.gastosOperacionales)}</td>
+                <td class="num money">${fmtMoneyC(totales.utilidadOperativa)}</td>
+                <td class="num money" style="color:var(--expense);">${fmtMoneyC(totales.gastosFinancieros)}</td>
+                <td class="num money">${fmtMoneyC(totales.utilidadNeta)}</td>
                 <td class="num">${totales.ingresosDevengados>0?(totales.utilidadNeta/totales.ingresosDevengados*100).toFixed(1)+'%':'—'}</td>
               </tr>
             </tbody>
@@ -4388,51 +4427,57 @@
           `;
         })() : (() => {
           const lote = state.loteEnConstruccion || { lineas: [] };
+          const lineaEnEdicion = state.editandoLineaLoteIndex !== null ? lote.lineas[state.editandoLineaLoteIndex] : null;
           const totalUSDLote = lote.lineas.filter(l=>esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           const totalCLPLote = lote.lineas.filter(l=>l.formaPago && !esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           return `
         <div class="fa-hint" style="margin-top:0;">Para una sola venta: llena los campos y usa "Registrar como Ingreso Único". Para varias ventas juntas en un lote: usa "+ Agregar línea" las veces que necesites, y confirma el lote al final.</div>
         <div data-form="linea-lote">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X"></div>
-            <div class="fa-field"><label>Forma de Pago</label>
-              <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
-                ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}">${escapeHtml(f.label)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (USD)</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0"></div>
+            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${lineaEnEdicion?escapeHtml(lineaEnEdicion.nombre):''}"></div>
+            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta / primera cuota)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${lineaEnEdicion?lineaEnEdicion.fechaInicio:todayISO()}"></div>
             <div class="fa-field"><label>Tipo de Ingreso</label>
               <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
-                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}">${escapeHtml(t.label)}</option>`).join('')}
+                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}" ${lineaEnEdicion&&lineaEnEdicion.tipoIngreso===t.id?'selected':''}>${escapeHtml(t.label)}</option>`).join('')}
               </select>
             </div>
             <div class="fa-field" id="fa-linea-duracion-wrap">
               <label>Meses Reales de Duración (1 a 12)</label>
               <select id="fa-linea-duracion-input" name="duracionMeses">
-                ${Array.from({length:12},(_,i)=>i+1).map(n=>`<option value="${n}">${n} mes${n===1?'':'es'}</option>`).join('')}
+                ${Array.from({length:12},(_,i)=>i+1).map(n=>`<option value="${n}" ${lineaEnEdicion&&lineaEnEdicion.duracionMeses===n?'selected':''}>${n} mes${n===1?'':'es'}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:none;">
+            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:${lineaEnEdicion&&lineaEnEdicion.fechaEvento?'':'none'};">
               <label>Fecha del Evento (el ingreso cuenta ahí, no en la fecha de venta)</label>
-              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento">
+              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento" value="${lineaEnEdicion&&lineaEnEdicion.fechaEvento?lineaEnEdicion.fechaEvento:''}">
             </div>
-            <div class="fa-field"><label>Número de Cuotas de Pago (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="1"></div>
-            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0"></div>
-            <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0"></div>
-            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta / primera cuota)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${todayISO()}"></div>
+            <div class="fa-field"><label>Forma de Pago</label>
+              <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
+                ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}" ${lineaEnEdicion&&lineaEnEdicion.formaPago===f.id?'selected':''}>${escapeHtml(f.label)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (${lineaEnEdicion&&esFormaPagoUSD(lineaEnEdicion.formaPago)?'USD':'CLP'})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.montoBruto:''}"></div>
             <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
               <div style="display:flex; gap:8px;">
-                <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50">
+                <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${lineaEnEdicion&&lineaEnEdicion.tipoCambio?lineaEnEdicion.tipoCambio:''}">
                 <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambio()">🔍 Buscar</button>
               </div>
               <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Solo hace falta si la Forma de Pago es en USD.</div>
             </div>
+            <div class="fa-field"><label>Número de Cuotas de Pago (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="${lineaEnEdicion?lineaEnEdicion.numeroCuotasPago:1}"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.comisionPorCuota||'':''}"></div>
+            <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.anticipoPorCuotaUSD||'':''}"></div>
           </div>
           <div class="fa-hint" id="fa-linea-dinero-limpio-hint" style="display:none; color:var(--income); font-weight:600;">💧 Dinero Limpio: este tipo de ingreso llega neto, sin comisión de pasarela — el campo queda bloqueado en $0.</div>
           <div class="fa-hint">Se genera una comisión (y un anticipo, si aplica) por cada cuota, un mes seguido del otro desde la Fecha de Inicio — cada una queda editable o eliminable por separado después.</div>
           <div class="fa-form-actions">
+            ${lineaEnEdicion ? `
+            <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-edicion-linea-lote" data-index="${state.editandoLineaLoteIndex}">Guardar cambios en la línea</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cancelar-edicion-linea-lote">Cancelar</button>
+            ` : `
             <button type="button" class="fa-btn fa-btn-primary" data-action="registrar-ingreso-unico">📌 Registrar como Ingreso Único</button>
             <button type="button" class="fa-btn fa-btn-ghost" data-action="agregar-linea-lote">+ Agregar línea a un Lote</button>
+            `}
           </div>
         </div>
 
@@ -4451,12 +4496,17 @@
                   <td>${fp.moneda}</td>
                   <td>${escapeHtml(ti.label)}${l.fechaEvento?` (evento: ${fmtDate(l.fechaEvento)})`:''}</td>
                   <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
-                  <td class="num money">${fp.moneda==='USD'?fmtMoneyUSD(l.montoBruto):fmtMoneyC(l.montoBruto)}</td>
-                  <td>${l.numeroCuotasPago}${l.comisionPorCuota?` (com. ${fp.moneda==='USD'?fmtMoneyUSD(l.comisionPorCuota):fmtMoneyC(l.comisionPorCuota)}/cuota)`:''}</td>
-                  <td><button class="fa-icon-btn danger" data-action="quitar-linea-lote" data-index="${i}">Quitar</button></td>
+                  <td class="num money">${fp.moneda==='USD'?fmtMoneyUSDC(l.montoBruto):fmtMoneyC(l.montoBruto)}</td>
+                  <td>${l.numeroCuotasPago}${l.comisionPorCuota?` (com. ${fp.moneda==='USD'?fmtMoneyUSDC(l.comisionPorCuota):fmtMoneyC(l.comisionPorCuota)}/cuota)`:''}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="editar-linea-lote" data-index="${i}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="quitar-linea-lote" data-index="${i}">Quitar</button>
+                    </div>
+                  </td>
                 </tr>
               `;}).join('')}
-              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="5">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSD(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
+              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="5">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSDC(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
             </tbody>
           </table>
         </div>
@@ -4494,11 +4544,13 @@
             <option value="-1" ${state.filtroLotesMes===-1?'selected':''}>Todos los meses</option>
             ${MESES.map((m,i)=>`<option value="${i}" ${state.filtroLotesMes===i?'selected':''}>${m}</option>`).join('')}
           </select>
-          ${lotesFiltrados.length===0 ? `<div class="fa-empty">Sin lotes para este filtro.</div>` : lotesFiltrados.map(([loteId, lineas])=>`
+          ${lotesFiltrados.length===0 ? `<div class="fa-empty">Sin lotes para este filtro.</div>` : lotesFiltrados.map(([loteId, lineas])=>{
+            const esIngresoUnico = lineas.length===1 && lineas[0].esIngresoUnico;
+            return `
             <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px;">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-weight:700; font-size:13px;">Lote — ${fmtDate(lineas[0].fechaInicio)} (${lineas.length} línea${lineas.length===1?'':'s'})</span>
-                <button class="fa-icon-btn danger" data-action="delete-lote-devengado" data-loteid="${loteId}">Eliminar lote completo</button>
+                <span style="font-weight:700; font-size:13px;">${esIngresoUnico ? `📌 Ingreso Único — ${fmtDate(lineas[0].fechaInicio)}` : `Lote — ${fmtDate(lineas[0].fechaInicio)} (${lineas.length} línea${lineas.length===1?'':'s'})`}</span>
+                ${esIngresoUnico ? '' : `<button class="fa-icon-btn danger" data-action="delete-lote-devengado" data-loteid="${loteId}">Eliminar lote completo</button>`}
               </div>
               <div class="fa-table-wrap">
                 <table class="fa-table">
@@ -4509,7 +4561,7 @@
                         <td>${escapeHtml(c.nombre)}</td>
                         <td>${c.tipoIngreso ? escapeHtml((TIPOS_INGRESO_CATALOGO.find(t=>t.id===c.tipoIngreso)||{label:c.tipoIngreso}).label) : escapeHtml(c.tipoServicio||'')}</td>
                         <td>${c.duracionMeses} mes${c.duracionMeses===1?'':'es'}</td>
-                        <td class="num money">${c.montoTotalUSD!==undefined ? fmtMoneyUSD(c.montoTotalUSD) : '—'}</td>
+                        <td class="num money">${c.montoTotalUSD!==undefined ? fmtMoneyUSDC(c.montoTotalUSD) : '—'}</td>
                         <td class="num">${c.tipoCambio!==undefined ? c.tipoCambio : '—'}</td>
                         <td class="num money">${fmtMoneyC(c.montoTotal)}</td>
                         <td>
@@ -4524,7 +4576,7 @@
                 </table>
               </div>
             </div>
-          `).join('')}
+          `;}).join('')}
         </div>
         <div class="fa-hint">El USD y el tipo de cambio quedan solo como referencia — todo el cálculo contable (Margen Bruto, Utilidad Operativa, etc.) usa exclusivamente el monto en CLP.</div>
           `;
@@ -4673,7 +4725,7 @@
                   <td>${escapeHtml(g.categoria)}</td>
                   <td>${escapeHtml(g.proveedor||g.descripcion||'')||'—'}</td>
                   <td class="num money">${fmtMoneyC(g.monto)}</td>
-                  <td>${g.estado==='Pendiente'?`<span class="fa-badge pendiente">Pendiente</span>`:g.estado==='Pagado Parcial'?`<span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Parcial (${fmtMoney(g.montoPagado)} de ${fmtMoney(g.monto)})</span>`:''}</td>
+                  <td>${g.estado==='Pendiente'?`<span class="fa-badge pendiente">Pendiente</span>`:g.estado==='Pagado Parcial'?`<span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Parcial (${fmtMoneyC(g.montoPagado)} de ${fmtMoneyC(g.monto)})</span>`:''}</td>
                   <td>
                     <div class="fa-row-actions">
                       ${g.estado==='Pendiente'?`<button class="fa-icon-btn" data-action="abrir-procesar-gasto" data-id="${g.id}">Procesar pago</button>`:''}
@@ -4712,7 +4764,7 @@
       <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:700px;">
         <div class="fa-kpi"><div class="fa-kpi-label">Pendientes por clasificar</div><div class="fa-kpi-value">${pendientes}</div></div>
         <div class="fa-kpi income"><div class="fa-kpi-label">Ya agregados</div><div class="fa-kpi-value income">${agregados}</div></div>
-        <div class="fa-kpi"><div class="fa-kpi-label">Total de este filtro</div><div class="fa-kpi-value money">${fmtMoney(totalMontoFiltrado)}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Total de este filtro</div><div class="fa-kpi-value money">${fmtMoneyC(totalMontoFiltrado)}</div></div>
       </div>
 
       <div class="fa-card">
@@ -4739,7 +4791,7 @@
                 <tr style="${h.agregado?'opacity:0.55;':''}">
                   <td>${fmtDate(h.fecha)}</td>
                   <td>${escapeHtml(h.proveedor||h.descripcion||'')||'—'}</td>
-                  <td class="num money">${fmtMoney(h.monto)}</td>
+                  <td class="num money">${fmtMoneyC(h.monto)}</td>
                   <td class="fa-hint" style="margin:0;">${escapeHtml(h.categoriaOriginal||'—')}</td>
                   <td>
                     <select ${h.agregado?'disabled':''} onchange="window.faElegirTipoHistorico('${h.id}', this.value)">
@@ -4765,7 +4817,7 @@
                   </td>
                 </tr>
               `;}).join('')}
-              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="2">Total del filtro</td><td class="num money">${fmtMoney(totalMontoFiltrado)}</td><td colspan="4"></td></tr>
+              <tr style="font-weight:700; background:#F8F9FA;"><td colspan="2">Total del filtro</td><td class="num money">${fmtMoneyC(totalMontoFiltrado)}</td><td colspan="4"></td></tr>
             </tbody>
           </table>
         </div>
@@ -4806,7 +4858,7 @@
         <div class="fa-card-title">Tus deudas, ordenadas por Bola de Nieve</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px,1fr)); gap:14px;">
           ${deudas.map((d,i)=>{
-            const movs = state.deudas.pagos.filter(p=>p.deudaId===d.id).map(p=>({ tipo:'pago', fecha:p.fecha, monto:p.montoTotal, id:p.id, detalle:`Pago (cap. ${fmtMoney(p.capital)} + int. ${fmtMoney(p.interes)})` }))
+            const movs = state.deudas.pagos.filter(p=>p.deudaId===d.id).map(p=>({ tipo:'pago', fecha:p.fecha, monto:p.montoTotal, id:p.id, detalle:`Pago (cap. ${fmtMoneyC(p.capital)} + int. ${fmtMoneyC(p.interes)})` }))
               .concat((state.deudas.giros||[]).filter(g=>g.deudaId===d.id).map(g=>({ tipo:'giro', fecha:g.fecha, monto:g.monto, id:g.id, detalle: g.origen==='linea_credito'?'Uso de línea':'Compra con tarjeta' })))
               .sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||'')).slice(0,5);
             return `
@@ -4818,43 +4870,55 @@
               <div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;">
                 <div style="background:${i===0?'var(--income)':'var(--ink-soft)'}; height:100%; width:${(d.progreso*100).toFixed(0)}%;"></div>
               </div>
-              <div class="fa-hint" style="margin:0 0 10px 0;">${(d.progreso*100).toFixed(0)}% pagado — ${fmtMoney(d.saldo)} de ${fmtMoney(d.montoOriginal)}</div>
+              <div class="fa-hint" style="margin:0 0 10px 0;">${(d.progreso*100).toFixed(0)}% pagado — ${fmtMoneyC(d.saldo)} de ${fmtMoneyC(d.montoOriginal)}</div>
               <div style="font-size:12px; color:var(--ink-soft); line-height:1.6;">
-                Tasa: ${d.tasaInteres}% ${d.tasaInteresPeriodo} · Cuota mínima: ${fmtMoney(d.cuotaMinima)}<br>
+                Tasa: ${d.tasaInteres}% ${d.tasaInteresPeriodo} · Cuota mínima: ${fmtMoneyC(d.cuotaMinima)}<br>
                 Vence: ${d.fechaVencimiento ? fmtDate(d.fechaVencimiento) : '—'}
               </div>
               ${d.proyeccion.nuncaSePaga ? `
                 <div class="fa-hint" style="color:var(--expense); font-weight:700; margin-top:8px;">⚠️ La cuota mínima no cubre ni el interés — esta deuda NUNCA se paga sola, sigue creciendo.</div>
               ` : `
-                <div class="fa-hint" style="margin-top:8px;">Pagando solo el mínimo: liquidarías en <strong>${fechaProyectada(d.proyeccion.meses)}</strong> (${d.proyeccion.meses} meses) — habrás pagado <strong style="color:var(--expense);">${fmtMoney(d.proyeccion.interesTotal)}</strong> en puro interés.</div>
+                <div class="fa-hint" style="margin-top:8px;">Pagando solo el mínimo: liquidarías en <strong>${fechaProyectada(d.proyeccion.meses)}</strong> (${d.proyeccion.meses} meses) — habrás pagado <strong style="color:var(--expense);">${fmtMoneyC(d.proyeccion.interesTotal)}</strong> en puro interés.</div>
               `}
               ${movs.length>0 ? `
               <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
                 ${movs.map(m=>`
                   <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; margin-bottom:4px;">
-                    <span>${fmtDate(m.fecha)} — ${m.detalle}: ${fmtMoney(m.monto)}</span>
+                    <span>${fmtDate(m.fecha)} — ${m.detalle}: ${fmtMoneyC(m.monto)}</span>
                     <button class="fa-icon-btn danger" style="padding:2px 6px; font-size:11px;" data-action="${m.tipo==='pago'?'delete-pago-deuda':'delete-giro-deuda'}" data-id="${m.id}">✕</button>
                   </div>
                 `).join('')}
               </div>` : ''}
               ${(d.cronogramaCuotas&&d.cronogramaCuotas.length>0) ? `
               <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
-                <div style="font-size:12px; font-weight:700; margin-bottom:6px;">📅 Cronograma de Cuotas${d.tipoDeuda==='banco'?' (Banco)':' (Persona/Proveedor)'}</div>
-                ${d.cronogramaCuotas.map(c=>{
-                  const atrasada = esCuotaAtrasada(c);
-                  const colorEstado = c.estado==='Pagada' ? 'var(--income)' : (atrasada ? 'var(--expense)' : 'var(--ink-soft)');
-                  const labelEstado = c.estado==='Pagada' ? '✓ Pagada' : (atrasada ? '⚠️ Atrasada' : 'Pendiente');
-                  return `
-                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; margin-bottom:4px; gap:6px;">
-                    <span>Cuota ${c.numero} — ${fmtDate(c.fechaEsperada)} — ${fmtMoney(c.montoEsperado)} — <strong style="color:${colorEstado};">${labelEstado}</strong></span>
-                    ${c.estado==='Pendiente' ? `
-                    <span style="display:flex; gap:4px; flex-shrink:0;">
-                      <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px;" data-action="abrir-editar-cuota-cronograma" data-id="${d.id}" data-cuota="${c.id}">Editar</button>
-                      <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px; background:var(--income); color:#fff;" data-action="abrir-marcar-cuota-pagada" data-id="${d.id}" data-cuota="${c.id}">Marcar pagada</button>
-                    </span>
-                    ` : ''}
-                  </div>
-                `;}).join('')}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                  <div style="font-size:12px; font-weight:700;">📅 Cronograma de Cuotas${d.tipoDeuda==='banco'?' (Banco)':' (Persona/Proveedor)'}</div>
+                  ${d.cronogramaCuotas.length>1 ? `<button type="button" class="fa-btn ${state.deudaCronogramaExpandida===d.id?'fa-btn-ghost':'fa-btn-primary'}" style="padding:2px 10px; font-size:11px;" data-action="toggle-cronograma-deuda" data-id="${d.id}">${state.deudaCronogramaExpandida===d.id?'Cerrar':'Ver más'}</button>` : ''}
+                </div>
+                ${(() => {
+                  // Colapsado por defecto: solo la cuota más atrasada (si hay alguna), o si no hay atraso, la
+                  // próxima por vencer — una u otra, nunca ambas. "Ver más" despliega el cronograma completo.
+                  const expandido = state.deudaCronogramaExpandida === d.id;
+                  const pendientes = d.cronogramaCuotas.filter(c=>c.estado==='Pendiente');
+                  const atrasadas = pendientes.filter(c=>esCuotaAtrasada(c));
+                  const cuotaDestacada = atrasadas.length>0 ? atrasadas[0] : (pendientes.length>0 ? pendientes[0] : null);
+                  const cuotasAMostrar = expandido ? d.cronogramaCuotas : (cuotaDestacada ? [cuotaDestacada] : d.cronogramaCuotas.slice(0,1));
+                  return cuotasAMostrar.map(c=>{
+                    const atrasada = esCuotaAtrasada(c);
+                    const colorEstado = c.estado==='Pagada' ? 'var(--income)' : (atrasada ? 'var(--expense)' : 'var(--ink-soft)');
+                    const labelEstado = c.estado==='Pagada' ? '✓ Pagada' : (atrasada ? '⚠️ Atrasada' : 'Pendiente');
+                    return `
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; margin-bottom:4px; gap:6px;">
+                      <span>Cuota ${c.numero} — ${fmtDate(c.fechaEsperada)} — ${fmtMoneyC(c.montoEsperado)} — <strong style="color:${colorEstado};">${labelEstado}</strong></span>
+                      ${c.estado==='Pendiente' ? `
+                      <span style="display:flex; gap:4px; flex-shrink:0;">
+                        <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px;" data-action="abrir-editar-cuota-cronograma" data-id="${d.id}" data-cuota="${c.id}">Editar</button>
+                        <button class="fa-icon-btn" style="padding:2px 6px; font-size:11px; background:var(--income); color:#fff;" data-action="abrir-marcar-cuota-pagada" data-id="${d.id}" data-cuota="${c.id}">Marcar pagada</button>
+                      </span>
+                      ` : ''}
+                    </div>
+                  `;}).join('');
+                })()}
               </div>` : ''}
               <div class="fa-form-actions" style="margin-top:12px;">
                 <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
@@ -4912,7 +4976,7 @@
                 <tr><td colspan="4" style="padding-top:0; padding-bottom:10px;">
                   ${pagosDeEstaCuenta.map(p=>`
                     <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; padding:2px 0 2px 14px;">
-                      <span>↳ Pago ${fmtDate(p.fecha)}: ${fmtMoney(p.monto)}</span>
+                      <span>↳ Pago ${fmtDate(p.fecha)}: ${fmtMoneyC(p.monto)}</span>
                       <button class="fa-icon-btn danger" style="padding:2px 6px; font-size:11px;" data-action="delete-pago-ctapagar" data-id="${p.id}">✕</button>
                     </div>
                   `).join('')}
@@ -5168,7 +5232,7 @@
               <div class="fa-field"><label>Interés Cuota</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
               <div class="fa-field"><label>Interés por Mora</label><input type="number" name="interesMora" min="0" step="1" placeholder="0"></div>
             </div>
-            <div class="fa-hint">Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoney(cuota.montoEsperado)}. Ambos intereses van a Gastos Financieros en Estado de Resultados; el Capital amortiza el Saldo Insoluto.</div>
+            <div class="fa-hint">Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoneyC(cuota.montoEsperado)}. Ambos intereses van a Gastos Financieros en Estado de Resultados; el Capital amortiza el Saldo Insoluto.</div>
             ` : `
             <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" value="${cuota.montoEsperado}"></div>
             <div class="fa-hint">${deuda.esCargaInicial ? 'Carga Inicial de Pasivos — sin interés, el 100% reduce el saldo.' : 'Esta deuda no lleva interés — el 100% de lo pagado reduce el saldo.'}</div>
@@ -5263,8 +5327,8 @@
       <div class="fa-modal-overlay" data-action="cerrar-procesar-gasto">
         <div class="fa-modal" data-action="confirm-noop">
           <div class="fa-modal-title">${esSueldoDuenos?'Retirar Sueldo Dueños':'Procesar pago'} — ${escapeHtml(gasto.proveedor||gasto.descripcion||gasto.categoria)}</div>
-          <div class="fa-hint" style="margin-top:0;">Monto Total del gasto: ${fmtMoneyC(gasto.monto)}${yaPagado>0?` — ya pagado: ${fmtMoney(yaPagado)}, restante: ${fmtMoney(restante)}`:''}. Este monto ya cuenta 100% en Estado de Resultados, sin importar cuánto retires ahora.</div>
-          ${esSueldoDuenos ? `<div class="fa-hint">Disponible hoy en la bóveda Sueldo Dueños: <strong>${fmtMoney(saldoSueldoDuenos)}</strong>. Si retiras menos por falta de liquidez, la diferencia queda como "Sueldos Dueños por Pagar" — no tienes que retirar todo, la bóveda puede seguir acumulando.</div>` : ''}
+          <div class="fa-hint" style="margin-top:0;">Monto Total del gasto: ${fmtMoneyC(gasto.monto)}${yaPagado>0?` — ya pagado: ${fmtMoneyC(yaPagado)}, restante: ${fmtMoneyC(restante)}`:''}. Este monto ya cuenta 100% en Estado de Resultados, sin importar cuánto retires ahora.</div>
+          ${esSueldoDuenos ? `<div class="fa-hint">Disponible hoy en la bóveda Sueldo Dueños: <strong>${fmtMoneyC(saldoSueldoDuenos)}</strong>. Si retiras menos por falta de liquidez, la diferencia queda como "Sueldos Dueños por Pagar" — no tienes que retirar todo, la bóveda puede seguir acumulando.</div>` : ''}
           <div data-form="procesar-gasto">
             <div class="fa-field" style="margin-bottom:10px;"><label>Fecha del pago</label><input type="date" name="fechaPago" value="${todayISO()}"></div>
             <div class="fa-field" style="margin-bottom:10px;"><label>${esSueldoDuenos?'Monto Retirado Realmente (ahora)':'Monto Pagado Realmente (ahora)'}</label><input type="number" name="montoPagadoAhora" min="0" step="1" placeholder="0"></div>
@@ -5456,7 +5520,7 @@
             </div>
             <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
             <div class="fa-field"><label>Pasarela / Medio de Pago</label>
-              <select name="pasarela">${PASARELAS_PAGO.map(p=>`<option ${editing&&editing.pasarela===p?'selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
+              <select name="pasarela">${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<option ${editing&&editing.pasarela===p?'selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
             <div class="fa-field"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
@@ -5466,7 +5530,7 @@
           <div id="fa-pf-reserva-wrap" style="${editing && editing.distribucion && editing.distribucion.reserva ? '' : 'display:none;'} margin-top:14px;">
             <div class="fa-kpi" style="max-width:280px;">
               <div class="fa-kpi-label">🔒 Reserva Costos Directos → Operación</div>
-              <div class="fa-kpi-value money" id="fa-pf-card-reserva">${fmtMoney(editing&&editing.distribucion?editing.distribucion.reserva||0:0)}</div>
+              <div class="fa-kpi-value money" id="fa-pf-card-reserva">${fmtMoneyC(editing&&editing.distribucion?editing.distribucion.reserva||0:0)}</div>
             </div>
           </div>
 
@@ -5478,7 +5542,7 @@
                 return `
                 <div class="fa-kpi">
                   <div class="fa-kpi-label">🏦 ${escapeHtml(b.label)} (${pct[b.id]||0}%)</div>
-                  <div class="fa-kpi-value money" id="fa-pf-card-${b.id}">${fmtMoney(montoInicial)}</div>
+                  <div class="fa-kpi-value money" id="fa-pf-card-${b.id}">${fmtMoneyC(montoInicial)}</div>
                 </div>
               `;}).join('')}
             </div>
@@ -5523,7 +5587,7 @@
                   <td>${escapeHtml(i.cliente)||'—'}</td>
                   <td>${escapeHtml(i.pasarela)||'—'}</td>
                   <td class="num money">${fmtMoneyC(i.monto)}</td>
-                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoney(i.distribucion.reserva)} · `:''}Op ${fmtMoney(i.distribucion.montos.operacion)} · Sueldo ${fmtMoney(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoney(i.distribucion.montos.impuestos)} · Gan ${fmtMoney(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
+                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoneyC(i.distribucion.reserva)} · `:''}Op ${fmtMoneyC(i.distribucion.montos.operacion)} · Sueldo ${fmtMoneyC(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoneyC(i.distribucion.montos.impuestos)} · Gan ${fmtMoneyC(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
                   <td>
                     <div class="fa-row-actions">
                       <button class="fa-icon-btn" data-action="edit-ingreso-pf" data-id="${i.id}">Editar</button>
@@ -5873,7 +5937,7 @@
                   <td>${escapeHtml(i.descripcion)||'—'}</td>
                   <td>${escapeHtml(i.categoria)}</td>
                   <td>${i.moneda==='USD'?'USD':'CLP'}</td>
-                  <td class="num money">${i.moneda==='USD' ? fmtMoneyUSD(i.monto) : fmtMoneyC(i.monto)}</td>
+                  <td class="num money">${i.moneda==='USD' ? fmtMoneyUSDC(i.monto) : fmtMoneyC(i.monto)}</td>
                   <td class="fa-hint" style="margin:0;">${i.moneda==='USD' ? '100% OPEX USD' : 'Recepción → Reserva'}</td>
                   <td><span class="fa-badge ${i.estado==='Pagado'?'pagado':'pendiente'}">${i.estado}</span></td>
                   <td>
@@ -6170,13 +6234,13 @@
                 return `<tr>
                   <td>${escapeHtml(cat)}</td>
                   ${fila.map((v,m)=>`<td class="num money">${esPorcentaje ? fmtPctC(cm.totalPorMes[m]? v/cm.totalPorMes[m] : 0) : fmtMoneyC(v)}</td>`).join('')}
-                  <td class="num money" style="font-weight:700;">${esPorcentaje ? fmtPct(cm.totalAnual? totalCat/cm.totalAnual : 0) : fmtMoney(totalCat)}</td>
+                  <td class="num money" style="font-weight:700;">${esPorcentaje ? fmtPct(cm.totalAnual? totalCat/cm.totalAnual : 0) : fmtMoneyC(totalCat)}</td>
                 </tr>`;
               }).join('')}
               <tr style="font-weight:700; background:#F8F9FA;">
                 <td>TOTAL ${tipoLabel.toUpperCase()}</td>
-                ${cm.totalPorMes.map(v=>`<td class="num money">${esPorcentaje ? fmtPct(v?1:0) : fmtMoney(v)}</td>`).join('')}
-                <td class="num money">${esPorcentaje ? fmtPct(1) : fmtMoney(cm.totalAnual)}</td>
+                ${cm.totalPorMes.map(v=>`<td class="num money">${esPorcentaje ? fmtPct(v?1:0) : fmtMoneyC(v)}</td>`).join('')}
+                <td class="num money">${esPorcentaje ? fmtPct(1) : fmtMoneyC(cm.totalAnual)}</td>
               </tr>
             </tbody>
           </table>
@@ -6410,8 +6474,8 @@
                   <td><span class="fa-badge ${r.tipo==='Ingreso'?'pagado':'pendiente'}">${r.tipo}</span></td>
                   <td>${escapeHtml(r.nombre)||'—'}${r.desc ? `<div class="fa-hint" style="margin:0">${escapeHtml(r.desc)}</div>` : ''}</td>
                   <td>${escapeHtml(r.categoria)||'—'}</td>
-                  <td class="num money" style="color:${r.monto>=0?'var(--income)':'var(--expense)'}">${r.monto>=0?'+':''}${fmtMoneyUSD(r.monto)}</td>
-                  <td class="num money" style="font-weight:700">${fmtMoneyUSD(r.saldo)}</td>
+                  <td class="num money" style="color:${r.monto>=0?'var(--income)':'var(--expense)'}">${r.monto>=0?'+':''}${fmtMoneyUSDC(r.monto)}</td>
+                  <td class="num money" style="font-weight:700">${fmtMoneyUSDC(r.saldo)}</td>
                   <td>
                     <div class="fa-row-actions">
                       <button class="fa-icon-btn" data-action="edit-usd-mov" data-id="${r.id}" data-tipo="${r.tipo}">Editar</button>
@@ -6424,7 +6488,7 @@
             <tfoot>
               <tr>
                 <td colspan="4" style="text-align:right; font-weight:700;">Neto del filtro (${rows.length} movimiento${rows.length===1?'':'s'}):</td>
-                <td class="num money" style="font-weight:700;">${fmtMoneyUSD(rowsNeto)}</td>
+                <td class="num money" style="font-weight:700;">${fmtMoneyUSDC(rowsNeto)}</td>
                 <td colspan="2"></td>
               </tr>
             </tfoot>
@@ -6739,7 +6803,7 @@
       <div class="fa-card">
         <div style="border:2px solid var(--income); border-radius:14px; padding:22px; background:#F0FFF4; text-align:center;">
           <div style="font-size:13px; font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em;">Saldo actual — OPEX USD</div>
-          <div style="font-size:44px; font-weight:800; color:var(--income); margin-top:6px;">${fmtMoneyUSD(getSaldoUSD())}</div>
+          <div style="font-size:44px; font-weight:800; color:var(--income); margin-top:6px;">${fmtMoneyUSDC(getSaldoUSD())}</div>
         </div>
       </div>
 
@@ -6752,18 +6816,18 @@
               ${months.map((m,i)=>`
                 <tr>
                   <td>${MESES[i]}</td>
-                  <td class="num money" style="color:var(--income)">${fmtMoneyUSD(m.ingresos)}</td>
-                  <td class="num money" style="color:var(--expense)">${fmtMoneyUSD(m.gastos)}</td>
-                  <td class="num money">${m.resultado<0?`<span style="color:var(--expense)">${fmtMoneyUSD(m.resultado)}</span>`:fmtMoneyUSD(m.resultado)}</td>
-                  <td class="num money" style="font-weight:700">${m.acumulado<0?`<span style="color:var(--expense)">${fmtMoneyUSD(m.acumulado)}</span>`:fmtMoneyUSD(m.acumulado)}</td>
+                  <td class="num money" style="color:var(--income)">${fmtMoneyUSDC(m.ingresos)}</td>
+                  <td class="num money" style="color:var(--expense)">${fmtMoneyUSDC(m.gastos)}</td>
+                  <td class="num money">${fmtMoneyUSDC(m.resultado)}</td>
+                  <td class="num money" style="font-weight:700">${fmtMoneyUSDC(m.acumulado)}</td>
                 </tr>
               `).join('')}
               <tr style="font-weight:700; background:#F8F9FA;">
                 <td>Total año</td>
-                <td class="num money" style="color:var(--income)">${fmtMoneyUSD(totalIngresos)}</td>
-                <td class="num money" style="color:var(--expense)">${fmtMoneyUSD(totalGastos)}</td>
-                <td class="num money">${fmtMoneyUSD(totalIngresos-totalGastos)}</td>
-                <td class="num money">${fmtMoneyUSD(saldoFinAnio)}</td>
+                <td class="num money" style="color:var(--income)">${fmtMoneyUSDC(totalIngresos)}</td>
+                <td class="num money" style="color:var(--expense)">${fmtMoneyUSDC(totalGastos)}</td>
+                <td class="num money">${fmtMoneyUSDC(totalIngresos-totalGastos)}</td>
+                <td class="num money">${fmtMoneyUSDC(saldoFinAnio)}</td>
               </tr>
             </tbody>
           </table>
@@ -6781,8 +6845,8 @@
                 <tr>
                   <td>${fmtDate(m.fecha)}</td>
                   <td>${escapeHtml(m.descripcion)||'—'}</td>
-                  <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyUSD(m.monto)}</td>
-                  <td class="num money" style="font-weight:700;">${fmtMoneyUSD(m.saldo)}</td>
+                  <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyUSDC(m.monto)}</td>
+                  <td class="num money" style="font-weight:700;">${fmtMoneyUSDC(m.saldo)}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -6911,7 +6975,7 @@
                     <td>${fmtDate(p.fecha)}</td>
                     <td>${escapeHtml(boveda?boveda.label:p.boveda)}</td>
                     <td>${escapeHtml(p.descripcion)||'—'}</td>
-                    <td class="num money">${fmtMoney(p.monto)}</td>
+                    <td class="num money">${fmtMoneyC(p.monto)}</td>
                     <td><button class="fa-icon-btn" data-action="delete-pago-impuesto" data-id="${p.id}">Eliminar</button></td>
                   </tr>
                 `;}).join('')}
@@ -6938,8 +7002,8 @@
                         <td>${fmtDate(m.fecha)}</td>
                         <td>${m.tipo==='entrada'?'Entrada':'Salida'}</td>
                         <td>${escapeHtml(m.descripcion||'')}</td>
-                        <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoney(m.monto)}</td>
-                        <td class="num money" style="font-weight:700;">${fmtMoney(m.saldo)}</td>
+                        <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyC(m.monto)}</td>
+                        <td class="num money" style="font-weight:700;">${fmtMoneyC(m.saldo)}</td>
                       </tr>
                     `).join('')}
                   </tbody>
@@ -7221,6 +7285,18 @@
           <button type="button" class="fa-btn fa-btn-ghost" data-action="add-cat-egreso-flujo">Agregar</button>
         </div>
         <div class="fa-hint">Si quitas una de aquí, no desaparece de la app — pasa a contar como Gasto Operacional normal (y por lo tanto SÍ empieza a afectar Estado de Resultados).</div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Pasarelas / Medios de Pago (Ingresos y Distribución)</div>
+        <div class="fa-section-note">Campo puramente informativo, para dejar registrado por dónde entró la plata — no dispara ningún cálculo distinto.</div>
+        <div class="fa-chip-group">
+          ${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<span class="fa-chip">${escapeHtml(p)}<button data-action="remove-pasarela" data-cat="${escapeHtml(p)}">&times;</button></span>`).join('')}
+        </div>
+        <div class="fa-add-chip-row" data-form="add-pasarela">
+          <input type="text" name="nuevaCategoria" placeholder="Nueva pasarela o medio de pago">
+          <button type="button" class="fa-btn fa-btn-ghost" data-action="add-pasarela">Agregar</button>
+        </div>
       </div>
 
       <div class="fa-card">
@@ -8517,6 +8593,27 @@
       if(state.loteEnConstruccion && state.loteEnConstruccion.lineas){
         state.loteEnConstruccion.lineas.splice(idx, 1);
       }
+      if(state.editandoLineaLoteIndex === idx) state.editandoLineaLoteIndex = null;
+      render();
+    }
+    else if(action === 'editar-linea-lote'){
+      state.editandoLineaLoteIndex = Number(btn.dataset.index);
+      render();
+    }
+    else if(action === 'cancelar-edicion-linea-lote'){
+      state.editandoLineaLoteIndex = null;
+      render();
+    }
+    else if(action === 'guardar-edicion-linea-lote'){
+      const idx = Number(btn.dataset.index);
+      const data = readFields(btn.closest('[data-form="linea-lote"]'));
+      const linea = leerYValidarLinea(data);
+      if(!linea) return;
+      if(state.loteEnConstruccion && state.loteEnConstruccion.lineas && state.loteEnConstruccion.lineas[idx]){
+        state.loteEnConstruccion.lineas[idx] = linea;
+      }
+      state.editandoLineaLoteIndex = null;
+      showToast('Línea actualizada dentro del lote');
       render();
     }
     else if(action === 'registrar-ingreso-unico'){
@@ -8527,7 +8624,7 @@
       if(!linea) return;
 
       const loteId = uid('lote');
-      const seGeneraronGastos = procesarLineaDevengada(linea, loteId);
+      const seGeneraronGastos = procesarLineaDevengada(linea, loteId, true);
       await saveKey('contratosDevengados', state.contratosDevengados);
       if(seGeneraronGastos) await saveKey('gastos', state.gastos);
 
@@ -8857,6 +8954,11 @@
       showToast('Gasto registrado en Estado de Resultados — tu Cuenta de Operación NO se movió todavía');
       render();
     }
+    else if(action === 'toggle-cronograma-deuda'){
+      const id = btn.dataset.id;
+      state.deudaCronogramaExpandida = (state.deudaCronogramaExpandida === id) ? null : id;
+      render();
+    }
     else if(action === 'abrir-pago-deuda'){
       state.pagoDeudaModal = { deudaId: btn.dataset.id };
       render();
@@ -8879,13 +8981,6 @@
     }
     else if(action === 'cerrar-editar-cuota-cronograma'){
       state.editarCuotaModal = null;
-      render();
-    }
-    else if(action === 'toggle-linea-negocio-tabla'){
-      const linea = btn.dataset.linea;
-      // Acordeón: si ya estaba abierta esta misma, se cierra; si era otra (o ninguna), se abre esta y
-      // cualquier otra que estuviera abierta se reemplaza sola (solo una tabla visible a la vez).
-      state.lineaNegocioExpandida = (state.lineaNegocioExpandida === linea) ? null : linea;
       render();
     }
     else if(action === 'cerrar-celebracion-deuda'){
@@ -9856,6 +9951,27 @@
         state.config.categoriasEgresoFlujo = state.config.categoriasEgresoFlujo.filter(c=>c!==cat);
         await saveKey('config', state.config);
         showToast('Ahora cuenta como Gasto Operacional normal (sí afecta Estado de Resultados)');
+        render();
+      }
+    }
+    else if(action === 'add-pasarela'){
+      const data = readFields(btn.closest('[data-form="add-pasarela"]'));
+      const val = (data.nuevaCategoria||'').trim();
+      if(!val){ showToast('Escribe el nombre de la pasarela o medio de pago.'); return; }
+      if(!state.config.pasarelasPago) state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice();
+      if(!state.config.pasarelasPago.includes(val)){
+        state.config.pasarelasPago.push(val);
+        await saveKey('config', state.config);
+        showToast('Pasarela agregada');
+        render();
+      }
+    }
+    else if(action === 'remove-pasarela'){
+      const cat = btn.dataset.cat;
+      if(state.config.pasarelasPago){
+        state.config.pasarelasPago = state.config.pasarelasPago.filter(c=>c!==cat);
+        await saveKey('config', state.config);
+        showToast('Pasarela eliminada');
         render();
       }
     }
