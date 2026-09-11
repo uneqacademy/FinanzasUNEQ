@@ -4309,7 +4309,15 @@
             grupos[lid].push(c);
           });
           const lotesOrdenados = Object.entries(grupos).sort((a,b)=> (b[1][0].fechaInicio||'').localeCompare(a[1][0].fechaInicio||''));
-          const lotesFiltrados = state.filtroLotesMes===-1 ? lotesOrdenados : lotesOrdenados.filter(([loteId,lineas])=>{
+          // El filtro de Año (el mismo selector de arriba de toda la pantalla) también debe aplicar acá —
+          // antes esta lista mostraba TODOS los lotes de todos los años sin importar el filtro, lo cual
+          // confundía al buscar lotes de un año distinto al actual.
+          const lotesDelAnio = lotesOrdenados.filter(([loteId,lineas])=>{
+            const fechaRef = lineas[0].fechaVentaLote || lineas[0].fechaInicio;
+            if(!fechaRef) return false;
+            return new Date(fechaRef+'T00:00:00').getFullYear() === state.config.anio;
+          });
+          const lotesFiltrados = state.filtroLotesMes===-1 ? lotesDelAnio : lotesDelAnio.filter(([loteId,lineas])=>{
             const fechaRef = lineas[0].fechaVentaLote || lineas[0].fechaInicio;
             if(!fechaRef) return false;
             return new Date(fechaRef+'T00:00:00').getMonth() === state.filtroLotesMes;
