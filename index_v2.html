@@ -7396,10 +7396,19 @@
         config: state.config,
         ingresos: state.ingresos,
         gastos: state.gastos,
+        ingresosUSD: state.ingresosUSD,
+        gastosUSD: state.gastosUSD,
         pagosFijosCatalogo: state.pagosFijosCatalogo,
         pagosFijosEstado: state.pagosFijosEstado,
         pagosFijosPagos: state.pagosFijosPagos,
-        pagosFijosMontos: state.pagosFijosMontos
+        pagosFijosMontos: state.pagosFijosMontos,
+        contratosDevengados: state.contratosDevengados,
+        tesoreria: state.tesoreria,
+        deudas: state.deudas,
+        plantillasGastosFijos: state.plantillasGastosFijos,
+        cuentasPorPagar: state.cuentasPorPagar,
+        importacionHistorica: state.importacionHistorica,
+        pagosImpuestos: state.pagosImpuestos
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
       const url = URL.createObjectURL(blob);
@@ -7873,6 +7882,18 @@
           state.gastos = newGastos;
           state.pagosFijosCatalogo = newPFCatalogo;
           state.pagosFijosEstado = newPFEstado;
+          // Estas 9 colecciones se agregaron después de que se construyera el respaldo original — si el
+          // archivo importado es viejo (de antes de que existieran), cada una cae a su valor vacío por
+          // defecto en vez de reventar o dejar basura del estado anterior a medio pegar.
+          state.ingresosUSD = Array.isArray(data.ingresosUSD) ? data.ingresosUSD : [];
+          state.gastosUSD = Array.isArray(data.gastosUSD) ? data.gastosUSD : [];
+          state.contratosDevengados = Array.isArray(data.contratosDevengados) ? data.contratosDevengados : [];
+          state.tesoreria = (data.tesoreria && typeof data.tesoreria === 'object') ? data.tesoreria : { saldosIniciales:{recepcion:0,operacion:0,sueldoDuenos:0,impuestos:0,ganancia:0}, movimientos:[] };
+          state.deudas = (data.deudas && typeof data.deudas === 'object') ? data.deudas : { inventario:[], pagos:[], giros:[] };
+          state.plantillasGastosFijos = Array.isArray(data.plantillasGastosFijos) ? data.plantillasGastosFijos : [];
+          state.cuentasPorPagar = (data.cuentasPorPagar && typeof data.cuentasPorPagar === 'object') ? data.cuentasPorPagar : { items:[], pagos:[] };
+          state.importacionHistorica = Array.isArray(data.importacionHistorica) ? data.importacionHistorica : [];
+          state.pagosImpuestos = Array.isArray(data.pagosImpuestos) ? data.pagosImpuestos : [];
 
           // El respaldo importado puede venir del formato antiguo (sin abonos parciales) — si no trae
           // pagosFijosPagos, se migra igual que al cargar la app por primera vez.
@@ -7895,8 +7916,17 @@
           await saveKey('pagosFijosEstado', state.pagosFijosEstado);
           await saveKey('pagosFijosPagos', state.pagosFijosPagos);
           await saveKey('pagosFijosMontos', state.pagosFijosMontos);
+          await saveKey('ingresosUSD', state.ingresosUSD);
+          await saveKey('gastosUSD', state.gastosUSD);
+          await saveKey('contratosDevengados', state.contratosDevengados);
+          await saveKey('tesoreria', state.tesoreria);
+          await saveKey('deudas', state.deudas);
+          await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
+          await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+          await saveKey('importacionHistorica', state.importacionHistorica);
+          await saveKey('pagosImpuestos', state.pagosImpuestos);
 
-          showToast(`Importado: ${newIngresos.length} ingresos, ${newGastos.length} gastos, ${newPFCatalogo.length} pagos fijos`);
+          showToast(`Importado: ${newIngresos.length} ingresos, ${newGastos.length} gastos, ${newPFCatalogo.length} pagos fijos, ${state.contratosDevengados.length} lotes de venta`);
           render();
         }
       }
@@ -9571,8 +9601,10 @@
         const nIng = Array.isArray(data.ingresos) ? data.ingresos.length : 0;
         const nGas = Array.isArray(data.gastos) ? data.gastos.length : 0;
         const nPF = Array.isArray(data.pagosFijosCatalogo) ? data.pagosFijosCatalogo.length : 0;
+        const nLotes = Array.isArray(data.contratosDevengados) ? data.contratosDevengados.length : 0;
+        const nDeudas = data.deudas && Array.isArray(data.deudas.inventario) ? data.deudas.inventario.length : 0;
         state.confirmDialog = {
-          message: `Esto reemplazará TODOS tus datos actuales por los de "${file.name}" (${nIng} ingresos, ${nGas} gastos, ${nPF} pagos fijos). Esta acción no se puede deshacer.`,
+          message: `Esto reemplazará TODOS tus datos actuales por los de "${file.name}" (${nIng} ingresos, ${nGas} gastos, ${nPF} pagos fijos, ${nLotes} lotes de venta, ${nDeudas} deudas, además de Tesorería, Cuentas por Pagar e Importar Históricos). Esta acción no se puede deshacer.`,
           action: 'do-import-json',
           data: null,
           confirmLabel: 'Reemplazar datos'
