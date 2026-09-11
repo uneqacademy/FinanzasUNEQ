@@ -4150,6 +4150,7 @@
     return `
       <div class="fa-topbar">
         <div><h1>Dashboard</h1><div class="fa-sub">Solo lectura — alimentado automáticamente por Distribución, Estado de Resultados, Tesorería y Deudas.</div></div>
+        ${yearSelect('dashboard')}
       </div>
 
       <div class="fa-card">
@@ -4800,17 +4801,19 @@
   // ---------------- IMPORTAR HISTÓRICOS (pantalla temporal de migración desde la app anterior) ----------------
   function renderImportarHistoricos(){
     const todos = (state.importacionHistorica||[]).slice().sort((a,b)=>(a.fecha||'').localeCompare(b.fecha||''));
-    const filtrados = state.filtroHistoricosMes===-1 ? todos : todos.filter(h=>{
+    const delAnio = todos.filter(h=> h.fecha && new Date(h.fecha+'T00:00:00').getFullYear() === state.config.anio);
+    const filtrados = state.filtroHistoricosMes===-1 ? delAnio : delAnio.filter(h=>{
       if(!h.fecha) return false;
       return new Date(h.fecha+'T00:00:00').getMonth() === state.filtroHistoricosMes;
     });
-    const pendientes = todos.filter(h=>!h.agregado).length;
-    const agregados = todos.length - pendientes;
+    const pendientes = delAnio.filter(h=>!h.agregado).length;
+    const agregados = delAnio.length - pendientes;
     const totalMontoFiltrado = filtrados.reduce((s,h)=>s+(Number(h.monto)||0),0);
 
     return `
       <div class="fa-topbar">
         <div><h1>📥 Importar Históricos</h1><div class="fa-sub">Gastos traídos de tu app anterior — clasifícalos y agrégalos uno por uno a Estado de Resultados. Como son todos de antes del Día Cero, nunca van a alterar tu Tesorería ni tu Flujo de Caja actual.</div></div>
+        ${yearSelect('importarhistoricos')}
       </div>
 
       <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:700px;">
@@ -4888,6 +4891,7 @@
     return `
       <div class="fa-topbar">
         <div><h1>Gestión de Deudas</h1><div class="fa-sub">Estrategia Bola de Nieve — ataca la deuda más chica primero, cuota mínima a las demás.</div></div>
+        ${yearSelect('deudas')}
       </div>
 
       ${state.deudaRecienLiquidada ? `
@@ -6934,7 +6938,8 @@
 
     return `
       <div class="fa-topbar">
-        <div><h1>Tesorería</h1><div class="fa-sub">Las 5 bóvedas de tu negocio — dónde vive la plata y para qué es cada una.</div></div>
+        <div><h1>Tesorería</h1><div class="fa-sub">Las 5 bóvedas de tu negocio — dónde vive la plata y para qué es cada una. Los saldos son SIEMPRE el total actual, sin importar el año que elijas arriba (solo afecta a los movimientos e informes de abajo que sí están fechados).</div></div>
+        ${yearSelect('tesoreria')}
       </div>
       ${moduloFlujoTabs()}
 
