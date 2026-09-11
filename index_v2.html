@@ -2410,14 +2410,28 @@
     return firebase.database().ref(V2_PREFIX + key);
   }
 
-  async function loadKey(key, fallback){
-    try {
-      const snap = await fbRef(key).once('value');
-      const val = snap.val();
-      return (val !== null && val !== undefined) ? val : fallback;
-    } catch (e) {
-      return fallback;
+  // Antes, un fallo de lectura (conexión inestable, típico en el celular) se disfrazaba en silencio de "no
+  // tienes datos" — devolvía el valor por defecto sin avisar, y si después se guardaba algo, esa versión
+  // vacía se grababa encima de los datos reales en Firebase. Ahora reintenta 3 veces, y si de verdad no logra
+  // leer, lanza el error hacia arriba para que loadAppData lo capture y bloquee la app con un aviso claro —
+  // nunca sigue adelante fingiendo que no hay datos.
+  async function leerConReintento(key){
+    let ultimoError;
+    for(let intento=1; intento<=3; intento++){
+      try {
+        const snap = await fbRef(key).once('value');
+        return snap.val();
+      } catch (e) {
+        ultimoError = e;
+        console.warn(`Firebase: intento ${intento}/3 de leer "${key}" falló`, e);
+        if(intento < 3) await sleep(400 * intento + Math.random()*300);
+      }
     }
+    throw ultimoError;
+  }
+  async function loadKey(key, fallback){
+    const val = await leerConReintento(key);
+    return (val !== null && val !== undefined) ? val : fallback;
   }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
@@ -2449,15 +2463,10 @@
   // Como loadKey, pero si la clave nunca existió en Firebase, siembra el valor semilla de inmediato
   // (así los datos recuperados del respaldo quedan guardados desde el primer arranque, no solo en memoria).
   async function loadKeySeeded(key, seedValue){
-    try {
-      const snap = await fbRef(key).once('value');
-      const val = snap.val();
-      if(val !== null && val !== undefined) return val;
-      await saveKey(key, seedValue, {silent:true});
-      return seedValue;
-    } catch (e) {
-      return seedValue;
-    }
+    const val = await leerConReintento(key);
+    if(val !== null && val !== undefined) return val;
+    await saveKey(key, seedValue, {silent:true});
+    return seedValue;
   }
 
   // Migra el estado antiguo de Pagos Fijos (un solo string 'Pagado'/'Pendiente' por mes) al nuevo modelo de
