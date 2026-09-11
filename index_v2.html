@@ -782,6 +782,8 @@
   // Procesa UNA línea (ya sea de un lote o de un Ingreso Único): crea su contratoDevengado y genera sus
   // gastos de comisión/anticipo (uno por cuota, mes a mes desde fechaInicioVenta). Devuelve true si generó
   // algún gasto, para saber si hace falta guardar 'gastos' además de 'contratosDevengados'.
+  // Ya NO empuja directo a state.contratosDevengados/state.gastos — devuelve los objetos nuevos para que
+  // quien la llame los guarde con saveKeyMerged (transacción segura contra pestañas viejas que pisen datos).
   function procesarLineaDevengada(linea, loteId, esIngresoUnico){
     const esUSD = esFormaPagoUSD(linea.formaPago);
     const tipoCambio = linea.tipoCambio; // por línea, ya no compartido por lote
@@ -789,7 +791,7 @@
     // Cada línea usa SU PROPIA fecha de venta (linea.fechaInicio) — ya no un parámetro compartido del lote.
     const fechaIngreso = linea.fechaEvento || linea.fechaInicio;
     const contratoId = uid('contrato');
-    state.contratosDevengados.push({
+    const contrato = {
       id: contratoId, loteId, nombre: linea.nombre, montoTotal,
       montoTotalUSD: esUSD ? linea.montoBruto : undefined,
       tipoCambio: esUSD ? tipoCambio : null,
@@ -799,7 +801,7 @@
       numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
       anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD,
       esIngresoUnico: !!esIngresoUnico
-    });
+    };
 
     const numCuotas = Math.max(Number(linea.numeroCuotasPago)||1, 1);
     const comisionPorCuotaCLP = esUSD
@@ -807,28 +809,26 @@
       : Math.round(Number(linea.comisionPorCuota)||0);
     const anticipoPorCuotaCLP = esUSD ? Math.round((Number(linea.anticipoPorCuotaUSD)||0) * tipoCambio) : 0;
     const inicio = new Date(linea.fechaInicio+'T00:00:00');
-    let seGeneraronGastos = false;
+    const gastosNuevos = [];
     for(let i=0; i<numCuotas; i++){
       const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
       const fechaCuota = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
       if(comisionPorCuotaCLP > 0){
-        state.gastos.push({
+        gastosNuevos.push({
           id: uid('gas'), fecha: fechaCuota, categoria: CAT_COSTO_COMISIONES, proveedor: linea.nombre,
           descripcion: `Comisión ${esUSD?'pasarela internacional':'pasarela'} — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
           monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: contratoId
         });
-        seGeneraronGastos = true;
       }
       if(anticipoPorCuotaCLP > 0){
-        state.gastos.push({
+        gastosNuevos.push({
           id: uid('gas'), fecha: fechaCuota, categoria: CAT_GASTO_COSTO_LIQUIDEZ, proveedor: linea.nombre,
           descripcion: `Anticipo de fondos — cuota ${i+1}/${numCuotas} — ${linea.nombre}`,
           monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: contratoId
         });
-        seGeneraronGastos = true;
       }
     }
-    return seGeneraronGastos;
+    return { contrato, gastosNuevos };
   }
 
   // Lee y valida los campos comunes de una línea desde el formulario "linea-lote" — usado tanto para
@@ -2435,6 +2435,31 @@
   }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
+  // Guarda usando una TRANSACCIÓN nativa de Firebase — la única forma verdaderamente segura de evitar que una
+  // pestaña vieja (con una foto antigua de los datos en memoria) sobreescriba lo que otra pestaña ya guardó
+  // después. En vez de mandar "acá está mi arreglo completo", se manda una función que Firebase aplica sobre
+  // el valor MÁS RECIENTE del servidor en ese instante — si alguien más escribió justo antes, Firebase vuelve
+  // a ejecutar la función sobre el nuevo valor automáticamente, las veces que haga falta, hasta que se guarde
+  // limpio. Devuelve el arreglo final tal como quedó en Firebase (para sincronizar el estado en memoria).
+  async function saveKeyMerged(key, transformFn){
+    if(state.readOnly){
+      showToast('Estás en modo solo lectura — este cambio no se guardó.');
+      return null;
+    }
+    try {
+      const result = await fbRef(key).transaction(current => transformFn(current));
+      if(!result.committed){
+        showToast('No se pudo guardar "' + key + '" — inténtalo de nuevo.');
+        return null;
+      }
+      return result.snapshot.val();
+    } catch (e) {
+      console.error(`Firebase transacción de "${key}" falló`, e);
+      showToast('No se pudo guardar "' + key + '" en Firebase. Revisa tu conexión e intenta de nuevo.');
+      return null;
+    }
+  }
+
   async function saveKey(key, value, opts){
     if(state.readOnly){
       showToast('Estás en modo solo lectura — este cambio no se guardó.');
@@ -3148,14 +3173,17 @@
   async function guardarGastoYSyncTesoreria(data, editId){
     let gastoFinal;
     if(editId){
-      const idx = state.gastos.findIndex(g=>g.id===editId);
-      if(idx>-1){ state.gastos[idx] = {...state.gastos[idx], ...data}; gastoFinal = state.gastos[idx]; }
+      state.gastos = await saveKeyMerged('gastos', current => {
+        const arr = current || [];
+        const idx = arr.findIndex(g=>g.id===editId);
+        if(idx>-1){ arr[idx] = {...arr[idx], ...data}; gastoFinal = arr[idx]; }
+        return arr;
+      });
     } else {
       data.id = uid('gas');
-      state.gastos.push(data);
       gastoFinal = data;
+      state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), data]);
     }
-    await saveKey('gastos', state.gastos);
     if(gastoFinal){
       syncTesoreriaGasto(gastoFinal);
       syncTesoreriaGastoUSD(gastoFinal);
@@ -8100,8 +8128,7 @@
         render();
       }
       else if(cd.action === 'do-delete-ingreso-pf'){
-        state.ingresos = state.ingresos.filter(i=>i.id!==cd.data);
-        await saveKey('ingresos', state.ingresos);
+        state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).filter(i=>i.id!==cd.data));
         // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino), o el
         // movimiento en OPEX USD si era un ingreso en dólares.
         removeTesoreriaPorIngresoPF(cd.data);
@@ -8111,12 +8138,12 @@
         render();
       }
       else if(cd.action === 'do-delete-contrato-devengado'){
-        state.contratosDevengados = state.contratosDevengados.filter(c=>c.id!==cd.data);
-        await saveKey('contratosDevengados', state.contratosDevengados);
+        state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=>c.id!==cd.data));
         // Los gastos de comisiones/anticipo que ese lote generó quedan huérfanos si no se limpian.
         const teniaGastosVinculados = state.gastos.some(g=>g.origenContrato===cd.data);
-        state.gastos = state.gastos.filter(g=>g.origenContrato!==cd.data);
-        if(teniaGastosVinculados) await saveKey('gastos', state.gastos);
+        if(teniaGastosVinculados){
+          state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.origenContrato!==cd.data));
+        }
         showToast('Lote de ventas eliminado');
         render();
       }
@@ -8125,11 +8152,11 @@
         // una — ahora que cada línea etiqueta sus propios gastos con su propio id (no con el del lote), hay
         // que juntar primero los ids de todas sus líneas antes de poder limpiar los gastos vinculados.
         const idsDeLasLineas = state.contratosDevengados.filter(c=> (c.loteId||c.id) === cd.data).map(c=>c.id);
-        state.contratosDevengados = state.contratosDevengados.filter(c=> (c.loteId||c.id) !== cd.data);
-        await saveKey('contratosDevengados', state.contratosDevengados);
+        state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=> (c.loteId||c.id) !== cd.data));
         const teniaGastosVinculados = state.gastos.some(g=>idsDeLasLineas.includes(g.origenContrato));
-        state.gastos = state.gastos.filter(g=>!idsDeLasLineas.includes(g.origenContrato));
-        if(teniaGastosVinculados) await saveKey('gastos', state.gastos);
+        if(teniaGastosVinculados){
+          state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>!idsDeLasLineas.includes(g.origenContrato)));
+        }
         showToast('Lote completo eliminado, junto con sus comisiones/anticipo vinculados');
         render();
       }
@@ -8177,8 +8204,7 @@
       }
       else if(cd.action === 'do-delete-gasto'){
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
-        state.gastos = state.gastos.filter(g=>g.id!==cd.data);
-        await saveKey('gastos', state.gastos);
+        state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.id!==cd.data));
         // V2 — Tesorería: si ese gasto tenía una salida de bóveda CLP u OPEX USD asociada, se quita también
         // (ya sea el camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
         removeTesoreriaGasto(cd.data);
@@ -8531,13 +8557,11 @@
           pasarela: '', monto, moneda: 'USD', estado: 'Pagado', distribucion: null
         };
         if(editId){
-          const idx = state.ingresos.findIndex(i=>i.id===editId);
-          if(idx>-1) state.ingresos[idx] = ingreso;
+          state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i));
           state.editingIngresoId = null;
         } else {
-          state.ingresos.push(ingreso);
+          state.ingresos = await saveKeyMerged('ingresos', current => [...(current||[]), ingreso]);
         }
-        await saveKey('ingresos', state.ingresos);
         removeTesoreriaPorIngresoPF(ingresoId);
         syncTesoreriaIngresoUSD(ingreso);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
@@ -8565,13 +8589,11 @@
         distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
       };
       if(editId){
-        const idx = state.ingresos.findIndex(i=>i.id===editId);
-        if(idx>-1) state.ingresos[idx] = ingreso;
+        state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i));
         state.editingIngresoId = null;
       } else {
-        state.ingresos.push(ingreso);
+        state.ingresos = await saveKeyMerged('ingresos', current => [...(current||[]), ingreso]);
       }
-      await saveKey('ingresos', state.ingresos);
 
       // Se usa el ID del propio ingreso como llave de correlación de su distribución (en vez de un id random)
       // — así, si se edita o se elimina, es trivial encontrar y limpiar TODOS sus movimientos de Tesorería.
@@ -8698,9 +8720,8 @@
       // Tipo de Ingreso, Forma de Pago, Duración, Fecha del Evento, Cuotas, Comisión y Anticipo.
       const editId = state.editingContratoId;
       if(!editId){ showToast('No hay ninguna línea en edición.'); return; }
-      const idx = state.contratosDevengados.findIndex(c=>c.id===editId);
-      if(idx<0){ showToast('No se encontró la línea a editar.'); return; }
-      const anterior = state.contratosDevengados[idx];
+      const anterior = state.contratosDevengados.find(c=>c.id===editId);
+      if(!anterior){ showToast('No se encontró la línea a editar.'); return; }
 
       const data = readFields(btn.closest('[data-form="contrato-devengado"]'));
       const formaPago = data.formaPago || 'usd';
@@ -8723,7 +8744,7 @@
       const montoTotal = esUSD ? Math.round(montoBruto * tipoCambio) : Math.round(montoBruto);
       const fechaIngreso = ti.usaFechaEvento ? data.fechaEvento : data.fechaVentaLote;
 
-      state.contratosDevengados[idx] = {
+      const contratoActualizado = {
         ...anterior,
         nombre: data.nombre, montoTotal,
         montoTotalUSD: esUSD ? montoBruto : undefined,
@@ -8731,38 +8752,39 @@
         fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
         numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
       };
-      await saveKey('contratosDevengados', state.contratosDevengados);
+      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current =>
+        (current||[]).map(c=> c.id===editId ? contratoActualizado : c)
+      );
 
       // Se borran los gastos de comisión/anticipo VIEJOS de esta línea (solo los de ella, gracias a que
       // cada línea etiqueta los suyos con su propio id) y se regeneran con los valores actuales — así nunca
       // quedan cifras desactualizadas ni duplicadas, y jamás se toca lo de otra línea del mismo lote.
-      state.gastos = state.gastos.filter(g=> g.origenContrato !== editId);
       const numCuotas = numeroCuotasPago;
       const comisionPorCuotaCLP = esUSD ? Math.round(comisionPorCuota * tipoCambio) : Math.round(comisionPorCuota);
       const anticipoPorCuotaCLP = esUSD ? Math.round(anticipoPorCuotaUSD * tipoCambio) : 0;
       const inicioCuotas = new Date(data.fechaVentaLote+'T00:00:00');
-      let seGeneraronGastos = false;
+      const gastosNuevos = [];
       for(let i=0; i<numCuotas; i++){
         const d = new Date(inicioCuotas.getFullYear(), inicioCuotas.getMonth()+i, 1);
         const fechaCuota = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
         if(comisionPorCuotaCLP > 0){
-          state.gastos.push({
+          gastosNuevos.push({
             id: uid('gas'), fecha: fechaCuota, categoria: CAT_COSTO_COMISIONES, proveedor: data.nombre,
             descripcion: `Comisión ${esUSD?'pasarela internacional':'pasarela'} — cuota ${i+1}/${numCuotas} — ${data.nombre}`,
             monto: comisionPorCuotaCLP, metodo: esUSD?'Transferencia':'Tarjeta de Crédito', origenContrato: editId
           });
-          seGeneraronGastos = true;
         }
         if(anticipoPorCuotaCLP > 0){
-          state.gastos.push({
+          gastosNuevos.push({
             id: uid('gas'), fecha: fechaCuota, categoria: CAT_GASTO_COSTO_LIQUIDEZ, proveedor: data.nombre,
             descripcion: `Anticipo de fondos — cuota ${i+1}/${numCuotas} — ${data.nombre}`,
             monto: anticipoPorCuotaCLP, metodo: 'Transferencia', origenContrato: editId
           });
-          seGeneraronGastos = true;
         }
       }
-      await saveKey('gastos', state.gastos);
+      state.gastos = await saveKeyMerged('gastos', current =>
+        [...(current||[]).filter(g=> g.origenContrato !== editId), ...gastosNuevos]
+      );
 
       state.editingContratoId = null;
       showToast('Línea actualizada');
@@ -8813,9 +8835,11 @@
       if(!linea) return;
 
       const loteId = uid('lote');
-      const seGeneraronGastos = procesarLineaDevengada(linea, loteId, true);
-      await saveKey('contratosDevengados', state.contratosDevengados);
-      if(seGeneraronGastos) await saveKey('gastos', state.gastos);
+      const { contrato, gastosNuevos } = procesarLineaDevengada(linea, loteId, true);
+      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => [...(current||[]), contrato]);
+      if(gastosNuevos.length){
+        state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos]);
+      }
 
       showToast('Ingreso Único registrado');
       render();
@@ -8827,12 +8851,17 @@
       if(lineas.length === 0){ showToast('Agrega al menos una línea al lote antes de confirmar.'); return; }
 
       const loteId = uid('lote');
-      let seGeneraronGastos = false;
+      const contratosNuevos = [];
+      const gastosNuevos = [];
       lineas.forEach(linea=>{
-        if(procesarLineaDevengada(linea, loteId)) seGeneraronGastos = true;
+        const resultado = procesarLineaDevengada(linea, loteId);
+        contratosNuevos.push(resultado.contrato);
+        gastosNuevos.push(...resultado.gastosNuevos);
       });
-      await saveKey('contratosDevengados', state.contratosDevengados);
-      if(seGeneraronGastos) await saveKey('gastos', state.gastos);
+      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => [...(current||[]), ...contratosNuevos]);
+      if(gastosNuevos.length){
+        state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos]);
+      }
 
       state.loteEnConstruccion = { lineas: [] };
       showToast(`Lote confirmado — ${lineas.length} línea${lineas.length===1?'':'s'} registrada${lineas.length===1?'':'s'}, comisiones y anticipos repartidos mes a mes según cada cuota`);
