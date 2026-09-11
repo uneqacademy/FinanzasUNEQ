@@ -3062,6 +3062,7 @@
     state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=>
       m.origen !== `ingreso:${ingresoId}` && m.origen !== `distribucion:${ingresoId}` && m.origen !== `reserva:${ingresoId}`
     );
+    state.tesoreriaUSD.movimientos = state.tesoreriaUSD.movimientos.filter(m=> m.origen !== `ingreso:${ingresoId}`);
   }
 
   // Mantiene sincronizada la salida de Tesorería que corresponde a un gasto: la crea o actualiza según la
@@ -3606,23 +3607,67 @@
   // HTML, que ejecutan en el scope global — pero como están definidas AQUÍ DENTRO del IIFE, sí tienen acceso
   // a state/fmtMoney/BOVEDAS_PAGABLES por clausura. Actualizan el DOM directo (no llaman a render()) para no
   // perder el foco del campo Monto mientras el usuario escribe.
+  window.faToggleMonedaIngresoPF = function(){
+    const sel = document.getElementById('fa-pf-moneda');
+    if(!sel) return;
+    const esUSD = sel.value === 'USD';
+    const label = document.getElementById('fa-pf-monto-label');
+    const pasarelaWrap = document.getElementById('fa-pf-pasarela-wrap');
+    const reservaFieldWrap = document.getElementById('fa-pf-reserva-field-wrap');
+    const clpNota = document.getElementById('fa-pf-clp-nota');
+    const usdNota = document.getElementById('fa-pf-usd-nota');
+    if(label) label.textContent = esUSD ? 'Monto Bruto Recibido (USD)' : 'Monto Bruto Recibido';
+    if(pasarelaWrap) pasarelaWrap.style.display = esUSD ? 'none' : '';
+    if(reservaFieldWrap) reservaFieldWrap.style.display = esUSD ? 'none' : '';
+    if(clpNota) clpNota.style.display = esUSD ? 'none' : '';
+    if(usdNota) usdNota.style.display = esUSD ? '' : 'none';
+    window.faRecalcularDistribucionPF();
+  };
   window.faRecalcularDistribucionPF = function(){
+    const monedaSel = document.getElementById('fa-pf-moneda');
+    const esUSD = monedaSel && monedaSel.value === 'USD';
     const montoInput = document.getElementById('fa-pf-monto');
     const reservaInput = document.getElementById('fa-pf-reserva');
     const cardsWrap = document.getElementById('fa-pf-cards-wrap');
+    const usdCardWrap = document.getElementById('fa-pf-usd-card-wrap');
     const checklistWrap = document.getElementById('fa-pf-checklist-wrap');
     const reservaWrap = document.getElementById('fa-pf-reserva-wrap');
     const chkReservaWrap = document.getElementById('fa-pf-chk-reserva-wrap');
+    const chkUsdWrap = document.getElementById('fa-pf-chk-usd-wrap');
+    const chksClpOnly = document.querySelectorAll('.fa-pf-chk-clp-only');
     if(!montoInput || !cardsWrap || !checklistWrap) return;
     const monto = Number(montoInput.value) || 0;
     if(monto <= 0){
       cardsWrap.style.display = 'none';
+      if(usdCardWrap) usdCardWrap.style.display = 'none';
       checklistWrap.style.display = 'none';
       if(reservaWrap) reservaWrap.style.display = 'none';
       return;
     }
-    cardsWrap.style.display = '';
     checklistWrap.style.display = '';
+
+    if(esUSD){
+      // En USD no hay Reserva ni distribución en 4 bóvedas — un solo destino: OPEX USD.
+      cardsWrap.style.display = 'none';
+      if(reservaWrap) reservaWrap.style.display = 'none';
+      if(chkReservaWrap) chkReservaWrap.style.display = 'none';
+      chksClpOnly.forEach(el=> el.style.display = 'none');
+      if(usdCardWrap) usdCardWrap.style.display = '';
+      if(chkUsdWrap) chkUsdWrap.style.display = 'flex';
+      const cardUsd = document.getElementById('fa-pf-card-usd');
+      const chkLabelUsd = document.getElementById('fa-pf-chk-label-usd');
+      const chkUsd = document.getElementById('fa-pf-chk-usd');
+      if(cardUsd) cardUsd.textContent = fmtMoneyUSD(monto);
+      if(chkLabelUsd) chkLabelUsd.textContent = fmtMoneyUSD(monto);
+      if(chkUsd) chkUsd.checked = false;
+      window.faActualizarBotonConfirmarPF();
+      return;
+    }
+
+    if(usdCardWrap) usdCardWrap.style.display = 'none';
+    if(chkUsdWrap) chkUsdWrap.style.display = 'none';
+    chksClpOnly.forEach(el=> el.style.display = 'flex');
+    cardsWrap.style.display = '';
     // La Reserva para Costos Directos sale 100% hacia Operación ANTES de aplicar Profit First — los 4
     // porcentajes se calculan solo sobre el "Margen Neto Restante" (monto − reserva), nunca sobre el bruto.
     const reserva = Math.min(Number(reservaInput ? reservaInput.value : 0) || 0, monto);
@@ -3653,6 +3698,13 @@
   window.faActualizarBotonConfirmarPF = function(){
     const btn = document.getElementById('fa-pf-btn-confirmar');
     if(!btn) return;
+    const monedaSel = document.getElementById('fa-pf-moneda');
+    const esUSD = monedaSel && monedaSel.value === 'USD';
+    if(esUSD){
+      const chkUsd = document.getElementById('fa-pf-chk-usd');
+      btn.disabled = !(chkUsd && chkUsd.checked);
+      return;
+    }
     const reservaInput = document.getElementById('fa-pf-reserva');
     const reserva = Number(reservaInput ? reservaInput.value : 0) || 0;
     const chkReserva = document.getElementById('fa-pf-chk-reserva');
@@ -5515,26 +5567,33 @@
         <div data-form="ingreso-pf">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editing?editing.fecha:todayISO()}"></div>
+            <div class="fa-field"><label>Moneda</label>
+              <select name="moneda" id="fa-pf-moneda" onchange="window.faToggleMonedaIngresoPF()">
+                <option value="CLP" ${(!editing || editing.moneda!=='USD')?'selected':''}>CLP</option>
+                <option value="USD" ${editing && editing.moneda==='USD'?'selected':''}>USD</option>
+              </select>
+            </div>
             <div class="fa-field"><label>Origen del Ingreso</label>
               <select name="categoria">${state.config.categoriasIngresos.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
-            <div class="fa-field"><label>Pasarela / Medio de Pago</label>
+            <div class="fa-field" id="fa-pf-pasarela-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Pasarela / Medio de Pago</label>
               <select name="pasarela">${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<option ${editing&&editing.pasarela===p?'selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
             </div>
-            <div class="fa-field"><label>Monto Bruto Recibido</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="1" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
-            <div class="fa-field"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
+            <div class="fa-field"><label id="fa-pf-monto-label">Monto Bruto Recibido${editing&&editing.moneda==='USD'?' (USD)':''}</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="0.01" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
+            <div class="fa-field" id="fa-pf-reserva-field-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
           </div>
-          <div class="fa-hint" style="margin-top:0;">El monto siempre se ingresa en CLP — el neto real que llegó a tu banco. La Pasarela es solo para dejar registrado por dónde entró la plata, no cambia ningún cálculo. La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
+          <div class="fa-hint" style="margin-top:0;" id="fa-pf-clp-nota">El monto siempre se ingresa en CLP — el neto real que llegó a tu banco. La Pasarela es solo para dejar registrado por dónde entró la plata, no cambia ningún cálculo. La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
+          <div class="fa-hint" style="margin-top:0; display:${editing&&editing.moneda==='USD'?'':'none'};" id="fa-pf-usd-nota">100% va directo a la bóveda OPEX USD — aislada, no se reparte ni se mezcla con las otras bóvedas en CLP. No aplica Reserva ni distribución Profit First (eso es solo para CLP).</div>
 
-          <div id="fa-pf-reserva-wrap" style="${editing && editing.distribucion && editing.distribucion.reserva ? '' : 'display:none;'} margin-top:14px;">
+          <div id="fa-pf-reserva-wrap" style="${editing && editing.distribucion && editing.distribucion.reserva && editing.moneda!=='USD' ? '' : 'display:none;'} margin-top:14px;">
             <div class="fa-kpi" style="max-width:280px;">
               <div class="fa-kpi-label">🔒 Reserva Costos Directos → Operación</div>
               <div class="fa-kpi-value money" id="fa-pf-card-reserva">${fmtMoneyC(editing&&editing.distribucion?editing.distribucion.reserva||0:0)}</div>
             </div>
           </div>
 
-          <div id="fa-pf-cards-wrap" style="${editing?'':'display:none;'} margin-top:16px;">
+          <div id="fa-pf-cards-wrap" style="${editing&&editing.moneda!=='USD'?'':'display:none;'} margin-top:16px;">
             <div class="fa-hint" style="margin:0 0 8px 0;">Así se reparte el Margen Neto Restante (después de la reserva), según tu configuración actual:</div>
             <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr);">
               ${BOVEDAS_PAGABLES.map(b=>{
@@ -5548,6 +5607,13 @@
             </div>
           </div>
 
+          <div id="fa-pf-usd-card-wrap" style="${editing&&editing.moneda==='USD'?'':'display:none;'} margin-top:16px;">
+            <div class="fa-kpi" style="max-width:280px;">
+              <div class="fa-kpi-label">💵 OPEX USD (100%)</div>
+              <div class="fa-kpi-value money" id="fa-pf-card-usd">${fmtMoneyUSDC(editing&&editing.moneda==='USD'?editing.monto:0)}</div>
+            </div>
+          </div>
+
           <div id="fa-pf-checklist-wrap" style="${editing?'display:none;':'display:none;'} margin-top:16px;">
             <div class="fa-hint" style="margin:0 0 8px 0;">Marca cada transferencia una vez que la hayas hecho de verdad en tu banco:</div>
             <label id="fa-pf-chk-reserva-wrap" style="display:${editing&&editing.distribucion&&editing.distribucion.reserva?'flex':'none'}; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
@@ -5555,11 +5621,15 @@
               Transferí <span id="fa-pf-chk-label-reserva" style="font-weight:700;">$0</span> de reserva a Operación
             </label>
             ${BOVEDAS_PAGABLES.map(b=>`
-              <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
+              <label class="fa-pf-chk-clp-only" style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
                 <input type="checkbox" id="fa-pf-chk-${b.id}" onchange="window.faActualizarBotonConfirmarPF()">
                 Transferí <span id="fa-pf-chk-label-${b.id}" style="font-weight:700;">$0</span> a ${escapeHtml(b.label)}
               </label>
             `).join('')}
+            <label id="fa-pf-chk-usd-wrap" style="display:none; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:6px;">
+              <input type="checkbox" id="fa-pf-chk-usd" onchange="window.faActualizarBotonConfirmarPF()">
+              Transferí <span id="fa-pf-chk-label-usd" style="font-weight:700;">US$0</span> a OPEX USD
+            </label>
             <div class="fa-form-actions" style="margin-top:10px;">
               <button type="button" id="fa-pf-btn-confirmar" class="fa-btn fa-btn-primary" data-action="confirmar-distribucion-ingreso" disabled>Confirmar Transferencias Realizadas</button>
             </div>
@@ -5578,16 +5648,17 @@
         ${filas.length===0 ? `<div class="fa-empty">Aún no registras ingresos en ${state.config.anio}.</div>` : `
         <div class="fa-table-wrap">
           <table class="fa-table">
-            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th>Pasarela</th><th class="num">Monto</th><th>Distribución</th><th></th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Origen</th><th>Cliente</th><th>Moneda</th><th>Pasarela</th><th class="num">Monto</th><th>Distribución</th><th></th></tr></thead>
             <tbody>
               ${filas.map(i=>`
                 <tr>
                   <td>${fmtDate(i.fecha)}</td>
                   <td>${escapeHtml(i.categoria)}</td>
                   <td>${escapeHtml(i.cliente)||'—'}</td>
+                  <td>${i.moneda==='USD'?'USD':'CLP'}</td>
                   <td>${escapeHtml(i.pasarela)||'—'}</td>
-                  <td class="num money">${fmtMoneyC(i.monto)}</td>
-                  <td>${i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoneyC(i.distribucion.reserva)} · `:''}Op ${fmtMoneyC(i.distribucion.montos.operacion)} · Sueldo ${fmtMoneyC(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoneyC(i.distribucion.montos.impuestos)} · Gan ${fmtMoneyC(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`)}</td>
+                  <td class="num money">${i.moneda==='USD'?fmtMoneyUSDC(i.monto):fmtMoneyC(i.monto)}</td>
+                  <td>${i.moneda==='USD' ? `<span class="fa-hint" style="margin:0;">100% OPEX USD</span>` : (i.distribucion ? `<span class="fa-hint" style="margin:0;">${i.distribucion.reserva?`Reserva ${fmtMoneyC(i.distribucion.reserva)} · `:''}Op ${fmtMoneyC(i.distribucion.montos.operacion)} · Sueldo ${fmtMoneyC(i.distribucion.montos.sueldoDuenos)} · Imp ${fmtMoneyC(i.distribucion.montos.impuestos)} · Gan ${fmtMoneyC(i.distribucion.montos.ganancia)}</span>` : (i.estado==='Pendiente' ? `<span class="fa-badge pendiente">Pendiente de cobro</span>` : `<span class="fa-hint" style="margin:0;">Sin distribuir</span>`))}</td>
                   <td>
                     <div class="fa-row-actions">
                       <button class="fa-icon-btn" data-action="edit-ingreso-pf" data-id="${i.id}">Editar</button>
@@ -7946,9 +8017,11 @@
       else if(cd.action === 'do-delete-ingreso-pf'){
         state.ingresos = state.ingresos.filter(i=>i.id!==cd.data);
         await saveKey('ingresos', state.ingresos);
-        // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino).
+        // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino), o el
+        // movimiento en OPEX USD si era un ingreso en dólares.
         removeTesoreriaPorIngresoPF(cd.data);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
+        await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
         showToast('Ingreso y su distribución eliminados');
         render();
       }
@@ -8341,7 +8414,8 @@
       const form = btn.closest('[data-form="ingreso-pf"]');
       const data = readFields(form);
       const monto = Number(data.monto) || 0;
-      const reserva = Math.min(Number(data.reserva) || 0, monto);
+      const esUSD = data.moneda === 'USD';
+      const reserva = esUSD ? 0 : Math.min(Number(data.reserva) || 0, monto);
       if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
       if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
       const editId = state.editingIngresoId;
@@ -8349,13 +8423,43 @@
       if(!editId){
         // Defensivo: el botón ya viene disabled hasta marcar todas las casillas, pero se revalida acá
         // también por si alguien lo habilita manipulando el DOM — nunca confiar solo en el botón visual.
-        const chkReserva = document.getElementById('fa-pf-chk-reserva');
-        const reservaOk = reserva > 0 ? (chkReserva && chkReserva.checked) : true;
-        const todasMarcadas = reservaOk && BOVEDAS_PAGABLES.every(b=>{
-          const chk = document.getElementById('fa-pf-chk-'+b.id);
-          return chk && chk.checked;
-        });
-        if(!todasMarcadas){ showToast('Marca todas las transferencias antes de confirmar.'); return; }
+        if(esUSD){
+          const chkUsd = document.getElementById('fa-pf-chk-usd');
+          if(!(chkUsd && chkUsd.checked)){ showToast('Marca la transferencia a OPEX USD antes de confirmar.'); return; }
+        } else {
+          const chkReserva = document.getElementById('fa-pf-chk-reserva');
+          const reservaOk = reserva > 0 ? (chkReserva && chkReserva.checked) : true;
+          const todasMarcadas = reservaOk && BOVEDAS_PAGABLES.every(b=>{
+            const chk = document.getElementById('fa-pf-chk-'+b.id);
+            return chk && chk.checked;
+          });
+          if(!todasMarcadas){ showToast('Marca todas las transferencias antes de confirmar.'); return; }
+        }
+      }
+
+      const ingresoId = editId || uid('ing');
+
+      if(esUSD){
+        // En USD no hay Reserva ni Profit First — 100% directo a OPEX USD, aislado del resto de Tesorería.
+        const ingreso = {
+          id: ingresoId, fecha: data.fecha, categoria: data.categoria, cliente: data.cliente || '',
+          pasarela: '', monto, moneda: 'USD', estado: 'Pagado', distribucion: null
+        };
+        if(editId){
+          const idx = state.ingresos.findIndex(i=>i.id===editId);
+          if(idx>-1) state.ingresos[idx] = ingreso;
+          state.editingIngresoId = null;
+        } else {
+          state.ingresos.push(ingreso);
+        }
+        await saveKey('ingresos', state.ingresos);
+        removeTesoreriaPorIngresoPF(ingresoId);
+        syncTesoreriaIngresoUSD(ingreso);
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
+        await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
+        showToast('Ingreso en USD registrado — 100% en OPEX USD');
+        render();
+        return;
       }
 
       // La Reserva sale 100% hacia Operación ANTES de Profit First — los 4 % se calculan solo sobre el
@@ -8363,7 +8467,6 @@
       const montoParaDistribuir = monto - reserva;
       const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
       const montos = repartirMontoPF(montoParaDistribuir, pct);
-      const ingresoId = editId || uid('ing');
 
       const ingreso = {
         id: ingresoId,
@@ -8372,6 +8475,7 @@
         cliente: data.cliente || '',
         pasarela: data.pasarela || '',
         monto,
+        moneda: 'CLP',
         estado: 'Pagado',
         distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
       };
