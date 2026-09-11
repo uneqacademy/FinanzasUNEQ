@@ -1993,6 +1993,9 @@
     cuentasPorPagar: { items: [], pagos: [] },
     importacionHistorica: [],
     pagosImpuestos: [], // Pago de Impuestos / F29 — Liquidación de Pasivo Fiduciario, nunca pasa por Gastos
+    // OPEX USD — flujo en dólares totalmente aislado del resto de Tesorería (en CLP). Un solo "bolsillo" en
+    // USD, sin las 5 bóvedas ni distribución — solo entradas y salidas en dólares reales.
+    tesoreriaUSD: { movimientos: [] },
     pagandoCtaPorPagarId: null,
     registrandoCuotaAtrasadaId: null, // qué deuda de crédito se le está registrando una cuota atrasada
     pendingGastoData: null, // gasto en espera de confirmación cuando su fecha es anterior al Día Cero (Firewall Histórico)
@@ -2505,6 +2508,7 @@
       const cuentasPorPagar = await loadKeySeeded('cuentasPorPagar', { items: [], pagos: [] });
       const importacionHistorica = await loadKeySeeded('importacionHistorica', SEED_IMPORTACION_HISTORICA);
       const pagosImpuestos = await loadKeySeeded('pagosImpuestos', []);
+      const tesoreriaUSD = await loadKeySeeded('tesoreriaUSD', { movimientos: [] });
       state.config = config || {
         anio: new Date().getFullYear(),
         saldoInicial: 0,
@@ -2559,6 +2563,8 @@
       if(!state.cuentasPorPagar.pagos) state.cuentasPorPagar.pagos = [];
       state.importacionHistorica = importacionHistorica || [];
       state.pagosImpuestos = pagosImpuestos || [];
+      state.tesoreriaUSD = (tesoreriaUSD && typeof tesoreriaUSD === 'object') ? tesoreriaUSD : { movimientos: [] };
+      if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
 
       // Plantilla de Gastos Fijos: al abrir la app, si una plantilla activa no tiene todavía su gasto del
       // mes en curso, se genera automáticamente en estado "Pendiente" — no hay servidor que lo haga solo un
@@ -2803,6 +2809,27 @@
     return months;
   }
 
+  // Espejo de getMonthlyStats, pero para el Flujo en USD — mismo patrón (mes a mes, acumulado corrido), pero
+  // leyendo de state.tesoreriaUSD.movimientos en vez de las 5 bóvedas en CLP. Nunca se mezclan los dos.
+  function getMonthlyStatsUSD(anio){
+    const meses = Array.from({length:12}, ()=>({ ingresos:0, gastos:0 }));
+    let saldoInicialAnio = 0;
+    state.tesoreriaUSD.movimientos.forEach(m=>{
+      if(!m.fecha || !esMovimientoVigente(m)) return;
+      const d = new Date(m.fecha+'T00:00:00');
+      const delta = (m.tipo==='salida' ? -1 : 1) * (Number(m.monto)||0);
+      if(d.getFullYear() < anio){ saldoInicialAnio += delta; return; }
+      if(d.getFullYear() !== anio) return;
+      if(m.tipo==='salida') meses[d.getMonth()].gastos += Number(m.monto)||0;
+      else meses[d.getMonth()].ingresos += Number(m.monto)||0;
+    });
+    let acumulado = saldoInicialAnio;
+    return meses.map(m=>{
+      acumulado += m.ingresos - m.gastos;
+      return { ingresos: m.ingresos, gastos: m.gastos, resultado: m.ingresos - m.gastos, acumulado };
+    });
+  }
+
   function getSaldoActual(){
     const ingresosPagados = state.ingresos.filter(i=>i.estado==='Pagado').reduce((s,i)=>s+(Number(i.monto)||0),0);
     const totalGastos = state.gastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
@@ -2909,6 +2936,24 @@
     });
   }
 
+  // ---- OPEX USD — flujo en dólares, totalmente aislado del resto de Tesorería (en CLP) ----
+  function getSaldoUSD(){
+    return state.tesoreriaUSD.movimientos
+      .filter(m=> esMovimientoVigente(m))
+      .reduce((s,m)=> s + (m.tipo === 'salida' ? -(Number(m.monto)||0) : (Number(m.monto)||0)), 0);
+  }
+  function getMovimientosUSD(){
+    const movs = state.tesoreriaUSD.movimientos
+      .filter(m=> esMovimientoVigente(m))
+      .slice()
+      .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    let saldo = 0;
+    return movs.map(m=>{
+      saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
+      return { ...m, saldo };
+    });
+  }
+
   // Mantiene sincronizado el movimiento de Tesorería (bóveda Recepción) que corresponde a un ingreso: lo crea,
   // actualiza o elimina según si el ingreso es venta directa y está "Pagado". Se llama después de cualquier
   // creación o edición de un ingreso — idempotente, nunca duplica ni deja movimientos huérfanos. Los ingresos
@@ -2934,11 +2979,34 @@
     }
   }
 
+  // Espejo de syncTesoreriaIngreso, pero para ingresos en USD — 100% directo a OPEX USD, sin bóveda Recepción
+  // ni distribución (no hay nada que repartir, solo existe un destino). Nunca toca state.tesoreria (CLP).
+  function syncTesoreriaIngresoUSD(ingreso){
+    const origen = `ingreso:${ingreso.id}`;
+    const idx = state.tesoreriaUSD.movimientos.findIndex(m=> m.origen === origen);
+    const debeEstar = ingreso.estado === 'Pagado';
+    if(debeEstar){
+      const mov = {
+        id: idx>-1 ? state.tesoreriaUSD.movimientos[idx].id : uid('tesusd'),
+        fecha: ingreso.fecha,
+        tipo: 'entrada',
+        monto: Number(ingreso.monto)||0,
+        descripcion: ingreso.descripcion || ingreso.cliente || '',
+        origen
+      };
+      if(idx>-1) state.tesoreriaUSD.movimientos[idx] = mov;
+      else state.tesoreriaUSD.movimientos.push(mov);
+    } else if(idx>-1){
+      state.tesoreriaUSD.movimientos.splice(idx,1);
+    }
+  }
+
   // Quita el movimiento de Tesorería asociado a un ingreso (al borrarlo). No falla si nunca cayó a Recepción
   // (ej. era no-venta o estaba Pendiente) — simplemente no encuentra nada que quitar.
   function removeTesoreriaIngreso(ingresoId){
     const origen = `ingreso:${ingresoId}`;
     state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
+    state.tesoreriaUSD.movimientos = state.tesoreriaUSD.movimientos.filter(m=> m.origen !== origen);
   }
 
   // Igual que removeTesoreriaIngreso, pero para el flujo de Ingresos y Distribución (Profit First): además
@@ -2974,8 +3042,31 @@
     else state.tesoreria.movimientos.push(mov);
   }
 
+  // Espejo de syncTesoreriaGasto, pero para gastos en USD — sale de OPEX USD (aislado), usando el monto
+  // ORIGINAL en dólares (gasto.montoUSD), no el equivalente en CLP que se usa para Estado de Resultados.
+  function syncTesoreriaGastoUSD(gasto){
+    const origen = `gasto:${gasto.id}`;
+    const idx = state.tesoreriaUSD.movimientos.findIndex(m=> m.origen === origen);
+    if(gasto.monedaOriginal !== 'USD'){
+      if(idx>-1) state.tesoreriaUSD.movimientos.splice(idx,1);
+      return;
+    }
+    const mov = {
+      id: idx>-1 ? state.tesoreriaUSD.movimientos[idx].id : uid('tesusd'),
+      fecha: gasto.fecha,
+      tipo: 'salida',
+      monto: Number(gasto.montoUSD)||0,
+      descripcion: gasto.descripcion || gasto.proveedor || '',
+      origen
+    };
+    if(idx>-1) state.tesoreriaUSD.movimientos[idx] = mov;
+    else state.tesoreriaUSD.movimientos.push(mov);
+  }
+
   // Guarda un gasto (nuevo o editado) y sincroniza su salida de Tesorería — compartido entre el flujo normal
-  // y el flujo que pasa por el aviso del Firewall Histórico (fecha anterior al Día Cero).
+  // y el flujo que pasa por el aviso del Firewall Histórico (fecha anterior al Día Cero). Siempre llama a
+  // los dos sync (CLP y USD): cada uno se encarga solo de limpiar su propio lado si no corresponde, así que
+  // es seguro llamarlos ambos sin importar en qué moneda esté el gasto.
   async function guardarGastoYSyncTesoreria(data, editId){
     let gastoFinal;
     if(editId){
@@ -2989,7 +3080,9 @@
     await saveKey('gastos', state.gastos);
     if(gastoFinal){
       syncTesoreriaGasto(gastoFinal);
+      syncTesoreriaGastoUSD(gastoFinal);
       await saveKey('tesoreria', state.tesoreria, {silent:true});
+      await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
     }
   }
 
@@ -2997,6 +3090,7 @@
   function removeTesoreriaGasto(gastoId){
     const origen = `gasto:${gastoId}`;
     state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== origen);
+    state.tesoreriaUSD.movimientos = state.tesoreriaUSD.movimientos.filter(m=> m.origen !== origen);
   }
 
 
@@ -3613,6 +3707,54 @@
     state.filtroHistoricosMes = Number(valor);
     render();
   };
+  // Actualiza el hint y la etiqueta del Monto cuando cambias Moneda en el formulario de Ingreso — no hace
+  // falta re-renderizar toda la pantalla solo para esto.
+  window.faToggleMonedaIngreso = function(){
+    const sel = document.getElementById('fa-ingreso-moneda');
+    const hint = document.getElementById('fa-ingreso-moneda-hint');
+    const label = document.getElementById('fa-ingreso-monto-label');
+    if(!sel) return;
+    const esUSD = sel.value === 'USD';
+    if(hint) hint.textContent = esUSD
+      ? '100% va directo a la bóveda OPEX USD — aislada, no se reparte ni se mezcla con las otras bóvedas en CLP.'
+      : 'Se distribuye normal, según la configuración de Tesorería (cae primero a Recepción, luego repartes con "Distribuir Recepción").';
+    if(label) label.textContent = esUSD ? 'Monto (USD)' : 'Monto';
+  };
+  // Igual que faToggleMonedaIngreso, pero para el formulario de Gasto: cuando es USD, esconde la Bóveda (en
+  // USD siempre es OPEX USD, sin otra opción) y muestra el campo de Tipo de Cambio en su lugar.
+  window.faToggleMonedaGasto = function(){
+    const sel = document.getElementById('fa-gasto-moneda');
+    const label = document.getElementById('fa-gasto-monto-label');
+    const bovedaWrap = document.getElementById('fa-gasto-boveda-wrap');
+    const tcWrap = document.getElementById('fa-gasto-tc-wrap');
+    const nota = document.getElementById('fa-gasto-usd-nota');
+    if(!sel) return;
+    const esUSD = sel.value === 'USD';
+    if(label) label.textContent = esUSD ? 'Monto (USD)' : 'Monto';
+    if(bovedaWrap) bovedaWrap.style.display = esUSD ? 'none' : '';
+    if(tcWrap) tcWrap.style.display = esUSD ? '' : 'none';
+    if(nota) nota.style.display = esUSD ? '' : 'none';
+  };
+  // Indicador en vivo de cuánto suman los 4 % de Línea de Negocio, mientras se escriben — no valida ni
+  // bloquea nada (eso ya lo hace submit-gasto/submit-plantilla-gasto-fijo al guardar), solo ayuda a ver de
+  // un vistazo cuánto falta o cuánto sobra antes de intentar guardar.
+  function actualizarSumaPctGenerico(formSelector, displayId){
+    const form = document.querySelector(formSelector);
+    const display = document.getElementById(displayId);
+    if(!form || !display) return;
+    let suma = 0, algunoLleno = false;
+    UNIDADES_NEGOCIO.forEach(u=>{
+      const input = form.querySelector(`[name="pct_${u.id}"]`);
+      if(input && input.value !== ''){ algunoLleno = true; suma += Number(input.value)||0; }
+    });
+    if(!algunoLleno){ display.textContent = ''; return; }
+    const suma1 = Math.round(suma*10)/10;
+    if(suma1 === 100){ display.textContent = '✅ Suman 100%.'; display.style.color = 'var(--income)'; }
+    else if(suma1 < 100){ display.textContent = `Llevas ${suma1}% — te faltan ${Math.round((100-suma1)*10)/10}%.`; display.style.color = 'var(--expense)'; }
+    else { display.textContent = `Llevas ${suma1}% — te sobran ${Math.round((suma1-100)*10)/10}%.`; display.style.color = 'var(--expense)'; }
+  }
+  window.faActualizarSumaPctGasto = function(){ actualizarSumaPctGenerico('[data-form="gasto"]', 'fa-gasto-suma-pct'); };
+  window.faActualizarSumaPctPlantilla = function(){ actualizarSumaPctGenerico('[data-form="plantilla-gasto-fijo"]', 'fa-plantilla-suma-pct'); };
   // Elegir Tipo (Operacional/Costo Directo) de un gasto histórico en revisión — al cambiar, se limpia la
   // subcategoría elegida, ya que las opciones disponibles cambian según el tipo.
   window.faElegirTipoHistorico = function(id, valor){
@@ -3645,31 +3787,51 @@
     anticipoWrap.style.display = fp.tieneAnticipo ? '' : 'none';
   };
 
-  // Busca el dólar observado del Banco Central (vía mindicador.cl) para la Fecha de Inicio del Lote de
-  // Ventas. Si falla (sin internet, fecha sin dato, API caída), deja el campo vacío y editable para que se
-  // ingrese a mano — nunca bloquea el registro.
-  window.faBuscarTipoCambio = async function(){
-    const fechaInput = document.getElementById('fa-contrato-fecha');
-    const tcInput = document.getElementById('fa-contrato-tc');
-    const statusEl = document.getElementById('fa-contrato-tc-status');
+  // Busca el dólar observado del Banco Central (vía mindicador.cl) para una fecha dada. Si esa fecha no tiene
+  // dato (fin de semana o feriado, que el Banco Central no publica), reintenta automáticamente con el día
+  // anterior, hasta 5 veces — así un sábado o domingo cae solo al viernes anterior sin que el usuario tenga
+  // que hacer nada. Si tras 5 intentos sigue sin encontrar nada (o no hay internet), deja el campo vacío y
+  // editable a mano — nunca bloquea el registro.
+  async function buscarTipoCambioGenerico(fechaInputId, tcInputId, statusElId){
+    const fechaInput = document.getElementById(fechaInputId);
+    const tcInput = document.getElementById(tcInputId);
+    const statusEl = document.getElementById(statusElId);
     if(!fechaInput || !fechaInput.value){
-      if(statusEl) statusEl.textContent = 'Elige primero la Fecha de Inicio.';
+      if(statusEl) statusEl.textContent = 'Elige primero la fecha.';
       return;
     }
-    const [y,m,d] = fechaInput.value.split('-');
-    const fechaApi = `${d}-${m}-${y}`;
     if(statusEl) statusEl.textContent = 'Buscando el dólar observado...';
-    try{
-      const resp = await fetch(`https://mindicador.cl/api/dolar/${fechaApi}`);
-      if(!resp.ok) throw new Error('status ' + resp.status);
-      const data = await resp.json();
-      if(!data.serie || !data.serie.length) throw new Error('sin datos para esa fecha');
-      const valor = data.serie[0].valor;
-      if(tcInput) tcInput.value = valor;
-      if(statusEl) statusEl.textContent = `Dólar observado del ${fechaInput.value}: $${valor} — puedes editarlo si lo necesitas.`;
-    } catch(e){
-      if(statusEl) statusEl.textContent = '⚠️ No se pudo obtener el tipo de cambio automáticamente (sin internet, fecha sin dato, o el servicio no responde). Ingrésalo a mano arriba.';
+    let fecha = new Date(fechaInput.value+'T00:00:00');
+    const fechaOriginal = fechaInput.value;
+    for(let intento=0; intento<5; intento++){
+      const y = fecha.getFullYear(), m = String(fecha.getMonth()+1).padStart(2,'0'), d = String(fecha.getDate()).padStart(2,'0');
+      const fechaApi = `${d}-${m}-${y}`;
+      try{
+        const resp = await fetch(`https://mindicador.cl/api/dolar/${fechaApi}`);
+        if(!resp.ok) throw new Error('status ' + resp.status);
+        const data = await resp.json();
+        if(!data.serie || !data.serie.length) throw new Error('sin datos para esa fecha');
+        const valor = data.serie[0].valor;
+        if(tcInput) tcInput.value = valor;
+        const fechaUsadaISO = `${y}-${m}-${d}`;
+        if(statusEl){
+          statusEl.textContent = fechaUsadaISO === fechaOriginal
+            ? `Dólar observado del ${fechaUsadaISO}: $${valor} — puedes editarlo si lo necesitas.`
+            : `${fechaOriginal} no tiene dato (fin de semana o feriado) — se usó el del ${fechaUsadaISO}: $${valor}. Puedes editarlo si lo necesitas.`;
+        }
+        return;
+      } catch(e){
+        fecha.setDate(fecha.getDate()-1); // reintenta con el día anterior
+      }
     }
+    if(statusEl) statusEl.textContent = '⚠️ No se pudo obtener el tipo de cambio automáticamente (sin internet, o el servicio no responde). Ingrésalo a mano arriba.';
+  }
+
+  window.faBuscarTipoCambio = function(){
+    return buscarTipoCambioGenerico('fa-contrato-fecha', 'fa-contrato-tc', 'fa-contrato-tc-status');
+  };
+  window.faBuscarTipoCambioGasto = function(){
+    return buscarTipoCambioGenerico('fa-gasto-fecha', 'fa-gasto-tc', 'fa-gasto-tc-status');
   };
 
   // ---------------- Render dispatch ----------------
@@ -3909,6 +4071,10 @@
           </div>
         </div>
         <div class="fa-hint">Estas 3 son "cofres blindados" — dinero acumulado que no se toca para gastos del día a día.</div>
+        <div style="display:flex; align-items:center; justify-content:space-between; border:1px dashed var(--border); border-radius:10px; padding:10px 14px; margin-top:10px; background:#FAFAFA;">
+          <span class="fa-hint" style="margin:0;">💵 OPEX USD (aislada, en dólares)</span>
+          <span style="font-weight:700;">${fmtMoneyUSD(getSaldoUSD())}</span>
+        </div>
       </div>
 
       <div class="fa-card">
@@ -4379,10 +4545,10 @@
             </div>
             <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
             ${UNIDADES_NEGOCIO.map(u=>`
-            <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}"></div>
+            <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctPlantilla()"></div>
             `).join('')}
           </div>
-          <div class="fa-hint">Los 4 porcentajes deben sumar 100% entre todos (o dejarlos todos vacíos si no aplica) — así se reparte el costo de esta persona entre las 4 Líneas de Negocio cada mes, para el comparativo de Rentabilidad por Unidad.</div>
+          <div class="fa-hint">Los 4 porcentajes deben sumar 100% entre todos (o dejarlos todos vacíos si no aplica) — así se reparte el costo de esta persona entre las 4 Líneas de Negocio cada mes, para el comparativo de Rentabilidad por Unidad. <strong id="fa-plantilla-suma-pct"></strong></div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
             ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
@@ -4416,7 +4582,7 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Registrar Costo Directo / Gasto Operacional</div>
+        <div class="fa-card-title">Registrar Costo Directo / Gasto Operacional / Egresos de Flujo</div>
         <div class="fa-section-note">Costo Directo = solo ocurre porque hubo una venta (Ads, comisiones de pasarela, afiliados). Gasto Operacional = lo que cuesta mantener viva la empresa, venda o no venda.</div>
         ${(() => {
           const editingG = state.editingGastoId ? state.gastos.find(g=>g.id===state.editingGastoId) : null;
@@ -4433,7 +4599,13 @@
           return `
         <div data-form="gasto">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editingG?editingG.fecha:todayISO()}"></div>
+            <div class="fa-field"><label>Fecha</label><input type="date" id="fa-gasto-fecha" name="fecha" value="${editingG?editingG.fecha:todayISO()}"></div>
+            <div class="fa-field"><label>Moneda</label>
+              <select name="moneda" id="fa-gasto-moneda" onchange="window.faToggleMonedaGasto()">
+                <option value="CLP" ${(!editingG || editingG.monedaOriginal!=='USD')?'selected':''}>CLP</option>
+                <option value="USD" ${editingG && editingG.monedaOriginal==='USD'?'selected':''}>USD</option>
+              </select>
+            </div>
             <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Nombre del proveedor" value="${editingG?escapeHtml(editingG.proveedor||''):''}"></div>
             <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Campaña Meta Ads enero" value="${editingG?escapeHtml(editingG.descripcion||''):''}"></div>
             <div class="fa-field"><label>Categoría</label>
@@ -4449,23 +4621,32 @@
                 </optgroup>
               </select>
             </div>
-            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0" value="${editingG?editingG.monto:''}"></div>
-            <div class="fa-field"><label>Método de pago</label>
+            <div class="fa-field"><label id="fa-gasto-monto-label">Monto${editingG && editingG.monedaOriginal==='USD'?' (USD)':''}</label><input type="number" id="fa-gasto-monto" name="monto" min="0" step="0.01" placeholder="0" value="${editingG?(editingG.monedaOriginal==='USD'?editingG.montoUSD:editingG.monto):''}"></div>
+            <div class="fa-field" id="fa-gasto-metodo-wrap"><label>Método de pago</label>
               <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editingG&&editingG.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
             </div>
-            <div class="fa-field"><label>Bóveda de origen (Tesorería)</label>
+            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&editingG.monedaOriginal==='USD'?'none':''};"><label>Bóveda de origen (Tesorería)</label>
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
+            <div class="fa-field" id="fa-gasto-tc-wrap" style="display:${editingG&&editingG.monedaOriginal==='USD'?'':'none'};">
+              <label>Tipo de Cambio (CLP por USD)</label>
+              <div style="display:flex; gap:8px;">
+                <input type="number" id="fa-gasto-tc" name="tipoCambio" min="0" step="0.01" placeholder="0" value="${editingG&&editingG.tipoCambio?editingG.tipoCambio:''}">
+                <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambioGasto()">Buscar</button>
+              </div>
+              <div class="fa-hint" id="fa-gasto-tc-status" style="margin:4px 0 0 0;"></div>
+            </div>
           </div>
+          <div class="fa-hint" id="fa-gasto-usd-nota" style="display:${editingG&&editingG.monedaOriginal==='USD'?'':'none'};">Este gasto sale de la bóveda OPEX USD (aislada) — no hay otra opción de bóveda mientras la moneda sea USD. El monto convertido a CLP con el Tipo de Cambio de arriba es el que cuenta para Estado de Resultados, salvo que elijas Egreso de Flujo (ese nunca entra a EERR, sin importar la moneda).</div>
           <div class="fa-form-grid" style="margin-top:6px;">
             ${UNIDADES_NEGOCIO.map(u=>`
-            <div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingG&&editingG['pct_'+u.id]!==undefined?editingG['pct_'+u.id]:''}"></div>
+            <div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingG&&editingG['pct_'+u.id]!==undefined?editingG['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctGasto()"></div>
             `).join('')}
           </div>
-          <div class="fa-hint">Opcional — solo si quieres que este gasto cuente en el comparativo de Rentabilidad por Unidad de Negocio. Déjalos todos vacíos si no aplica, o complétalos sumando 100% entre las 4.</div>
+          <div class="fa-hint">Opcional — solo si quieres que este gasto cuente en el comparativo de Rentabilidad por Unidad de Negocio. Déjalos todos vacíos si no aplica, o complétalos sumando 100% entre las 4. <strong id="fa-gasto-suma-pct"></strong></div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto">${editingG?'Guardar cambios':'Registrar gasto'}</button>
             ${editingG?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-gasto">Cancelar</button>`:''}
@@ -5382,7 +5563,7 @@
       case 'dashboard': return renderDashboard();
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderEstadoResultados();
-      case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : renderFlujo();
+      case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'importarhistoricos': return renderImportarHistoricos();
       case 'config': return renderConfig();
@@ -5626,12 +5807,18 @@
         <div data-form="ingreso">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${editing? editing.fecha : todayISO()}"></div>
+            <div class="fa-field"><label>Moneda</label>
+              <select name="moneda" id="fa-ingreso-moneda" onchange="window.faToggleMonedaIngreso()">
+                <option value="CLP" ${(!editing || editing.moneda!=='USD')?'selected':''}>CLP</option>
+                <option value="USD" ${editing && editing.moneda==='USD'?'selected':''}>USD</option>
+              </select>
+            </div>
             <div class="fa-field"><label>Cliente</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing? escapeHtml(editing.cliente):''}"></div>
-            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Proyecto X" value="${editing? escapeHtml(editing.descripcion):''}"></div>
-            <div class="fa-field"><label>Categoría</label>
+            <div class="fa-field"><label>Origen del Ingreso</label>
               <select name="categoria">${state.config.categoriasIngresos.map(c=>`<option ${editing && editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
-            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0" value="${editing? editing.monto:''}"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Proyecto X" value="${editing? escapeHtml(editing.descripcion):''}"></div>
+            <div class="fa-field"><label id="fa-ingreso-monto-label">Monto${editing && editing.moneda==='USD'?' (USD)':''}</label><input type="number" name="monto" min="0" step="0.01" placeholder="0" value="${editing? editing.monto:''}"></div>
             <div class="fa-field"><label>Estado</label>
               <select name="estado">
                 <option ${editing && editing.estado==='Pagado' ? 'selected':''}>Pagado</option>
@@ -5639,6 +5826,7 @@
               </select>
             </div>
           </div>
+          <div class="fa-hint" id="fa-ingreso-moneda-hint">${(editing && editing.moneda==='USD') ? '100% va directo a la bóveda OPEX USD — aislada, no se reparte ni se mezcla con las otras bóvedas en CLP.' : 'Se distribuye normal, según la configuración de Tesorería (cae primero a Recepción, luego repartes con "Distribuir Recepción").'}</div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-ingreso">${editing? 'Guardar cambios':'Agregar ingreso'}</button>
             ${editing? `<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-ingreso">Cancelar</button>` : ''}
@@ -5674,7 +5862,7 @@
           <table class="fa-table">
             <thead><tr>
               <th class="fa-checkbox-col"><input type="checkbox" data-action="toggle-select-all-ingresos" data-ids="${list.map(i=>i.id).join(',')}" ${list.length>0 && list.every(i=>state.selected.ingresos.has(i.id))?'checked':''}></th>
-              ${thSort('ingresos','fecha','Fecha')}${thSort('ingresos','cliente','Cliente')}${thSort('ingresos','descripcion','Descripción')}${thSort('ingresos','categoria','Categoría')}${thSort('ingresos','monto','Monto',true)}${thSort('ingresos','estado','Estado')}<th></th>
+              ${thSort('ingresos','fecha','Fecha')}${thSort('ingresos','cliente','Cliente')}${thSort('ingresos','descripcion','Descripción')}${thSort('ingresos','categoria','Origen')}<th>Moneda</th>${thSort('ingresos','monto','Monto',true)}<th>Destino</th>${thSort('ingresos','estado','Estado')}<th></th>
             </tr></thead>
             <tbody>
               ${list.map(i=>`
@@ -5684,7 +5872,9 @@
                   <td>${escapeHtml(i.cliente)||'—'}</td>
                   <td>${escapeHtml(i.descripcion)||'—'}</td>
                   <td>${escapeHtml(i.categoria)}</td>
-                  <td class="num money">${fmtMoneyC(i.monto)}</td>
+                  <td>${i.moneda==='USD'?'USD':'CLP'}</td>
+                  <td class="num money">${i.moneda==='USD' ? fmtMoneyUSD(i.monto) : fmtMoneyC(i.monto)}</td>
+                  <td class="fa-hint" style="margin:0;">${i.moneda==='USD' ? '100% OPEX USD' : 'Recepción → Reserva'}</td>
                   <td><span class="fa-badge ${i.estado==='Pagado'?'pagado':'pendiente'}">${i.estado}</span></td>
                   <td>
                     <div class="fa-row-actions">
@@ -5697,9 +5887,9 @@
             </tbody>
             <tfoot>
               <tr>
-                <td colspan="5" style="text-align:right; font-weight:700;">Total (${list.length} filtrado${list.length===1?'':'s'}):</td>
+                <td colspan="6" style="text-align:right; font-weight:700;">Total (${list.length} filtrado${list.length===1?'':'s'}):</td>
                 <td class="num money" style="font-weight:700;">${fmtMoneyC(listTotal)}</td>
-                <td colspan="2"></td>
+                <td colspan="3"></td>
               </tr>
             </tfoot>
           </table>
@@ -6474,8 +6664,9 @@
   function moduloFlujoTabs(){
     return `
       <div style="display:flex; gap:8px; margin-bottom:16px;">
-        <button type="button" class="fa-btn ${state.moduloFlujoVista!=='tesoreria'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujo">Flujo de Caja</button>
+        <button type="button" class="fa-btn ${state.moduloFlujoVista!=='tesoreria' && state.moduloFlujoVista!=='flujoUSD'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujo">Flujo de Caja</button>
         <button type="button" class="fa-btn ${state.moduloFlujoVista==='tesoreria'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="tesoreria">Tesorería (5 bóvedas)</button>
+        <button type="button" class="fa-btn ${state.moduloFlujoVista==='flujoUSD'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujoUSD">💵 Flujo en USD</button>
       </div>
     `;
   }
@@ -6525,6 +6716,78 @@
           </table>
         </div>
         <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" parte de tu saldo inicial (el mismo de Cuenta Corriente) y va sumando el resultado de cada mes — muy parecido al saldo de Cuenta Corriente, pero no idéntico, porque sigue sin incluir la categoría "${CAT_INGRESO_NO_VENTA}".</div>
+      </div>
+    `;
+  }
+
+  // Espejo de renderFlujo, pero en dólares — alimentado únicamente por Ingresos y Gastos marcados como USD.
+  // Totalmente aislado del Flujo de Caja en CLP: nunca se suman ni se mezclan los dos.
+  function renderFlujoUSD(){
+    const months = getMonthlyStatsUSD(state.config.anio);
+    const totalIngresos = months.reduce((s,m)=>s+m.ingresos,0);
+    const totalGastos = months.reduce((s,m)=>s+m.gastos,0);
+    const saldoFinAnio = months[11].acumulado;
+    const movs = getMovimientosUSD().slice().reverse(); // más reciente primero
+
+    return `
+      <div class="fa-topbar">
+        <div><h1>💵 Flujo de Caja en USD</h1><div class="fa-sub">Espejo del Flujo de Caja normal, pero en dólares — alimentado solo por Ingresos y Gastos marcados como USD. Totalmente aislado de las bóvedas en CLP.</div></div>
+        ${yearSelect('flujoUSD')}
+      </div>
+      ${moduloFlujoTabs()}
+
+      <div class="fa-card">
+        <div style="border:2px solid var(--income); border-radius:14px; padding:22px; background:#F0FFF4; text-align:center;">
+          <div style="font-size:13px; font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em;">Saldo actual — OPEX USD</div>
+          <div style="font-size:44px; font-weight:800; color:var(--income); margin-top:6px;">${fmtMoneyUSD(getSaldoUSD())}</div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Mes a mes — ${state.config.anio}</div>
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr><th>Mes</th><th class="num">(+) Ingresos USD</th><th class="num">(-) Gastos USD</th><th class="num">(=) Resultado del mes</th><th class="num">Acumulado</th></tr></thead>
+            <tbody>
+              ${months.map((m,i)=>`
+                <tr>
+                  <td>${MESES[i]}</td>
+                  <td class="num money" style="color:var(--income)">${fmtMoneyUSD(m.ingresos)}</td>
+                  <td class="num money" style="color:var(--expense)">${fmtMoneyUSD(m.gastos)}</td>
+                  <td class="num money">${m.resultado<0?`<span style="color:var(--expense)">${fmtMoneyUSD(m.resultado)}</span>`:fmtMoneyUSD(m.resultado)}</td>
+                  <td class="num money" style="font-weight:700">${m.acumulado<0?`<span style="color:var(--expense)">${fmtMoneyUSD(m.acumulado)}</span>`:fmtMoneyUSD(m.acumulado)}</td>
+                </tr>
+              `).join('')}
+              <tr style="font-weight:700; background:#F8F9FA;">
+                <td>Total año</td>
+                <td class="num money" style="color:var(--income)">${fmtMoneyUSD(totalIngresos)}</td>
+                <td class="num money" style="color:var(--expense)">${fmtMoneyUSD(totalGastos)}</td>
+                <td class="num money">${fmtMoneyUSD(totalIngresos-totalGastos)}</td>
+                <td class="num money">${fmtMoneyUSD(saldoFinAnio)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Movimientos (${movs.length})</div>
+        ${movs.length===0 ? `<div class="fa-empty">Aún no hay movimientos en USD.</div>` : `
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead><tr><th>Fecha</th><th>Descripción</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead>
+            <tbody>
+              ${movs.map(m=>`
+                <tr>
+                  <td>${fmtDate(m.fecha)}</td>
+                  <td>${escapeHtml(m.descripcion)||'—'}</td>
+                  <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyUSD(m.monto)}</td>
+                  <td class="num money" style="font-weight:700;">${fmtMoneyUSD(m.saldo)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>`}
       </div>
     `;
   }
@@ -7408,7 +7671,8 @@
         plantillasGastosFijos: state.plantillasGastosFijos,
         cuentasPorPagar: state.cuentasPorPagar,
         importacionHistorica: state.importacionHistorica,
-        pagosImpuestos: state.pagosImpuestos
+        pagosImpuestos: state.pagosImpuestos,
+        tesoreriaUSD: state.tesoreriaUSD
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
       const url = URL.createObjectURL(blob);
@@ -7596,9 +7860,10 @@
       else if(cd.action === 'do-delete-ingreso'){
         state.ingresos = state.ingresos.filter(i=>i.id!==cd.data);
         await saveKey('ingresos', state.ingresos);
-        // V2 — Tesorería: si ese ingreso había caído a Recepción, se quita el movimiento también.
+        // V2 — Tesorería: si ese ingreso había caído a Recepción (CLP) o a OPEX USD, se quita el movimiento.
         removeTesoreriaIngreso(cd.data);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
+        await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
         showToast('Ingreso eliminado');
         render();
       }
@@ -7680,11 +7945,12 @@
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
         state.gastos = state.gastos.filter(g=>g.id!==cd.data);
         await saveKey('gastos', state.gastos);
-        // V2 — Tesorería: si ese gasto tenía una salida de bóveda asociada, se quita también (ya sea el
-        // camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
+        // V2 — Tesorería: si ese gasto tenía una salida de bóveda CLP u OPEX USD asociada, se quita también
+        // (ya sea el camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
         removeTesoreriaGasto(cd.data);
         state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${cd.data}`);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
+        await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
         // Importar Históricos: si este gasto venía de ahí, se desbloquea solo — vuelve a quedar disponible
         // para agregarlo de nuevo, conservando el Tipo/Subcategoría que ya le habías elegido.
         const historicoVinculado = (state.importacionHistorica||[]).find(h=>h.gastoRealId===cd.data);
@@ -7894,6 +8160,8 @@
           state.cuentasPorPagar = (data.cuentasPorPagar && typeof data.cuentasPorPagar === 'object') ? data.cuentasPorPagar : { items:[], pagos:[] };
           state.importacionHistorica = Array.isArray(data.importacionHistorica) ? data.importacionHistorica : [];
           state.pagosImpuestos = Array.isArray(data.pagosImpuestos) ? data.pagosImpuestos : [];
+          state.tesoreriaUSD = (data.tesoreriaUSD && typeof data.tesoreriaUSD === 'object') ? data.tesoreriaUSD : { movimientos: [] };
+          if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
 
           // El respaldo importado puede venir del formato antiguo (sin abonos parciales) — si no trae
           // pagosFijosPagos, se migra igual que al cargar la app por primera vez.
@@ -7925,6 +8193,7 @@
           await saveKey('cuentasPorPagar', state.cuentasPorPagar);
           await saveKey('importacionHistorica', state.importacionHistorica);
           await saveKey('pagosImpuestos', state.pagosImpuestos);
+          await saveKey('tesoreriaUSD', state.tesoreriaUSD);
 
           showToast(`Importado: ${newIngresos.length} ingresos, ${newGastos.length} gastos, ${newPFCatalogo.length} pagos fijos, ${state.contratosDevengados.length} lotes de venta`);
           render();
@@ -9162,6 +9431,7 @@
       if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      data.moneda = data.moneda === 'USD' ? 'USD' : 'CLP';
       let ingresoFinal;
       if(state.editingIngresoId){
         const idx = state.ingresos.findIndex(i=>i.id===state.editingIngresoId);
@@ -9173,12 +9443,22 @@
         ingresoFinal = data;
       }
       await saveKey('ingresos', state.ingresos);
-      // V2 — Tesorería: si el ingreso es venta directa y está "Pagado", cae automáticamente a la bóveda
-      // Recepción. Si se edita y deja de cumplir esa condición (vuelve a Pendiente, o cambia a no-venta),
-      // el movimiento se quita solo — nunca queda un ingreso duplicado ni un movimiento huérfano.
+      // V2 — Tesorería: CLP y USD son caminos totalmente separados. Si es CLP y está "Pagado" (venta
+      // directa), cae a Recepción como siempre. Si es USD, va 100% directo a OPEX USD (aislado, nunca toca
+      // las bóvedas en CLP). Si se edita y cambia de moneda, se limpia el lado viejo y se sincroniza el
+      // nuevo — nunca queda un movimiento duplicado ni huérfano en ninguno de los dos libros.
       if(ingresoFinal){
-        syncTesoreriaIngreso(ingresoFinal);
-        await saveKey('tesoreria', state.tesoreria, {silent:true});
+        if(ingresoFinal.moneda === 'USD'){
+          removeTesoreriaIngreso(ingresoFinal.id); // por si venía de CLP en una edición anterior
+          syncTesoreriaIngresoUSD(ingresoFinal);
+          await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
+          await saveKey('tesoreria', state.tesoreria, {silent:true});
+        } else {
+          state.tesoreriaUSD.movimientos = state.tesoreriaUSD.movimientos.filter(m=> m.origen !== `ingreso:${ingresoFinal.id}`); // por si venía de USD
+          syncTesoreriaIngreso(ingresoFinal);
+          await saveKey('tesoreria', state.tesoreria, {silent:true});
+          await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
+        }
       }
       showToast('Ingreso guardado');
       render();
@@ -9300,7 +9580,24 @@
       if(!data.fecha){ showToast('Elige una fecha para el gasto.'); return; }
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
-      if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+
+      const esUSD = data.moneda === 'USD';
+      if(esUSD){
+        // En USD no se elige bóveda (siempre es OPEX USD) — en cambio, se pide el Tipo de Cambio para
+        // calcular el equivalente en CLP, que es el que efectivamente cuenta para Estado de Resultados.
+        const tipoCambio = Number(data.tipoCambio) || 0;
+        if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — este gasto es en USD.'); return; }
+        data.montoUSD = data.monto;
+        data.monto = Math.round(data.montoUSD * tipoCambio);
+        data.tipoCambio = tipoCambio;
+        data.monedaOriginal = 'USD';
+        data.boveda = undefined; // nunca una bóveda CLP mientras sea USD
+      } else {
+        data.monedaOriginal = 'CLP';
+        data.montoUSD = undefined;
+        data.tipoCambio = undefined;
+        if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+      }
 
       // Los % de Unidad de Negocio son opcionales — si se llena AL MENOS uno, los 4 deben sumar 100% exacto.
       const algunPctLleno = UNIDADES_NEGOCIO.some(u=> data['pct_'+u.id] !== '');
@@ -9316,15 +9613,15 @@
       }
 
       // Firewall Histórico: aviso, no bloqueo — SOLO al crear un gasto NUEVO con fecha vieja (ahí sí importa,
-      // porque recién se decide si afecta Tesorería). Al EDITAR uno que ya existe, no se vuelve a preguntar —
-      // así editar cosas como la distribución por Línea de Negocio en gastos históricos no tropieza con este
-      // aviso una y otra vez, ya que eso no toca Tesorería para nada.
+      // porque recién se decide si afecta Tesorería, en CLP o en USD). Al EDITAR uno que ya existe, no se
+      // vuelve a preguntar — así editar cosas como la distribución por Línea de Negocio en gastos históricos
+      // no tropieza con este aviso una y otra vez, ya que eso no toca Tesorería para nada.
       const esGastoNuevo = !state.editingGastoId;
       const esHistorico = esGastoNuevo && state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero;
       if(esHistorico){
         state.pendingGastoData = { data: {...data}, editId: state.editingGastoId };
         state.confirmDialog = {
-          message: `Esta fecha (${fmtDate(data.fecha)}) es anterior a tu Día Cero (${fmtDate(state.config.fechaDiaCero)}) — vas a alterar tu Tesorería ACTUAL con un movimiento histórico. ¿Seguro que quieres continuar?`,
+          message: `Esta fecha (${fmtDate(data.fecha)}) es anterior a tu Día Cero (${fmtDate(state.config.fechaDiaCero)}) — vas a alterar tu Tesorería ACTUAL (${esUSD?'OPEX USD':'CLP'}) con un movimiento histórico. ¿Seguro que quieres continuar?`,
           action: 'do-submit-gasto-historico',
           data: null,
           confirmLabel: 'Sí, continuar'
