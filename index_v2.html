@@ -793,7 +793,7 @@
     const contratoId = uid('contrato');
     const contrato = {
       id: contratoId, loteId, nombre: linea.nombre, montoTotal,
-      montoTotalUSD: esUSD ? linea.montoBruto : undefined,
+      montoTotalUSD: esUSD ? linea.montoBruto : null,
       tipoCambio: esUSD ? tipoCambio : null,
       formaPago: linea.formaPago || 'usd',
       tipoIngreso: linea.tipoIngreso, duracionMeses: linea.duracionMeses,
@@ -8747,7 +8747,7 @@
       const contratoActualizado = {
         ...anterior,
         nombre: data.nombre, montoTotal,
-        montoTotalUSD: esUSD ? montoBruto : undefined,
+        montoTotalUSD: esUSD ? montoBruto : null,
         tipoCambio, formaPago, tipoIngreso, duracionMeses,
         fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
         numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
@@ -9802,7 +9802,7 @@
           return;
         }
       } else {
-        UNIDADES_NEGOCIO.forEach(u=> pcts['pct_'+u.id] = undefined);
+        UNIDADES_NEGOCIO.forEach(u=> pcts['pct_'+u.id] = null);
       }
       const editId = state.editingPlantillaId;
       if(editId){
@@ -9912,11 +9912,11 @@
         data.monto = Math.round(data.montoUSD * tipoCambio);
         data.tipoCambio = tipoCambio;
         data.monedaOriginal = 'USD';
-        data.boveda = undefined; // nunca una bóveda CLP mientras sea USD
+        data.boveda = null; // nunca una bóveda CLP mientras sea USD — null, no undefined (Firebase rechaza undefined)
       } else {
         data.monedaOriginal = 'CLP';
-        data.montoUSD = undefined;
-        data.tipoCambio = undefined;
+        data.montoUSD = null;
+        data.tipoCambio = null;
         if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
       }
 
