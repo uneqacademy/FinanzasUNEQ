@@ -3173,16 +3173,16 @@
   async function guardarGastoYSyncTesoreria(data, editId){
     let gastoFinal;
     if(editId){
-      state.gastos = await saveKeyMerged('gastos', current => {
+      state.gastos = (await saveKeyMerged('gastos', current => {
         const arr = current || [];
         const idx = arr.findIndex(g=>g.id===editId);
         if(idx>-1){ arr[idx] = {...arr[idx], ...data}; gastoFinal = arr[idx]; }
         return arr;
-      });
+      })) ?? state.gastos;
     } else {
       data.id = uid('gas');
       gastoFinal = data;
-      state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), data]);
+      state.gastos = (await saveKeyMerged('gastos', current => [...(current||[]), data])) ?? state.gastos;
     }
     if(gastoFinal){
       syncTesoreriaGasto(gastoFinal);
@@ -8128,7 +8128,7 @@
         render();
       }
       else if(cd.action === 'do-delete-ingreso-pf'){
-        state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).filter(i=>i.id!==cd.data));
+        state.ingresos = (await saveKeyMerged('ingresos', current => (current||[]).filter(i=>i.id!==cd.data))) ?? state.ingresos;
         // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino), o el
         // movimiento en OPEX USD si era un ingreso en dólares.
         removeTesoreriaPorIngresoPF(cd.data);
@@ -8138,11 +8138,11 @@
         render();
       }
       else if(cd.action === 'do-delete-contrato-devengado'){
-        state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=>c.id!==cd.data));
+        state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=>c.id!==cd.data))) ?? state.contratosDevengados;
         // Los gastos de comisiones/anticipo que ese lote generó quedan huérfanos si no se limpian.
         const teniaGastosVinculados = state.gastos.some(g=>g.origenContrato===cd.data);
         if(teniaGastosVinculados){
-          state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.origenContrato!==cd.data));
+          state.gastos = (await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.origenContrato!==cd.data))) ?? state.gastos;
         }
         showToast('Lote de ventas eliminado');
         render();
@@ -8152,10 +8152,10 @@
         // una — ahora que cada línea etiqueta sus propios gastos con su propio id (no con el del lote), hay
         // que juntar primero los ids de todas sus líneas antes de poder limpiar los gastos vinculados.
         const idsDeLasLineas = state.contratosDevengados.filter(c=> (c.loteId||c.id) === cd.data).map(c=>c.id);
-        state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=> (c.loteId||c.id) !== cd.data));
+        state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current => (current||[]).filter(c=> (c.loteId||c.id) !== cd.data))) ?? state.contratosDevengados;
         const teniaGastosVinculados = state.gastos.some(g=>idsDeLasLineas.includes(g.origenContrato));
         if(teniaGastosVinculados){
-          state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>!idsDeLasLineas.includes(g.origenContrato)));
+          state.gastos = (await saveKeyMerged('gastos', current => (current||[]).filter(g=>!idsDeLasLineas.includes(g.origenContrato)))) ?? state.gastos;
         }
         showToast('Lote completo eliminado, junto con sus comisiones/anticipo vinculados');
         render();
@@ -8204,7 +8204,7 @@
       }
       else if(cd.action === 'do-delete-gasto'){
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
-        state.gastos = await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.id!==cd.data));
+        state.gastos = (await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.id!==cd.data))) ?? state.gastos;
         // V2 — Tesorería: si ese gasto tenía una salida de bóveda CLP u OPEX USD asociada, se quita también
         // (ya sea el camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
         removeTesoreriaGasto(cd.data);
@@ -8557,10 +8557,10 @@
           pasarela: '', monto, moneda: 'USD', estado: 'Pagado', distribucion: null
         };
         if(editId){
-          state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i));
+          state.ingresos = (await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i))) ?? state.ingresos;
           state.editingIngresoId = null;
         } else {
-          state.ingresos = await saveKeyMerged('ingresos', current => [...(current||[]), ingreso]);
+          state.ingresos = (await saveKeyMerged('ingresos', current => [...(current||[]), ingreso])) ?? state.ingresos;
         }
         removeTesoreriaPorIngresoPF(ingresoId);
         syncTesoreriaIngresoUSD(ingreso);
@@ -8589,10 +8589,10 @@
         distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
       };
       if(editId){
-        state.ingresos = await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i));
+        state.ingresos = (await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i))) ?? state.ingresos;
         state.editingIngresoId = null;
       } else {
-        state.ingresos = await saveKeyMerged('ingresos', current => [...(current||[]), ingreso]);
+        state.ingresos = (await saveKeyMerged('ingresos', current => [...(current||[]), ingreso])) ?? state.ingresos;
       }
 
       // Se usa el ID del propio ingreso como llave de correlación de su distribución (en vez de un id random)
@@ -8752,9 +8752,9 @@
         fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
         numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
       };
-      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current =>
+      state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current =>
         (current||[]).map(c=> c.id===editId ? contratoActualizado : c)
-      );
+      )) ?? state.contratosDevengados;
 
       // Se borran los gastos de comisión/anticipo VIEJOS de esta línea (solo los de ella, gracias a que
       // cada línea etiqueta los suyos con su propio id) y se regeneran con los valores actuales — así nunca
@@ -8782,9 +8782,9 @@
           });
         }
       }
-      state.gastos = await saveKeyMerged('gastos', current =>
+      state.gastos = (await saveKeyMerged('gastos', current =>
         [...(current||[]).filter(g=> g.origenContrato !== editId), ...gastosNuevos]
-      );
+      )) ?? state.gastos;
 
       state.editingContratoId = null;
       showToast('Línea actualizada');
@@ -8836,9 +8836,9 @@
 
       const loteId = uid('lote');
       const { contrato, gastosNuevos } = procesarLineaDevengada(linea, loteId, true);
-      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => [...(current||[]), contrato]);
+      state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current => [...(current||[]), contrato])) ?? state.contratosDevengados;
       if(gastosNuevos.length){
-        state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos]);
+        state.gastos = (await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos])) ?? state.gastos;
       }
 
       showToast('Ingreso Único registrado');
@@ -8858,9 +8858,9 @@
         contratosNuevos.push(resultado.contrato);
         gastosNuevos.push(...resultado.gastosNuevos);
       });
-      state.contratosDevengados = await saveKeyMerged('contratosDevengados', current => [...(current||[]), ...contratosNuevos]);
+      state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current => [...(current||[]), ...contratosNuevos])) ?? state.contratosDevengados;
       if(gastosNuevos.length){
-        state.gastos = await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos]);
+        state.gastos = (await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos])) ?? state.gastos;
       }
 
       state.loteEnConstruccion = { lineas: [] };
