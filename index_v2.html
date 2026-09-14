@@ -850,6 +850,33 @@
     return Math.max(Math.round((Number(cta.montoOriginal)||0) - pagado), 0);
   }
 
+  // Cuando un Gasto Fijo se paga PARCIAL, "Procesar Pago" crea una Cuenta por Pagar por la diferencia — pero
+  // el gasto original se queda marcado "Pagado Parcial" para siempre, aunque después se termine de pagar esa
+  // diferencia desde Gestión de Deudas. Esta función vuelve a mirar el gasto original cada vez que cambia un
+  // pago de esa Cuenta por Pagar, y si entre lo pagado directo + lo pagado vía la Cuenta por Pagar ya se
+  // cubrió el Monto Total, marca el gasto como "Pagado" de verdad — así Estado de Resultados y Flujo de Caja
+  // dejan de mostrarlo como parcial. Se llama después de crear, eliminar, o modificar un pago de esa cuenta.
+  function sincronizarEstadoGastoDesdeCtaPagar(ctaId){
+    const cta = state.cuentasPorPagar.items.find(c=>c.id===ctaId);
+    if(!cta || !cta.origenGasto) return false;
+    const gasto = state.gastos.find(g=>g.id===cta.origenGasto);
+    if(!gasto) return false;
+    const pagadoOriginalDirecto = Number(gasto.montoPagadoDirecto !== undefined ? gasto.montoPagadoDirecto : gasto.montoPagado) || 0;
+    const pagadoViaCta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===ctaId).reduce((s,p)=>s+(Number(p.monto)||0), 0);
+    // Se guarda el pago directo original la primera vez, para no perderlo de referencia en futuros recálculos
+    // (si no existía todavía, es porque este gasto nunca pasó por acá antes de este cambio).
+    if(gasto.montoPagadoDirecto === undefined) gasto.montoPagadoDirecto = pagadoOriginalDirecto;
+    const totalPagado = pagadoOriginalDirecto + pagadoViaCta;
+    if(totalPagado >= gasto.monto){
+      gasto.estado = 'Pagado';
+      gasto.montoPagado = gasto.monto;
+    } else {
+      gasto.estado = totalPagado > 0 ? 'Pagado Parcial' : 'Pendiente';
+      gasto.montoPagado = totalPagado;
+    }
+    return true;
+  }
+
   function getCuentasPorPagarActivas(){
     return state.cuentasPorPagar.items
       .filter(c=>c.activa)
@@ -8603,6 +8630,7 @@
       else if(cd.action === 'do-delete-ctapagar'){
         // Revierte cada pago (su salida de Tesorería) antes de borrar la cuenta misma — para no dejar
         // movimientos de banco huérfanos sin la Cuenta por Pagar que los originó.
+        const ctaAEliminar = state.cuentasPorPagar.items.find(c=>c.id===cd.data);
         const pagosDeEstaCuenta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===cd.data);
         pagosDeEstaCuenta.forEach(p=>{
           state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${p.id}`);
@@ -8615,12 +8643,23 @@
           };
         })) ?? state.cuentasPorPagar;
         await saveKey('tesoreria', state.tesoreria, {silent:true});
+        // Si esta cuenta venía de un Gasto Fijo pagado parcial, el gasto vuelve a su estado de antes (Pagado
+        // Parcial o Pendiente) — ya no existe la cuenta que cubría la diferencia.
+        if(ctaAEliminar && ctaAEliminar.origenGasto){
+          const gasto = state.gastos.find(g=>g.id===ctaAEliminar.origenGasto);
+          if(gasto && gasto.montoPagadoDirecto !== undefined){
+            gasto.montoPagado = gasto.montoPagadoDirecto;
+            gasto.estado = gasto.montoPagadoDirecto >= gasto.monto ? 'Pagado' : (gasto.montoPagadoDirecto>0 ? 'Pagado Parcial' : 'Pendiente');
+            await saveKey('gastos', state.gastos);
+          }
+        }
         showToast('Cuenta por Pagar eliminada, junto con sus pagos');
         render();
       }
       else if(cd.action === 'do-delete-pago-ctapagar'){
         const pagoExiste = state.cuentasPorPagar.pagos.some(p=>p.id===cd.data);
         if(pagoExiste){
+          const ctaIdDelPago = state.cuentasPorPagar.pagos.find(p=>p.id===cd.data).ctaId;
           state.cuentasPorPagar = (await saveKeyMerged('cuentasPorPagar', current => {
             const c = current || { items:[], pagos:[] };
             const pagoFresco = (c.pagos||[]).find(p=>p.id===cd.data);
@@ -8634,6 +8673,9 @@
           })) ?? state.cuentasPorPagar;
           state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${cd.data}`);
           await saveKey('tesoreria', state.tesoreria, {silent:true});
+          // Recalcula el gasto original (si esta cuenta viene de uno) — quitar este pago puede devolverlo de
+          // "Pagado" a "Pagado Parcial".
+          if(sincronizarEstadoGastoDesdeCtaPagar(ctaIdDelPago)) await saveKey('gastos', state.gastos);
           showToast('Pago eliminado — el saldo pendiente volvió a subir');
         }
         render();
@@ -9313,6 +9355,11 @@
         }
         return { items, pagos };
       })) ?? state.cuentasPorPagar;
+
+      // Si esta Cuenta por Pagar nació de un Gasto Fijo pagado parcial (Procesar Pago), este pago puede ser
+      // justo el que termina de cubrirlo — se revisa y, si corresponde, el gasto pasa de "Pagado Parcial" a
+      // "Pagado" de verdad, para que deje de aparecer como pendiente en Estado de Resultados y en Flujo.
+      if(sincronizarEstadoGastoDesdeCtaPagar(ctaId)) await saveKey('gastos', state.gastos);
 
       // Únicas 2 acciones, tal como se pidió: reduce el pasivo (arriba) y descuenta el efectivo de Tesorería
       // (abajo) — JAMÁS toca Estado de Resultados, porque ese gasto ya se reconoció 100% en su mes de origen.
