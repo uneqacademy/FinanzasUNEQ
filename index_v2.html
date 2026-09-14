@@ -3151,11 +3151,18 @@
     }
     if(origen.startsWith('pagoctapagar:')){
       const id = origen.slice('pagoctapagar:'.length);
-      return { tipo:'pagoctapagar', id, existe: (state.cuentasPorPagar.pagos||[]).some(p=>p.id===id) };
+      const pago = (state.cuentasPorPagar.pagos||[]).find(p=>p.id===id);
+      // No basta con que el PAGO exista — su Cuenta por Pagar "padre" también tiene que seguir existiendo.
+      // Puede pasar que sobreviva el pago pero se pierda la cuenta (o al revés), dejando un huérfano parcial.
+      const existe = !!pago && (state.cuentasPorPagar.items||[]).some(c=>c.id===pago.ctaId);
+      return { tipo:'pagoctapagar', id, existe };
     }
     if(origen.startsWith('pagodeuda:')){
       const id = origen.slice('pagodeuda:'.length);
-      return { tipo:'pagodeuda', id, existe: (state.deudas.pagos||[]).some(p=>p.id===id) };
+      const pago = (state.deudas.pagos||[]).find(p=>p.id===id);
+      // Mismo caso: el pago puede seguir ahí, pero la Deuda que le dio origen puede haberse perdido.
+      const existe = !!pago && (state.deudas.inventario||[]).some(d=>d.id===pago.deudaId);
+      return { tipo:'pagodeuda', id, existe };
     }
     if(origen.startsWith('pagoimpuesto:')){
       const id = origen.slice('pagoimpuesto:'.length);
