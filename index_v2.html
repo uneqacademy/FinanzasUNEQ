@@ -2121,6 +2121,7 @@
     detalleProrrateoModal: null, // { anio, mesIdx } — qué mes de Ingresos Devengados se está mirando en detalle
     detalleFlujoModal: null, // { anio, mesIdx, tipo } — tipo: 'ingresos' | 'gastos', qué mes de Flujo de Caja se está mirando en detalle
     reasignarBovedaModal: null, // { gastoId, bovedaActual } — qué gasto se está moviendo de bóveda
+    editarMovimientoModal: null, // { movId } — edición LIBRE y directa de cualquier movimiento de Tesorería, sin depender de detectar si está huérfano o no
     deudaCronogramaExpandida: null, // id de la deuda con su cronograma completo desplegado (acordeón: solo una a la vez)
     editandoHistoricoId: null, // id del gasto histórico en edición (modal de Editar)
     filtroHistoricosMes: -1, // -1 = todos los meses, en la pantalla de Importar Históricos
@@ -2342,7 +2343,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','confirmar-reasignar-boveda','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','confirmar-reasignar-boveda','guardar-editar-movimiento','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto','add-pasarela','remove-pasarela',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
@@ -4562,7 +4563,12 @@
                     <td>${fmtDate(d.fecha)}</td>
                     <td>${escapeHtml(d.descripcion)}${d.huerfano?' <span style="color:var(--expense); font-weight:700;">⚠️ huérfano</span>':''}</td>
                     <td class="num money" style="color:${colorMonto};">${fmtMoneyC(d.monto)}</td>
-                    <td>${d.huerfano?`<button class="fa-icon-btn danger" data-action="eliminar-movimiento-huerfano" data-id="${d.id}">Eliminar</button>`:''}</td>
+                    <td>
+                      <div class="fa-row-actions">
+                        <button class="fa-icon-btn" data-action="abrir-editar-movimiento" data-id="${d.id}">Editar</button>
+                        <button class="fa-icon-btn danger" data-action="eliminar-movimiento-directo" data-id="${d.id}">Eliminar</button>
+                      </div>
+                    </td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -4607,6 +4613,49 @@
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-reasignar-boveda" data-gastoid="${r.gastoId}">Mover</button>
             <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-reasignar-boveda">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Edición LIBRE y directa de cualquier movimiento de Tesorería — sin importar de dónde vino ni si mi
+  // detección automática de huérfanos lo reconoce o no. Es la vía de escape para corregir cualquier cosa
+  // rara que aparezca (duplicados, movimientos sueltos, lo que sea) sin depender de que el sistema adivine
+  // bien. Ojo: esto edita SOLO el movimiento en Tesorería — no toca el Gasto/Pago que lo originó (si existe),
+  // así que es para casos de excepción, no para el uso normal del día a día (eso sigue siendo "Editar Gasto").
+  function renderEditarMovimientoModal(){
+    const em = state.editarMovimientoModal;
+    if(!em) return '';
+    const mov = state.tesoreria.movimientos.find(m=>m.id===em.movId);
+    if(!mov) return '';
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-editar-movimiento">
+        <div class="fa-modal" data-action="confirm-noop" style="max-width:460px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div class="fa-modal-title" style="margin:0;">Editar movimiento</div>
+            <button type="button" data-action="cerrar-editar-movimiento" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">Esto edita directo el movimiento en Tesorería — no toca ningún Gasto o Pago original. Úsalo para corregir algo suelto o raro; para el uso normal, sigue editando desde "Editar Gasto".</div>
+          <div data-form="editar-movimiento">
+            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${mov.fecha}"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" value="${escapeHtml(mov.descripcion||'')}"></div>
+            <div class="fa-field"><label>Tipo</label>
+              <select name="tipo">
+                <option value="entrada" ${mov.tipo==='entrada'?'selected':''}>Entrada</option>
+                <option value="salida" ${mov.tipo==='salida'?'selected':''}>Salida</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" value="${mov.monto}"></div>
+            <div class="fa-field"><label>Bóveda</label>
+              <select name="boveda">
+                ${BOVEDAS.map(b=>`<option value="${b.id}" ${mov.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-editar-movimiento" data-id="${mov.id}">Guardar cambios</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-editar-movimiento">Cancelar</button>
           </div>
         </div>
       </div>
@@ -7462,13 +7511,19 @@
                   <thead><tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th class="num">Monto</th><th class="num">Saldo</th><th></th></tr></thead>
                   <tbody>
                     ${movs.map(m=>`
-                      <tr>
+                      <tr style="${m._huerfano?'background:#FFF5F5;':''}">
                         <td>${fmtDate(m.fecha)}</td>
                         <td>${m.tipo==='entrada'?'Entrada':'Salida'}</td>
-                        <td>${escapeHtml(m.descripcion||'')}</td>
+                        <td>${escapeHtml(m.descripcion||'')}${m._huerfano?' <span style="color:var(--expense); font-weight:700;">⚠️ huérfano</span>':''}</td>
                         <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyC(m.monto)}</td>
                         <td class="num money" style="font-weight:700;">${fmtMoneyC(m.saldo)}</td>
-                        <td>${m._gastoId && m._gastoExiste ? `<button class="fa-icon-btn" data-action="abrir-reasignar-boveda" data-gastoid="${m._gastoId}" data-boveda="${b.id}">↔ Mover</button>` : ''}</td>
+                        <td>
+                          <div class="fa-row-actions">
+                            ${m._gastoId && m._gastoExiste ? `<button class="fa-icon-btn" data-action="abrir-reasignar-boveda" data-gastoid="${m._gastoId}" data-boveda="${b.id}">↔ Mover</button>` : ''}
+                            <button class="fa-icon-btn" data-action="abrir-editar-movimiento" data-id="${m.id}">Editar</button>
+                            <button class="fa-icon-btn danger" data-action="eliminar-movimiento-directo" data-id="${m.id}">Eliminar</button>
+                          </div>
+                        </td>
                       </tr>
                     `).join('')}
                   </tbody>
@@ -7479,6 +7534,7 @@
         }).join('')}
       </div>
       ${renderReasignarBovedaModal()}
+      ${renderEditarMovimientoModal()}
     `;
   }
 
@@ -9816,6 +9872,40 @@
       state.confirmDialog = {
         message: 'Este movimiento viene de un Gasto que ya no existe — eliminarlo corrige el saldo de esa bóveda. Esta acción no se puede deshacer.',
         action: 'do-eliminar-movimiento-huerfano',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
+      render();
+    }
+    else if(action === 'abrir-editar-movimiento'){
+      state.editarMovimientoModal = { movId: btn.dataset.id };
+      render();
+    }
+    else if(action === 'cerrar-editar-movimiento'){
+      state.editarMovimientoModal = null;
+      render();
+    }
+    else if(action === 'guardar-editar-movimiento'){
+      const movId = btn.dataset.id;
+      const data = readFields(btn.closest('[data-form="editar-movimiento"]'));
+      const monto = Number(data.monto) || 0;
+      if(!data.fecha){ showToast('Elige una fecha.'); return; }
+      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      const idx = state.tesoreria.movimientos.findIndex(m=>m.id===movId);
+      if(idx<0){ showToast('No se encontró el movimiento.'); return; }
+      state.tesoreria.movimientos[idx] = {
+        ...state.tesoreria.movimientos[idx],
+        fecha: data.fecha, descripcion: data.descripcion||'', tipo: data.tipo, monto, boveda: data.boveda
+      };
+      await saveKey('tesoreria', state.tesoreria);
+      state.editarMovimientoModal = null;
+      showToast('Movimiento actualizado');
+      render();
+    }
+    else if(action === 'eliminar-movimiento-directo'){
+      state.confirmDialog = {
+        message: 'Vas a eliminar este movimiento directo de Tesorería — si viene de un Gasto o Pago que sigue existiendo, ese registro NO se toca, solo desaparece el movimiento de caja. Esta acción no se puede deshacer.',
+        action: 'do-eliminar-movimiento-huerfano', // mismo borrado simple por id, reutilizado a propósito
         data: btn.dataset.id,
         confirmLabel: 'Eliminar'
       };
