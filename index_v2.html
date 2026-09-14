@@ -512,6 +512,10 @@
   // real en Estado de Resultados (NO es no-venta: el interés sí es un costo del negocio, a diferencia del
   // capital, que nunca se registra como gasto porque solo reduce lo que se debe).
   const CAT_GASTO_FINANCIERO = "Gasto Financiero";
+  // Id fijo (no generado con uid()) de la única deuda de Sobregiro/Línea de Crédito de OPEX — así el
+  // disparador automático siempre encuentra la MISMA deuda para hacerla crecer o bajar, en vez de crear una
+  // nueva cada vez. Nunca se crea a mano desde "Agregar deuda al inventario".
+  const SOBREGIRO_OPEX_ID = 'deuda_sobregiro_opex';
   // Costo de anticipo de fondos (ej. 0.97% de Hotmart por liquidar antes): también es un gasto financiero,
   // pero en categoría propia para distinguirlo del interés de deudas — ambos cuentan igual en la zona de
   // Gastos Financieros del Estado de Resultados.
@@ -677,6 +681,81 @@
       .filter(g=>g.deudaId===deudaId)
       .reduce((s,g)=> s + (Number(g.monto)||0), 0);
     return Math.max(Math.round((Number(deuda.montoOriginal)||0) + girosTotal - capitalPagado), 0);
+  }
+
+  // ---------------- Sobregiro / Línea de Crédito de OPEX — disparador automático ----------------
+  // Si quitar este gasto de OPEX YA había generado un sobregiro (un "giro" automático + su entrada
+  // compensatoria en Tesorería), los deshace ambos — se usa antes de recalcular en una edición, y también
+  // al eliminar el gasto por completo.
+  function revertirSobregiroDeGasto(gastoId){
+    const origen = `sobregiro:${gastoId}`;
+    const teniaGiro = (state.deudas.giros||[]).some(g=>g.origen===origen);
+    if(teniaGiro){
+      state.deudas.giros = state.deudas.giros.filter(g=>g.origen!==origen);
+      const sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
+      if(sobregiro && getSaldoDeuda(SOBREGIRO_OPEX_ID) <= 0) sobregiro.activa = false;
+    }
+    const teniaMov = state.tesoreria.movimientos.some(m=>m.origen===origen);
+    if(teniaMov) state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=>m.origen!==origen);
+    return { teniaGiro, teniaMov };
+  }
+
+  // Revisa si pagar ESTE gasto (monto, en la bóveda 'operacion') dejaría OPEX en negativo. Si es así, y el
+  // sobregiro resultante NO supera el cupo configurado, sube OPEX de vuelta a $0 y hace crecer la deuda de
+  // Sobregiro por el déficit exacto — nunca como Ingreso ni Venta. Si SÍ supera el cupo, bloquea por completo
+  // (no guarda nada) y avisa que hay que revisar. gastoIdSiEditando permite recalcular limpio en una edición,
+  // sumando de vuelta lo que el movimiento VIEJO de ese mismo gasto ya había restado.
+  function verificarYPrepararSobregiro(fecha, monto, gastoIdSiEditando){
+    let saldoBase = getSaldoBoveda('operacion');
+    let deficitViejoDeEsteGasto = 0;
+    if(gastoIdSiEditando){
+      // Al editar, primero se deshace MENTALMENTE tanto la salida del gasto viejo como su entrada
+      // compensatoria de sobregiro (si existía) — así el cálculo parte del saldo "puro", como si este gasto
+      // nunca hubiera existido, evitando contar dos veces el mismo déficit.
+      const movViejo = state.tesoreria.movimientos.find(m=> m.origen===`gasto:${gastoIdSiEditando}` && m.boveda==='operacion');
+      if(movViejo) saldoBase += Number(movViejo.monto)||0;
+      const compensacionVieja = state.tesoreria.movimientos.find(m=> m.origen===`sobregiro:${gastoIdSiEditando}`);
+      if(compensacionVieja){
+        saldoBase -= Number(compensacionVieja.monto)||0;
+        deficitViejoDeEsteGasto = Number(compensacionVieja.monto)||0;
+      }
+    }
+    const saldoResultante = saldoBase - monto;
+    if(saldoResultante >= 0) return { bloqueado:false, deficit:0 };
+
+    const deficit = Math.round(-saldoResultante);
+    const sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
+    const cupo = sobregiro ? (Number(sobregiro.cupo)||0) : 0;
+    const saldoActualSinEsteGasto = Math.max((sobregiro ? getSaldoDeuda(SOBREGIRO_OPEX_ID) : 0) - deficitViejoDeEsteGasto, 0);
+    if(cupo <= 0){
+      return { bloqueado:true, deficit, mensaje: `⚠️ Este gasto dejaría OPEX en ${fmtMoney(saldoResultante)} — se necesita un Sobregiro de ${fmtMoney(deficit)}, pero todavía no configuras un cupo para esa línea. Ve a Gestión de Deudas y define el cupo antes de continuar.` };
+    }
+    if(saldoActualSinEsteGasto + deficit > cupo){
+      return { bloqueado:true, deficit, mensaje: `⚠️ Este gasto dejaría el Sobregiro en ${fmtMoney(saldoActualSinEsteGasto+deficit)}, superando tu cupo de ${fmtMoney(cupo)}. Ajusta el monto, paga primero parte del Sobregiro, cambia de bóveda, o sube el cupo en Gestión de Deudas.` };
+    }
+    return { bloqueado:false, deficit };
+  }
+
+  // Aplica el sobregiro ya validado (llamar SOLO después de guardar el gasto en sí): sube OPEX a $0 con una
+  // entrada compensatoria, y hace crecer (o crea, la primera vez) la deuda de Sobregiro con un "giro" — el
+  // mismo mecanismo que ya usaba el viejo formulario manual de "Uso de Línea de Crédito".
+  async function aplicarSobregiro(fecha, deficit, gastoId){
+    if(deficit <= 0) return;
+    let sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
+    if(!sobregiro){
+      sobregiro = { id: SOBREGIRO_OPEX_ID, nombre:'Sobregiro / Línea de Crédito Activa', categoria:'Línea de Crédito', montoOriginal:0, cupo:0, activa:true, tipoDeuda:'sobregiro' };
+      state.deudas.inventario.push(sobregiro);
+    }
+    sobregiro.activa = true;
+    if(!state.deudas.giros) state.deudas.giros = [];
+    state.deudas.giros.push({ id: uid('giro'), deudaId: SOBREGIRO_OPEX_ID, fecha, monto: deficit, descripcion:'Sobregiro automático — OPEX en negativo', origen:`sobregiro:${gastoId}` });
+    await saveKey('deudas', state.deudas);
+
+    state.tesoreria.movimientos.push({
+      id: uid('tes'), fecha, boveda:'operacion', tipo:'entrada', monto: deficit,
+      descripcion:'Cobertura automática de Sobregiro', origen:`sobregiro:${gastoId}`
+    });
+    await saveKey('tesoreria', state.tesoreria, {silent:true});
   }
 
   // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
@@ -2040,6 +2119,7 @@
     filtroRentabilidadUnidadMes: new Date().getMonth(), // tabla única de Rentabilidad por Unidad — mes en curso por defecto
     editandoLineaLoteIndex: null, // índice (dentro de loteEnConstruccion.lineas) de la línea en edición, antes de confirmar el lote
     detalleProrrateoModal: null, // { anio, mesIdx } — qué mes de Ingresos Devengados se está mirando en detalle
+    detalleFlujoModal: null, // { anio, mesIdx, tipo } — tipo: 'ingresos' | 'gastos', qué mes de Flujo de Caja se está mirando en detalle
     deudaCronogramaExpandida: null, // id de la deuda con su cronograma completo desplegado (acordeón: solo una a la vez)
     editandoHistoricoId: null, // id del gasto histórico en edición (modal de Editar)
     filtroHistoricosMes: -1, // -1 = todos los meses, en la pantalla de Importar Históricos
@@ -2261,7 +2341,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','submit-uso-linea-credito','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto','add-pasarela','remove-pasarela',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
@@ -2909,6 +2989,50 @@
       m.margen = m.ingresosVenta !== 0 ? m.utilidadNeta / m.ingresosVenta : 0;
     });
     return months;
+  }
+
+  // Detalle de qué transacciones componen los números de "(+) Ingresos cobrados" y "(-) Gastos pagados" de un
+  // mes específico del Flujo de Caja — para el modal que se abre al hacer clic en cualquiera de los dos.
+  // Replica EXACTAMENTE los mismos criterios que getMonthlyStats para que el total del detalle siempre
+  // coincida con el número de la tabla.
+  function getDetalleFlujoMes(anio, mesIdx){
+    const ingresos = [];
+    state.ingresos.forEach(ing=>{
+      if(!ing.fecha || !esMovimientoVigente({fecha: ing.fecha})) return;
+      const d = new Date(ing.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      if(ing.estado !== 'Pagado' || !esIngresoFlujo(ing)) return;
+      ingresos.push({ fecha: ing.fecha, descripcion: `${ing.categoria}${ing.cliente?` — ${ing.cliente}`:''}`, monto: Number(ing.monto)||0 });
+    });
+    (state.deudas.giros||[]).forEach(g=>{
+      if(g.origen !== 'linea_credito' || !g.fecha || !esMovimientoVigente({fecha:g.fecha})) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const deuda = state.deudas.inventario.find(x=>x.id===g.deudaId);
+      ingresos.push({ fecha: g.fecha, descripcion: `Uso de Línea de Crédito — ${deuda?deuda.nombre:''}`, monto: Number(g.monto)||0 });
+    });
+
+    const gastos = [];
+    state.gastos.forEach(g=>{
+      if(!g.fecha || !esMovimientoVigente({fecha:g.fecha})) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      if(!esGastoFlujo(g)) return;
+      gastos.push({ fecha: g.fecha, descripcion: `${g.categoria}${g.proveedor?` — ${g.proveedor}`:(g.descripcion?` — ${g.descripcion}`:'')}`, monto: Number(g.monto)||0 });
+    });
+    (state.deudas.pagos||[]).forEach(p=>{
+      if(!p.fecha || !esMovimientoVigente({fecha:p.fecha})) return;
+      const d = new Date(p.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const capital = Number(p.capital)||0;
+      if(capital <= 0) return;
+      const deuda = state.deudas.inventario.find(x=>x.id===p.deudaId);
+      gastos.push({ fecha: p.fecha, descripcion: `Pago capital — ${deuda?deuda.nombre:''}`, monto: capital });
+    });
+
+    ingresos.sort((a,b)=> b.monto - a.monto);
+    gastos.sort((a,b)=> b.monto - a.monto);
+    return { ingresos, gastos };
   }
 
   // Espejo de getMonthlyStats, pero para el Flujo en USD — mismo patrón (mes a mes, acumulado corrido), pero
@@ -4335,18 +4459,19 @@
     if(!m) return '';
     const detalle = getDetalleIngresosDevengadosMes(m.anio, m.mesIdx);
     const total = detalle.reduce((s,d)=>s+d.montoEsteMes, 0);
+    const necesitaScroll = detalle.length > 5;
     return `
       <div class="fa-modal-overlay" data-action="cerrar-detalle-prorrateo">
         <div class="fa-modal" data-action="confirm-noop" style="max-width:600px;">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
             <div class="fa-modal-title" style="margin:0;">Ingreso Devengado — ${MESES[m.mesIdx]} ${m.anio}</div>
-            <button type="button" class="fa-icon-btn" style="font-size:16px; padding:2px 10px;" data-action="cerrar-detalle-prorrateo">✕</button>
+            <button type="button" data-action="cerrar-detalle-prorrateo" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
           </div>
           <div class="fa-hint" style="margin-top:0;">Cada venta abajo solo aporta la parte (cuota) que le corresponde a este mes — no su monto total, si su duración cruza varios meses.</div>
           ${detalle.length===0 ? `<div class="fa-empty">Sin ventas que aporten a este mes.</div>` : `
-          <div class="fa-table-wrap">
+          <div class="fa-table-wrap" style="${necesitaScroll?'max-height:280px; overflow-y:auto;':''}">
             <table class="fa-table">
-              <thead><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Fecha de Venta</th><th>Cuota</th><th class="num">Este mes</th></tr></thead>
+              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Proyecto/Cliente</th><th>Tipo</th><th>Fecha de Venta</th><th>Cuota</th><th class="num">Este mes</th></tr></thead>
               <tbody>
                 ${detalle.map(d=>{
                   const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===d.tipoIngreso);
@@ -4359,15 +4484,67 @@
                     <td class="num money">${fmtMoneyC(d.montoEsteMes)}</td>
                   </tr>
                 `;}).join('')}
-                <tr style="font-weight:700; background:#F8F9FA;">
-                  <td colspan="4">Total del mes</td>
-                  <td class="num money">${fmtMoneyC(total)}</td>
-                </tr>
               </tbody>
             </table>
-          </div>`}
+          </div>
+          <div class="fa-table-wrap"><table class="fa-table"><tbody>
+            <tr style="font-weight:700; background:#F8F9FA;">
+              <td colspan="4">Total del mes</td>
+              <td class="num money">${fmtMoneyC(total)}</td>
+            </tr>
+          </tbody></table></div>`}
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="cerrar-detalle-prorrateo">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal de detalle de un mes de Flujo de Caja — qué transacciones componen "(+) Ingresos cobrados" o "(-)
+  // Gastos pagados" al hacer clic en cualquiera de los dos números. Con scroll interno cuando hay más de 5
+  // movimientos (para que quepan todos sin que el cuadro crezca sin límite, sobre todo en el celular) y una
+  // "X" bien grande y visible para cerrar fácil.
+  function renderDetalleFlujoModal(){
+    const m = state.detalleFlujoModal;
+    if(!m) return '';
+    const { ingresos, gastos } = getDetalleFlujoMes(m.anio, m.mesIdx);
+    const lista = m.tipo === 'ingresos' ? ingresos : gastos;
+    const total = lista.reduce((s,d)=>s+d.monto, 0);
+    const titulo = m.tipo === 'ingresos' ? 'Ingresos cobrados' : 'Gastos pagados';
+    const colorMonto = m.tipo === 'ingresos' ? 'var(--income)' : 'var(--expense)';
+    const necesitaScroll = lista.length > 5;
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-detalle-flujo">
+        <div class="fa-modal" data-action="confirm-noop" style="max-width:600px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div class="fa-modal-title" style="margin:0;">${titulo} — ${MESES[m.mesIdx]} ${m.anio}</div>
+            <button type="button" data-action="cerrar-detalle-flujo" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">Cada movimiento abajo es una transacción real que compone este número — juntas suman exactamente lo que ves en la tabla.</div>
+          ${lista.length===0 ? `<div class="fa-empty">Sin movimientos que aporten a este mes.</div>` : `
+          <div class="fa-table-wrap" style="${necesitaScroll?'max-height:280px; overflow-y:auto;':''}">
+            <table class="fa-table">
+              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th></tr></thead>
+              <tbody>
+                ${lista.map(d=>`
+                  <tr>
+                    <td>${fmtDate(d.fecha)}</td>
+                    <td>${escapeHtml(d.descripcion)}</td>
+                    <td class="num money" style="color:${colorMonto};">${fmtMoneyC(d.monto)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="fa-table-wrap"><table class="fa-table"><tbody>
+            <tr style="font-weight:700; background:#F8F9FA;">
+              <td colspan="2">Total del mes (${lista.length} movimiento${lista.length===1?'':'s'})</td>
+              <td class="num money" style="color:${colorMonto};">${fmtMoneyC(total)}</td>
+            </tr>
+          </tbody></table></div>`}
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="cerrar-detalle-flujo">Cerrar</button>
           </div>
         </div>
       </div>
@@ -5162,30 +5339,29 @@
       </div>
 
       ${(() => {
-        const lineasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Línea de Crédito');
         const tarjetasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Tarjeta de Crédito');
-        const todasActivas = state.deudas.inventario.filter(d=> d.activa);
         const categoriasGasto = (state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).concat(
           state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT
         ).concat(
           state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO)
         );
+        const sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
+        const saldoSobregiro = sobregiro ? getSaldoDeuda(SOBREGIRO_OPEX_ID) : 0;
+        const cupo = sobregiro ? (Number(sobregiro.cupo)||0) : 0;
+        const pctUsado = cupo>0 ? Math.min(saldoSobregiro/cupo*100, 100) : 0;
         return `
       <div class="fa-card">
-        <div class="fa-card-title">💧 Uso de Línea de Crédito (inyección de liquidez)</div>
-        <div class="fa-section-note">Al registrar un uso, el monto entra completo a Operación como "Entrada por Financiamiento" (nunca como venta) Y aumenta al mismo tiempo lo que debes en esa línea.</div>
-        ${lineasCredito.length===0 ? `<div class="fa-hint">No tienes ninguna deuda activa categorizada "Línea de Crédito" todavía — créala primero abajo en "Agregar deuda al inventario".</div>` : `
-        <div data-form="uso-linea-credito">
-          <div class="fa-form-grid">
-            <div class="fa-field"><label>Línea de Crédito</label>
-              <select name="deudaId">${lineasCredito.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
-            </div>
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
-            <div class="fa-field"><label>Detalle (opcional)</label><input type="text" name="descripcion" placeholder="Para qué se usó"></div>
-          </div>
-          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-uso-linea-credito">Registrar uso</button></div>
-        </div>`}
+        <div class="fa-card-title">🚨 Sobregiro / Línea de Crédito Activa — OPEX</div>
+        <div class="fa-section-note">Ya no se registra a mano. Si un Gasto pagado desde OPEX deja esa bóveda en negativo, la app sube el saldo de OPEX a $0 sola y esta deuda crece automáticamente por el mismo monto — nunca cuenta como Ingreso ni Venta. Para pagarla (abono parcial o total), usa el formulario de pago más abajo, en su tarjeta.</div>
+        <div class="fa-form-grid" style="max-width:500px;">
+          <div class="fa-field"><label>Cupo de la línea (tope máximo permitido)</label><input type="number" id="fa-cupo-sobregiro" min="0" step="1" placeholder="Ej: 1000000" value="${cupo||''}"></div>
+        </div>
+        <div class="fa-form-actions">
+          <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-cupo-sobregiro">Guardar cupo</button>
+        </div>
+        ${sobregiro && sobregiro.activa ? `
+        <div class="fa-hint" style="margin-top:10px;">Saldo actual: <strong>${fmtMoneyC(saldoSobregiro)}</strong> de un cupo de <strong>${fmtMoney(cupo)}</strong> (${pctUsado.toFixed(0)}% usado)</div>
+        ` : `<div class="fa-hint" style="margin-top:10px;">Sin uso por ahora — el saldo está en $0.</div>`}
       </div>
 
       <div class="fa-card">
@@ -6946,8 +7122,8 @@
               ${rows.map(r=>`
                 <tr>
                   <td>${r.mes}</td>
-                  <td class="num money" style="color:var(--income)">${fmtMoneyC(r.ingresos)}</td>
-                  <td class="num money" style="color:var(--expense)">${fmtMoneyC(r.gastos)}</td>
+                  <td class="num money" style="color:var(--income); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-flujo" data-anio="${state.config.anio}" data-mes="${r.mesIdx}" data-tipo="ingresos" title="Ver qué movimientos componen este número">${fmtMoneyC(r.ingresos)}</td>
+                  <td class="num money" style="color:var(--expense); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-flujo" data-anio="${state.config.anio}" data-mes="${r.mesIdx}" data-tipo="gastos" title="Ver qué movimientos componen este número">${fmtMoneyC(r.gastos)}</td>
                   <td class="num money">${fmtMoneyC(r.utilidad)}</td>
                   <td class="num money" style="font-weight:700">${fmtMoneyC(r.saldo)}</td>
                 </tr>
@@ -6964,6 +7140,7 @@
         </div>
         <div class="fa-hint">Los ingresos aquí incluyen las ventas cobradas MÁS los créditos comerciales y aportes de inversionistas (no son venta, pero sí es plata real que entra al banco). Lo único que se queda fuera es la categoría "${CAT_INGRESO_NO_VENTA}". Los gastos incluyen tus compras de negocio y también los pagos que hagas a la tarjeta de crédito, créditos/renegociaciones y retiros de socios (esos pagos no se cuentan dos veces: la compra o el compromiso ya sumó gasto cuando correspondía, el pago solo aparece aquí porque es la plata que realmente sale del banco). El "Acumulado del año" parte de tu saldo inicial (el mismo de Cuenta Corriente) y va sumando el resultado de cada mes — muy parecido al saldo de Cuenta Corriente, pero no idéntico, porque sigue sin incluir la categoría "${CAT_INGRESO_NO_VENTA}".</div>
       </div>
+      ${renderDetalleFlujoModal()}
     `;
   }
 
@@ -8211,6 +8388,10 @@
         state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${cd.data}`);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
         await saveKey('tesoreriaUSD', state.tesoreriaUSD, {silent:true});
+        // Si este gasto había generado un Sobregiro automático de OPEX, se deshace también (el giro y su
+        // entrada compensatoria) — si no, quedaría una deuda fantasma sin el gasto que la originó.
+        const revertido = revertirSobregiroDeGasto(cd.data);
+        if(revertido.teniaGiro) await saveKey('deudas', state.deudas, {silent:true});
         // Importar Históricos: si este gasto venía de ahí, se desbloquea solo — vuelve a quedar disponible
         // para agregarlo de nuevo, conservando el Tipo/Subcategoría que ya le habías elegido.
         const historicoVinculado = (state.importacionHistorica||[]).find(h=>h.gastoRealId===cd.data);
@@ -8245,6 +8426,8 @@
         state.pendingGastoData = null;
         if(pending){
           await guardarGastoYSyncTesoreria(pending.data, pending.editId);
+          if(pending.editId) revertirSobregiroDeGasto(pending.editId);
+          if(pending.deficitSobregiro > 0) await aplicarSobregiro(pending.data.fecha, pending.deficitSobregiro, pending.editId || pending.data.id);
           state.editingGastoId = null;
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
@@ -9120,28 +9303,19 @@
       showToast(editId ? 'Deuda actualizada' : 'Deuda agregada al inventario');
       render();
     }
-    else if(action === 'submit-uso-linea-credito'){
-      const data = readFields(btn.closest('[data-form="uso-linea-credito"]'));
-      const deuda = state.deudas.inventario.find(d=>d.id===data.deudaId);
-      if(!deuda){ showToast('Elige una línea de crédito.'); return; }
-      const monto = Number(data.monto) || 0;
-      if(!data.fecha){ showToast('Elige una fecha.'); return; }
-      if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
-
-      // Acción B primero (Gestión de Deudas): el giro aumenta lo que se debe en esa línea.
-      if(!state.deudas.giros) state.deudas.giros = [];
-      const giro = { id: uid('giro'), deudaId: deuda.id, fecha: data.fecha, monto, descripcion: data.descripcion||'', origen:'linea_credito' };
-      state.deudas.giros.push(giro);
+    else if(action === 'guardar-cupo-sobregiro'){
+      const input = document.getElementById('fa-cupo-sobregiro');
+      const cupo = Number(input ? input.value : 0) || 0;
+      if(cupo <= 0){ showToast('Ingresa un cupo mayor a 0.'); return; }
+      let sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
+      if(!sobregiro){
+        sobregiro = { id: SOBREGIRO_OPEX_ID, nombre:'Sobregiro / Línea de Crédito Activa', categoria:'Línea de Crédito', montoOriginal:0, cupo, activa:false, tipoDeuda:'sobregiro' };
+        state.deudas.inventario.push(sobregiro);
+      } else {
+        sobregiro.cupo = cupo;
+      }
       await saveKey('deudas', state.deudas);
-
-      // Acción A (Tesorería): el monto entra íntegro a Operación como financiamiento — jamás como venta/ingreso.
-      state.tesoreria.movimientos.push({
-        id: uid('tes'), fecha: data.fecha, boveda:'operacion', tipo:'entrada', monto,
-        descripcion: `Entrada por Financiamiento — ${deuda.nombre}`, origen:`giro:${giro.id}`
-      });
-      await saveKey('tesoreria', state.tesoreria, {silent:true});
-
-      showToast(`Operación +${fmtMoney(monto)} — deuda de "${deuda.nombre}" aumentada en la misma cantidad`);
+      showToast('Cupo del Sobregiro actualizado');
       render();
     }
     else if(action === 'submit-gasto-tarjeta-credito'){
@@ -9474,6 +9648,14 @@
     }
     else if(action === 'cerrar-detalle-prorrateo'){
       state.detalleProrrateoModal = null;
+      render();
+    }
+    else if(action === 'ver-detalle-flujo'){
+      state.detalleFlujoModal = { anio: Number(btn.dataset.anio), mesIdx: Number(btn.dataset.mes), tipo: btn.dataset.tipo };
+      render();
+    }
+    else if(action === 'cerrar-detalle-flujo'){
+      state.detalleFlujoModal = null;
       render();
     }
     else if(action === 'submit-editar-historico'){
@@ -9920,6 +10102,15 @@
         if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
       }
 
+      // Sobregiro automático de OPEX: si este pago deja esa bóveda en negativo, se revisa ANTES de guardar
+      // nada — si supera el cupo configurado, se bloquea por completo (no se guarda el gasto ni nada más).
+      let deficitSobregiro = 0;
+      if(data.boveda === 'operacion'){
+        const chequeo = verificarYPrepararSobregiro(data.fecha, data.monto, state.editingGastoId);
+        if(chequeo.bloqueado){ showToast(chequeo.mensaje); return; }
+        deficitSobregiro = chequeo.deficit;
+      }
+
       // Los % de Unidad de Negocio son opcionales — si se llena AL MENOS uno, los 4 deben sumar 100% exacto.
       const algunPctLleno = UNIDADES_NEGOCIO.some(u=> data['pct_'+u.id] !== '');
       if(algunPctLleno){
@@ -9940,7 +10131,7 @@
       const esGastoNuevo = !state.editingGastoId;
       const esHistorico = esGastoNuevo && state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero;
       if(esHistorico){
-        state.pendingGastoData = { data: {...data}, editId: state.editingGastoId };
+        state.pendingGastoData = { data: {...data}, editId: state.editingGastoId, deficitSobregiro };
         state.confirmDialog = {
           message: `Esta fecha (${fmtDate(data.fecha)}) es anterior a tu Día Cero (${fmtDate(state.config.fechaDiaCero)}) — vas a alterar tu Tesorería ACTUAL (${esUSD?'OPEX USD':'CLP'}) con un movimiento histórico. ¿Seguro que quieres continuar?`,
           action: 'do-submit-gasto-historico',
@@ -9950,7 +10141,10 @@
         render();
         return;
       }
-      await guardarGastoYSyncTesoreria(data, state.editingGastoId);
+      const editIdAntes = state.editingGastoId;
+      await guardarGastoYSyncTesoreria(data, editIdAntes);
+      if(editIdAntes) revertirSobregiroDeGasto(editIdAntes);
+      if(deficitSobregiro > 0) await aplicarSobregiro(data.fecha, deficitSobregiro, editIdAntes || data.id);
       state.editingGastoId = null;
       showToast('Gasto guardado');
       render();
