@@ -5713,7 +5713,7 @@
               <div class="fa-field"><label>Interés Cuota</label><input type="number" name="interes" min="0" step="1" placeholder="0"></div>
               <div class="fa-field"><label>Interés por Mora</label><input type="number" name="interesMora" min="0" step="1" placeholder="0"></div>
             </div>
-            <div class="fa-hint">Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoneyC(cuota.montoEsperado)}. Ambos intereses van a Gastos Financieros en Estado de Resultados; el Capital amortiza el Saldo Insoluto.</div>
+            <div class="fa-hint">Capital + Interés Cuota deben sumar exacto ${fmtMoneyC(cuota.montoEsperado)}. El Interés por Mora es aparte — se suma ENCIMA de la cuota si existe, no tiene que "caber" dentro de ella. Ambos intereses van a Gastos Financieros en Estado de Resultados; el Capital amortiza el Saldo Insoluto.</div>
             ` : `
             <div class="fa-field" style="margin-bottom:10px;"><label>Monto Pagado</label><input type="number" name="montoTotal" min="0" step="1" value="${cuota.montoEsperado}"></div>
             <div class="fa-hint">${deuda.esCargaInicial ? 'Carga Inicial de Pasivos — sin interés, el 100% reduce el saldo.' : 'Esta deuda no lleva interés — el 100% de lo pagado reduce el saldo.'}</div>
@@ -9691,13 +9691,16 @@
         if(montoTotal <= 0){ showToast('Ingresa el monto pagado.'); return; }
         capital = montoTotal; interes = 0; interesMora = 0; cuentaOrigen = 'operacion';
       } else if(deuda.tipoDeuda === 'banco'){
-        // El Monto Total de la Cuota NUNCA cambia — siempre es el que quedó fijado al crear la deuda.
+        // El Monto Total de la Cuota NUNCA cambia — siempre es el que quedó fijado al crear la deuda. Capital
+        // + Interés Cuota deben sumar EXACTO esa cuota fija. El Interés por Mora es aparte — no "cabe dentro"
+        // de la cuota, se SUMA encima como un cargo adicional de ese mes, y se paga junto con la cuota en el
+        // mismo movimiento de Tesorería.
         montoTotal = cuota.montoEsperado;
         capital = Number(data.capital) || 0;
         interes = Number(data.interes) || 0;
         interesMora = Number(data.interesMora) || 0;
-        if(capital + interes + interesMora !== montoTotal){
-          showToast(`Capital + Interés Cuota + Interés por Mora debe sumar exacto ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes+interesMora)}.`);
+        if(capital + interes !== montoTotal){
+          showToast(`Capital + Interés Cuota debe sumar exacto ${fmtMoney(montoTotal)} (sin contar la Mora, que es aparte) — hoy suman ${fmtMoney(capital+interes)}.`);
           return;
         }
         cuentaOrigen = data.cuentaOrigen;
@@ -9709,7 +9712,8 @@
         if(!cuentaOrigen){ showToast('Elige de qué bóveda sale el pago.'); return; }
       }
 
-      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, interesMora, cuentaOrigen, cuotaCronogramaId: cuota.id };
+      const montoTotalPagado = montoTotal + interesMora; // la cuota fija + la Mora encima, si existe
+      const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, montoTotalPagado, capital, interes, interesMora, cuentaOrigen, cuotaCronogramaId: cuota.id };
       state.deudas.pagos.push(pago);
       cuota.estado = 'Pagada';
       cuota.pagoId = pago.id;
@@ -9723,8 +9727,8 @@
       await saveKey('deudas', state.deudas);
 
       state.tesoreria.movimientos.push({
-        id: uid('tes'), fecha: data.fecha, boveda: cuentaOrigen, tipo:'salida', monto: montoTotal,
-        descripcion: `Pago cuota ${cuota.numero} — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
+        id: uid('tes'), fecha: data.fecha, boveda: cuentaOrigen, tipo:'salida', monto: montoTotalPagado,
+        descripcion: `Pago cuota ${cuota.numero}${interesMora>0?' + Mora':''} — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
