@@ -3007,11 +3007,13 @@
       if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
       const origen = mov.origen || '';
       const monto = Number(mov.monto)||0;
+      const ref = getReferenciaMovimiento(mov);
+      const huerfano = ref ? !ref.existe : false;
       if(mov.tipo==='entrada' && PREFIJOS_ENTRADA_FLUJO.some(p=>origen.startsWith(p))){
-        ingresos.push({ fecha: mov.fecha, descripcion: mov.descripcion||'', monto });
+        ingresos.push({ id: mov.id, fecha: mov.fecha, descripcion: mov.descripcion||'', monto, huerfano });
       }
       if(mov.tipo==='salida' && PREFIJOS_SALIDA_FLUJO.some(p=>origen.startsWith(p))){
-        gastos.push({ fecha: mov.fecha, descripcion: mov.descripcion||'', monto });
+        gastos.push({ id: mov.id, fecha: mov.fecha, descripcion: mov.descripcion||'', monto, huerfano });
       }
     });
     ingresos.sort((a,b)=> b.monto - a.monto);
@@ -3133,6 +3135,35 @@
   }
 
   // Movimientos de una bóveda en orden cronológico, con saldo corrido — igual patrón que Cuenta USD.
+  // Revisa si el registro que originó un movimiento (el gasto, el pago de deuda, el pago de Cuenta por
+  // Pagar, etc.) TODAVÍA existe — si no, el movimiento quedó huérfano (su "padre" se borró en algún momento
+  // sin limpiar la Tesorería, por ejemplo al importar un respaldo editado a mano, o por la falla de guardado
+  // ya corregida). Cubre los orígenes que sí representan un movimiento real de caja.
+  function getReferenciaMovimiento(mov){
+    const origen = mov.origen || '';
+    if(origen.startsWith('gasto:')){
+      const id = origen.slice('gasto:'.length);
+      return { tipo:'gasto', id, existe: state.gastos.some(g=>g.id===id) };
+    }
+    if(origen.startsWith('gastoprocesado:')){
+      const id = origen.slice('gastoprocesado:'.length);
+      return { tipo:'gastoprocesado', id, existe: state.gastos.some(g=>g.id===id) };
+    }
+    if(origen.startsWith('pagoctapagar:')){
+      const id = origen.slice('pagoctapagar:'.length);
+      return { tipo:'pagoctapagar', id, existe: (state.cuentasPorPagar.pagos||[]).some(p=>p.id===id) };
+    }
+    if(origen.startsWith('pagodeuda:')){
+      const id = origen.slice('pagodeuda:'.length);
+      return { tipo:'pagodeuda', id, existe: (state.deudas.pagos||[]).some(p=>p.id===id) };
+    }
+    if(origen.startsWith('pagoimpuesto:')){
+      const id = origen.slice('pagoimpuesto:'.length);
+      return { tipo:'pagoimpuesto', id, existe: (state.pagosImpuestos||[]).some(p=>p.id===id) };
+    }
+    return null; // otros orígenes (ingreso, distribución, reserva, giro, sobregiro, día cero) no aplican acá
+  }
+
   function getMovimientosBoveda(bovedaId){
     const saldoIni = Number((state.tesoreria.saldosIniciales||{})[bovedaId]) || 0;
     const movs = state.tesoreria.movimientos
@@ -3142,15 +3173,15 @@
     let saldo = saldoIni;
     return movs.map(m=>{
       saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
-      // Si el movimiento viene de un gasto (origen "gasto:ID"), se marca si ese gasto todavía existe — así la
-      // pantalla puede ofrecer "reasignar bóveda" (si existe) o "eliminar huérfano" (si ya no existe, porque
-      // el gasto se borró en algún momento sin haber limpiado su movimiento).
-      let gastoId = null, gastoExiste = null;
-      if(m.origen && m.origen.startsWith('gasto:')){
-        gastoId = m.origen.slice('gasto:'.length);
-        gastoExiste = state.gastos.some(g=>g.id===gastoId);
-      }
-      return { ...m, saldo, _gastoId: gastoId, _gastoExiste: gastoExiste };
+      const ref = getReferenciaMovimiento(m);
+      return {
+        ...m, saldo,
+        // Se mantiene aparte para el botón "↔ Mover" (solo tiene sentido reasignar bóveda en un gasto).
+        _gastoId: ref && ref.tipo==='gasto' ? ref.id : null,
+        _gastoExiste: ref && ref.tipo==='gasto' ? ref.existe : null,
+        _huerfano: ref ? !ref.existe : false,
+        _tipoOrigen: ref ? ref.tipo : null
+      };
     });
   }
 
@@ -4517,13 +4548,14 @@
           ${lista.length===0 ? `<div class="fa-empty">Sin movimientos que aporten a este mes.</div>` : `
           <div class="fa-table-wrap" style="${necesitaScroll?'max-height:280px; overflow-y:auto;':''}">
             <table class="fa-table">
-              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th></tr></thead>
+              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th></th></tr></thead>
               <tbody>
                 ${lista.map(d=>`
-                  <tr>
+                  <tr style="${d.huerfano?'background:#FFF5F5;':''}">
                     <td>${fmtDate(d.fecha)}</td>
-                    <td>${escapeHtml(d.descripcion)}</td>
+                    <td>${escapeHtml(d.descripcion)}${d.huerfano?' <span style="color:var(--expense); font-weight:700;">⚠️ huérfano</span>':''}</td>
                     <td class="num money" style="color:${colorMonto};">${fmtMoneyC(d.monto)}</td>
+                    <td>${d.huerfano?`<button class="fa-icon-btn danger" data-action="eliminar-movimiento-huerfano" data-id="${d.id}">Eliminar</button>`:''}</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -4531,7 +4563,7 @@
           </div>
           <div class="fa-table-wrap"><table class="fa-table"><tbody>
             <tr style="font-weight:700; background:#F8F9FA;">
-              <td colspan="2">Total del mes (${lista.length} movimiento${lista.length===1?'':'s'})</td>
+              <td colspan="3">Total del mes (${lista.length} movimiento${lista.length===1?'':'s'})</td>
               <td class="num money" style="color:${colorMonto};">${fmtMoneyC(total)}</td>
             </tr>
           </tbody></table></div>`}
@@ -7376,28 +7408,31 @@
         <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
         ${(() => {
           // Escanea TODAS las bóvedas y TODOS los movimientos (sin el límite de 8) buscando huérfanos: un
-          // movimiento etiquetado "gasto:ID" cuyo gasto ya no existe (se borró en algún momento sin haber
-          // limpiado su movimiento — puede pasar si se importó un respaldo que quitó el gasto pero no tocó
-          // Tesorería). Se muestran juntos, sin importar en qué bóveda estén, para limpiarlos de un vistazo.
+          // movimiento cuyo "padre" (Gasto, Pago de Deuda, Pago de Cuenta por Pagar, F29) ya no existe — se
+          // borró en algún momento sin haber limpiado su movimiento (puede pasar si se importó un respaldo
+          // editado a mano, o por la falla de guardado ya corregida). Se muestran juntos, sin importar en qué
+          // bóveda estén ni de qué tipo sean, para limpiarlos de un vistazo.
           const huerfanos = [];
           BOVEDAS.forEach(b=>{
             getMovimientosBoveda(b.id).forEach(m=>{
-              if(m._gastoId && m._gastoExiste === false) huerfanos.push({ ...m, bovedaLabel: b.label });
+              if(m._huerfano) huerfanos.push({ ...m, bovedaLabel: b.label });
             });
           });
           if(huerfanos.length===0) return '';
+          const ETIQUETA_TIPO = { gasto:'Gasto', gastoprocesado:'Pago de Gasto Fijo', pagoctapagar:'Pago de Cuenta por Pagar', pagodeuda:'Pago de Deuda', pagoimpuesto:'Pago de Impuestos' };
           return `
           <div style="border:1.5px solid var(--expense); background:#FFF5F5; border-radius:10px; padding:14px; margin-bottom:16px;">
             <div style="font-weight:700; margin-bottom:6px;">⚠️ ${huerfanos.length} movimiento${huerfanos.length===1?'':'s'} huérfano${huerfanos.length===1?'':'s'} encontrado${huerfanos.length===1?'':'s'}</div>
-            <div class="fa-hint" style="margin:0 0 8px 0;">Estos movimientos vienen de un Gasto que ya no existe (se eliminó en algún momento sin limpiar su salida de Tesorería) — están inflando el saldo de su bóveda de forma incorrecta. Revisa y elimina los que correspondan.</div>
+            <div class="fa-hint" style="margin:0 0 8px 0;">Estos movimientos vienen de un registro que ya no existe (Gasto, Pago de Deuda, Cuenta por Pagar o F29) — se eliminó en algún momento sin limpiar su salida de Tesorería, y están inflando el saldo de su bóveda de forma incorrecta. Revisa y elimina los que correspondan.</div>
             <div class="fa-table-wrap">
               <table class="fa-table">
-                <thead><tr><th>Fecha</th><th>Bóveda</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
+                <thead><tr><th>Fecha</th><th>Bóveda</th><th>Tipo</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
                 <tbody>
                   ${huerfanos.map(m=>`
                     <tr>
                       <td>${fmtDate(m.fecha)}</td>
                       <td>${escapeHtml(m.bovedaLabel)}</td>
+                      <td>${escapeHtml(ETIQUETA_TIPO[m._tipoOrigen]||m._tipoOrigen||'—')}</td>
                       <td>${escapeHtml(m.descripcion||'')}</td>
                       <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.monto)}</td>
                       <td><button class="fa-icon-btn danger" data-action="eliminar-movimiento-huerfano" data-id="${m.id}">Eliminar</button></td>
@@ -8509,27 +8544,33 @@
         pagosDeEstaCuenta.forEach(p=>{
           state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${p.id}`);
         });
-        state.cuentasPorPagar.pagos = state.cuentasPorPagar.pagos.filter(p=>p.ctaId!==cd.data);
-        state.cuentasPorPagar.items = state.cuentasPorPagar.items.filter(c=>c.id!==cd.data);
-        await Promise.all([
-          saveKey('cuentasPorPagar', state.cuentasPorPagar),
-          saveKey('tesoreria', state.tesoreria, {silent:true})
-        ]);
+        state.cuentasPorPagar = (await saveKeyMerged('cuentasPorPagar', current => {
+          const c = current || { items:[], pagos:[] };
+          return {
+            items: (c.items||[]).filter(x=>x.id!==cd.data),
+            pagos: (c.pagos||[]).filter(p=>p.ctaId!==cd.data)
+          };
+        })) ?? state.cuentasPorPagar;
+        await saveKey('tesoreria', state.tesoreria, {silent:true});
         showToast('Cuenta por Pagar eliminada, junto con sus pagos');
         render();
       }
       else if(cd.action === 'do-delete-pago-ctapagar'){
-        const pago = state.cuentasPorPagar.pagos.find(p=>p.id===cd.data);
-        if(pago){
-          const cta = state.cuentasPorPagar.items.find(c=>c.id===pago.ctaId);
-          state.cuentasPorPagar.pagos = state.cuentasPorPagar.pagos.filter(p=>p.id!==cd.data);
+        const pagoExiste = state.cuentasPorPagar.pagos.some(p=>p.id===cd.data);
+        if(pagoExiste){
+          state.cuentasPorPagar = (await saveKeyMerged('cuentasPorPagar', current => {
+            const c = current || { items:[], pagos:[] };
+            const pagoFresco = (c.pagos||[]).find(p=>p.id===cd.data);
+            const pagos = (c.pagos||[]).filter(p=>p.id!==cd.data);
+            const items = (c.items||[]).map(x=>{
+              // Si la cuenta se había marcado como liquidada (activa:false) por este pago, vuelve a activa.
+              if(pagoFresco && x.id===pagoFresco.ctaId && !x.activa) return {...x, activa:true};
+              return x;
+            });
+            return { items, pagos };
+          })) ?? state.cuentasPorPagar;
           state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${cd.data}`);
-          // Si la cuenta se había marcado como liquidada (activa:false) por este pago, vuelve a quedar activa.
-          if(cta && !cta.activa) cta.activa = true;
-          await Promise.all([
-            saveKey('cuentasPorPagar', state.cuentasPorPagar),
-            saveKey('tesoreria', state.tesoreria, {silent:true})
-          ]);
+          await saveKey('tesoreria', state.tesoreria, {silent:true});
           showToast('Pago eliminado — el saldo pendiente volvió a subir');
         }
         render();
@@ -9169,8 +9210,11 @@
       const montoOriginal = Number(data.montoOriginal) || 0;
       if(!data.nombre){ showToast('Ponle un nombre a la Cuenta por Pagar.'); return; }
       if(montoOriginal <= 0){ showToast('Ingresa el monto pendiente.'); return; }
-      state.cuentasPorPagar.items.push({ id: uid('ctapagar'), nombre: data.nombre, montoOriginal, origenGasto: null, fechaCreacion: todayISO(), activa: true });
-      await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+      const nuevaCta = { id: uid('ctapagar'), nombre: data.nombre, montoOriginal, origenGasto: null, fechaCreacion: todayISO(), activa: true };
+      state.cuentasPorPagar = (await saveKeyMerged('cuentasPorPagar', current => {
+        const c = current || { items:[], pagos:[] };
+        return { items: [...(c.items||[]), nuevaCta], pagos: c.pagos||[] };
+      })) ?? state.cuentasPorPagar;
       showToast('Cuenta por Pagar agregada');
       render();
     }
@@ -9193,10 +9237,19 @@
       if(!data.boveda){ showToast('Elige de qué bóveda sale el pago.'); return; }
 
       const pagoId = uid('pagoctapagar');
-      state.cuentasPorPagar.pagos.push({ id: pagoId, ctaId, fecha: data.fecha, monto, boveda: data.boveda });
-      const saldoRestante = getSaldoCtaPorPagar(ctaId);
-      if(saldoRestante <= 0) cta.activa = false;
-      await saveKey('cuentasPorPagar', state.cuentasPorPagar);
+      let cuentaLiquidada = false;
+      state.cuentasPorPagar = (await saveKeyMerged('cuentasPorPagar', current => {
+        const c = current || { items:[], pagos:[] };
+        const items = c.items || [];
+        const pagos = [...(c.pagos||[]), { id: pagoId, ctaId, fecha: data.fecha, monto, boveda: data.boveda }];
+        const ctaFresca = items.find(x=>x.id===ctaId);
+        if(ctaFresca){
+          const totalPagado = pagos.filter(p=>p.ctaId===ctaId).reduce((s,p)=>s+(Number(p.monto)||0), 0);
+          const saldoRestante = (Number(ctaFresca.montoOriginal)||0) - totalPagado;
+          if(saldoRestante <= 0){ ctaFresca.activa = false; cuentaLiquidada = true; }
+        }
+        return { items, pagos };
+      })) ?? state.cuentasPorPagar;
 
       // Únicas 2 acciones, tal como se pidió: reduce el pasivo (arriba) y descuenta el efectivo de Tesorería
       // (abajo) — JAMÁS toca Estado de Resultados, porque ese gasto ya se reconoció 100% en su mes de origen.
@@ -9207,7 +9260,7 @@
       await saveKey('tesoreria', state.tesoreria, {silent:true});
 
       state.pagandoCtaPorPagarId = null;
-      showToast(saldoRestante<=0 ? 'Cuenta por Pagar liquidada por completo' : 'Pago parcial registrado');
+      showToast(cuentaLiquidada ? 'Cuenta por Pagar liquidada por completo' : 'Pago parcial registrado');
       render();
     }
     else if(action === 'delete-ctapagar'){
