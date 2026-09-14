@@ -2120,6 +2120,7 @@
     editandoLineaLoteIndex: null, // índice (dentro de loteEnConstruccion.lineas) de la línea en edición, antes de confirmar el lote
     detalleProrrateoModal: null, // { anio, mesIdx } — qué mes de Ingresos Devengados se está mirando en detalle
     detalleFlujoModal: null, // { anio, mesIdx, tipo } — tipo: 'ingresos' | 'gastos', qué mes de Flujo de Caja se está mirando en detalle
+    reasignarBovedaModal: null, // { gastoId, bovedaActual } — qué gasto se está moviendo de bóveda
     deudaCronogramaExpandida: null, // id de la deuda con su cronograma completo desplegado (acordeón: solo una a la vez)
     editandoHistoricoId: null, // id del gasto histórico en edición (modal de Editar)
     filtroHistoricosMes: -1, // -1 = todos los meses, en la pantalla de Importar Históricos
@@ -2341,7 +2342,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','confirmar-reasignar-boveda','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto','add-pasarela','remove-pasarela',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
@@ -2913,9 +2914,6 @@
       if(ing.estado === 'Pagado'){
         months[m].ingresosCobrados += monto;
         if(venta) months[m].ingresosCobradosVenta += monto;
-        // ingresosCobradosFlujo es la vista para Flujo de Caja: venta + créditos/aportes de inversionista
-        // (categoriasIngresosSoloFlujo) — plata real que entra al banco, aunque no sea venta.
-        if(esIngresoFlujo(ing)) months[m].ingresosCobradosFlujo += monto;
       }
     });
 
@@ -2931,40 +2929,38 @@
       months[m].gastosPagados += monto;
       // montoNegocioGasto() ya decide todo: monto completo si es venta, 0 si es no-venta, o solo el interés
       // si el gasto trae desglose interés/capital (aunque la categoría sea no-venta, ej. créditos). Egreso de
-      // Flujo también queda en 0 acá — no es "gasto de negocio" para efectos de esta Utilidad Neta (ventas)
-      // simplificada, aunque SÍ sigue sumando abajo en gastosFlujo (Flujo de Caja real).
+      // Flujo también queda en 0 acá — no es "gasto de negocio" para efectos de esta Utilidad Neta (ventas).
       const categoriasEgresoFlujoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
       const montoNeg = categoriasEgresoFlujoFlujo.includes(g.categoria) ? 0 : montoNegocioGasto(g);
       months[m].gastosNegocio += montoNeg;
       if(months[m].gastosPorCategoria[g.categoria] === undefined) months[m].gastosPorCategoria[g.categoria]=0;
       months[m].gastosPorCategoria[g.categoria] += montoNeg;
-      // gastosFlujo es una vista aparte para Flujo de Caja: además de los gastos de negocio, incluye los
-      // "solo flujo" (pago de tarjeta, créditos, retiros de socios) que sí mueven el banco aunque no sean
-      // gasto nuevo del negocio (o solo lo sean parcialmente, como el interés de un crédito).
-      if(esGastoFlujo(g)){
+    });
+
+    // Ingresos y Gastos de FLUJO DE CAJA: a partir de acá, ya NO se leen los registros de Gasto/Ingreso — se
+    // leen los movimientos REALES de Tesorería (entrada/salida efectiva de una bóveda). Esto es a propósito:
+    // las comisiones e intereses prorrateados de una venta (generados por el Motor de Prorrateo) NUNCA tienen
+    // bóveda propia — solo afectan Estado de Resultados, nunca crean un movimiento — así que automáticamente
+    // quedan fuera de Flujo. Y un Sueldo (Plantilla) recién cuenta el mes en que de verdad se "Procesa" su
+    // pago — si el pago fue parcial, solo esa porción cuenta ese mes, y el saldo pendiente cuenta en el mes
+    // en que realmente se termine de pagar, no antes. Se excluyen a propósito las transferencias INTERNAS
+    // entre bóvedas (distribución del Profit First, reserva, saldo de Día Cero) — esas no son plata nueva
+    // entrando o saliendo del negocio, solo se mueve de un cofre a otro.
+    const PREFIJOS_ENTRADA_FLUJO = ['ingreso:', 'giro:', 'sobregiro:'];
+    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:'];
+    state.tesoreria.movimientos.forEach(mov=>{
+      if(!mov.fecha || !esMovimientoVigente(mov)) return;
+      const d = new Date(mov.fecha+'T00:00:00');
+      if(d.getFullYear() !== year) return;
+      const m = d.getMonth();
+      const origen = mov.origen || '';
+      const monto = Number(mov.monto)||0;
+      if(mov.tipo === 'entrada' && PREFIJOS_ENTRADA_FLUJO.some(p=>origen.startsWith(p))){
+        months[m].ingresosCobradosFlujo += monto;
+      }
+      if(mov.tipo === 'salida' && PREFIJOS_SALIDA_FLUJO.some(p=>origen.startsWith(p))){
         months[m].gastosFlujo += monto;
       }
-    });
-
-    // Pagos de deuda: el interés ya cuenta arriba (vía su gasto vinculado, categoría "Gasto Financiero"),
-    // pero el CAPITAL nunca se guarda como gasto — es plata real saliendo del banco de todas formas, así que
-    // se suma aparte para que Flujo de Caja no la deje afuera.
-    (state.deudas.pagos||[]).forEach(p=>{
-      if(!p.fecha || !esMovimientoVigente({fecha: p.fecha})) return;
-      const d = new Date(p.fecha+'T00:00:00');
-      if(d.getFullYear() !== year) return;
-      months[d.getMonth()].gastosFlujo += Number(p.capital)||0;
-    });
-
-    // Uso de Línea de Crédito: plata real entrando a Operación como financiamiento — no es venta, así que
-    // nunca fue un "ingreso", pero igual mueve el banco. Los giros de tarjeta y cuota atrasada NO se suman
-    // acá a propósito: esos nunca tocan Tesorería (compra con tarjeta se paga después; cuota atrasada no se
-    // pagó todavía).
-    (state.deudas.giros||[]).forEach(g=>{
-      if(g.origen !== 'linea_credito' || !g.fecha || !esMovimientoVigente({fecha: g.fecha})) return;
-      const d = new Date(g.fecha+'T00:00:00');
-      if(d.getFullYear() !== year) return;
-      months[d.getMonth()].ingresosCobradosFlujo += Number(g.monto)||0;
     });
 
     // Saldo real de Cuenta Corriente: incluye TODO ingreso (venta o no) y TODO gasto (incluso los marcados
@@ -2995,41 +2991,29 @@
   // mes específico del Flujo de Caja — para el modal que se abre al hacer clic en cualquiera de los dos.
   // Replica EXACTAMENTE los mismos criterios que getMonthlyStats para que el total del detalle siempre
   // coincida con el número de la tabla.
+  // Detalle de qué transacciones componen "(+) Ingresos cobrados" y "(-) Gastos pagados" de un mes — ahora
+  // leyendo directo de los movimientos REALES de Tesorería (mismos prefijos de origen que getMonthlyStats),
+  // así el detalle siempre coincide exacto con el número de la tabla, y nunca muestra comisiones/intereses
+  // prorrateados de una venta (esos no tienen bóveda, nunca generan un movimiento) ni un Sueldo Pendiente
+  // (recién aparece el mes en que de verdad se "Procesa" su pago).
   function getDetalleFlujoMes(anio, mesIdx){
+    const PREFIJOS_ENTRADA_FLUJO = ['ingreso:', 'giro:', 'sobregiro:'];
+    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:'];
     const ingresos = [];
-    state.ingresos.forEach(ing=>{
-      if(!ing.fecha || !esMovimientoVigente({fecha: ing.fecha})) return;
-      const d = new Date(ing.fecha+'T00:00:00');
-      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
-      if(ing.estado !== 'Pagado' || !esIngresoFlujo(ing)) return;
-      ingresos.push({ fecha: ing.fecha, descripcion: `${ing.categoria}${ing.cliente?` — ${ing.cliente}`:''}`, monto: Number(ing.monto)||0 });
-    });
-    (state.deudas.giros||[]).forEach(g=>{
-      if(g.origen !== 'linea_credito' || !g.fecha || !esMovimientoVigente({fecha:g.fecha})) return;
-      const d = new Date(g.fecha+'T00:00:00');
-      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
-      const deuda = state.deudas.inventario.find(x=>x.id===g.deudaId);
-      ingresos.push({ fecha: g.fecha, descripcion: `Uso de Línea de Crédito — ${deuda?deuda.nombre:''}`, monto: Number(g.monto)||0 });
-    });
-
     const gastos = [];
-    state.gastos.forEach(g=>{
-      if(!g.fecha || !esMovimientoVigente({fecha:g.fecha})) return;
-      const d = new Date(g.fecha+'T00:00:00');
+    state.tesoreria.movimientos.forEach(mov=>{
+      if(!mov.fecha || !esMovimientoVigente(mov)) return;
+      const d = new Date(mov.fecha+'T00:00:00');
       if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
-      if(!esGastoFlujo(g)) return;
-      gastos.push({ fecha: g.fecha, descripcion: `${g.categoria}${g.proveedor?` — ${g.proveedor}`:(g.descripcion?` — ${g.descripcion}`:'')}`, monto: Number(g.monto)||0 });
+      const origen = mov.origen || '';
+      const monto = Number(mov.monto)||0;
+      if(mov.tipo==='entrada' && PREFIJOS_ENTRADA_FLUJO.some(p=>origen.startsWith(p))){
+        ingresos.push({ fecha: mov.fecha, descripcion: mov.descripcion||'', monto });
+      }
+      if(mov.tipo==='salida' && PREFIJOS_SALIDA_FLUJO.some(p=>origen.startsWith(p))){
+        gastos.push({ fecha: mov.fecha, descripcion: mov.descripcion||'', monto });
+      }
     });
-    (state.deudas.pagos||[]).forEach(p=>{
-      if(!p.fecha || !esMovimientoVigente({fecha:p.fecha})) return;
-      const d = new Date(p.fecha+'T00:00:00');
-      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
-      const capital = Number(p.capital)||0;
-      if(capital <= 0) return;
-      const deuda = state.deudas.inventario.find(x=>x.id===p.deudaId);
-      gastos.push({ fecha: p.fecha, descripcion: `Pago capital — ${deuda?deuda.nombre:''}`, monto: capital });
-    });
-
     ingresos.sort((a,b)=> b.monto - a.monto);
     gastos.sort((a,b)=> b.monto - a.monto);
     return { ingresos, gastos };
@@ -3158,7 +3142,15 @@
     let saldo = saldoIni;
     return movs.map(m=>{
       saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
-      return { ...m, saldo };
+      // Si el movimiento viene de un gasto (origen "gasto:ID"), se marca si ese gasto todavía existe — así la
+      // pantalla puede ofrecer "reasignar bóveda" (si existe) o "eliminar huérfano" (si ya no existe, porque
+      // el gasto se borró en algún momento sin haber limpiado su movimiento).
+      let gastoId = null, gastoExiste = null;
+      if(m.origen && m.origen.startsWith('gasto:')){
+        gastoId = m.origen.slice('gasto:'.length);
+        gastoExiste = state.gastos.some(g=>g.id===gastoId);
+      }
+      return { ...m, saldo, _gastoId: gastoId, _gastoExiste: gastoExiste };
     });
   }
 
@@ -4545,6 +4537,37 @@
           </tbody></table></div>`}
           <div class="fa-modal-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="cerrar-detalle-flujo">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal para reasignar la bóveda de un gasto directamente desde su movimiento en Tesorería — actualiza
+  // gasto.boveda y vuelve a sincronizar, así el movimiento desaparece de la bóveda vieja y aparece en la
+  // nueva automáticamente (mismo mecanismo que ya usa "Editar Gasto", solo que más directo).
+  function renderReasignarBovedaModal(){
+    const r = state.reasignarBovedaModal;
+    if(!r) return '';
+    const gasto = state.gastos.find(g=>g.id===r.gastoId);
+    if(!gasto) return '';
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-reasignar-boveda">
+        <div class="fa-modal" data-action="confirm-noop" style="max-width:420px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div class="fa-modal-title" style="margin:0;">Mover a otra bóveda</div>
+            <button type="button" data-action="cerrar-reasignar-boveda" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">${escapeHtml(gasto.descripcion||gasto.proveedor||gasto.categoria)} — ${fmtMoney(gasto.monto)}</div>
+          <div class="fa-field"><label>Bóveda actual</label><input type="text" value="${escapeHtml(BOVEDAS.find(b=>b.id===r.bovedaActual)?.label||'')}" disabled></div>
+          <div class="fa-field"><label>Nueva bóveda</label>
+            <select id="fa-reasignar-boveda-select">
+              ${BOVEDAS_PAGABLES.filter(b=>b.id!==r.bovedaActual).map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-reasignar-boveda" data-gastoid="${r.gastoId}">Mover</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-reasignar-boveda">Cancelar</button>
           </div>
         </div>
       </div>
@@ -7348,6 +7371,41 @@
 
       <div class="fa-card">
         <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
+        ${(() => {
+          // Escanea TODAS las bóvedas y TODOS los movimientos (sin el límite de 8) buscando huérfanos: un
+          // movimiento etiquetado "gasto:ID" cuyo gasto ya no existe (se borró en algún momento sin haber
+          // limpiado su movimiento — puede pasar si se importó un respaldo que quitó el gasto pero no tocó
+          // Tesorería). Se muestran juntos, sin importar en qué bóveda estén, para limpiarlos de un vistazo.
+          const huerfanos = [];
+          BOVEDAS.forEach(b=>{
+            getMovimientosBoveda(b.id).forEach(m=>{
+              if(m._gastoId && m._gastoExiste === false) huerfanos.push({ ...m, bovedaLabel: b.label });
+            });
+          });
+          if(huerfanos.length===0) return '';
+          return `
+          <div style="border:1.5px solid var(--expense); background:#FFF5F5; border-radius:10px; padding:14px; margin-bottom:16px;">
+            <div style="font-weight:700; margin-bottom:6px;">⚠️ ${huerfanos.length} movimiento${huerfanos.length===1?'':'s'} huérfano${huerfanos.length===1?'':'s'} encontrado${huerfanos.length===1?'':'s'}</div>
+            <div class="fa-hint" style="margin:0 0 8px 0;">Estos movimientos vienen de un Gasto que ya no existe (se eliminó en algún momento sin limpiar su salida de Tesorería) — están inflando el saldo de su bóveda de forma incorrecta. Revisa y elimina los que correspondan.</div>
+            <div class="fa-table-wrap">
+              <table class="fa-table">
+                <thead><tr><th>Fecha</th><th>Bóveda</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
+                <tbody>
+                  ${huerfanos.map(m=>`
+                    <tr>
+                      <td>${fmtDate(m.fecha)}</td>
+                      <td>${escapeHtml(m.bovedaLabel)}</td>
+                      <td>${escapeHtml(m.descripcion||'')}</td>
+                      <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.monto)}</td>
+                      <td><button class="fa-icon-btn danger" data-action="eliminar-movimiento-huerfano" data-id="${m.id}">Eliminar</button></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          `;
+        })()}
         ${BOVEDAS.map(b=>{
           const movs = getMovimientosBoveda(b.id).slice().reverse().slice(0,8);
           return `
@@ -7356,7 +7414,7 @@
               ${movs.length===0 ? `<div class="fa-hint" style="margin:0 0 4px 0;">Sin movimientos.</div>` : `
               <div class="fa-table-wrap">
                 <table class="fa-table">
-                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead>
+                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th class="num">Monto</th><th class="num">Saldo</th><th></th></tr></thead>
                   <tbody>
                     ${movs.map(m=>`
                       <tr>
@@ -7365,6 +7423,7 @@
                         <td>${escapeHtml(m.descripcion||'')}</td>
                         <td class="num money" style="color:${m.tipo==='entrada'?'var(--income)':'var(--expense)'}">${m.tipo==='entrada'?'+':'−'}${fmtMoneyC(m.monto)}</td>
                         <td class="num money" style="font-weight:700;">${fmtMoneyC(m.saldo)}</td>
+                        <td>${m._gastoId && m._gastoExiste ? `<button class="fa-icon-btn" data-action="abrir-reasignar-boveda" data-gastoid="${m._gastoId}" data-boveda="${b.id}">↔ Mover</button>` : ''}</td>
                       </tr>
                     `).join('')}
                   </tbody>
@@ -7374,6 +7433,7 @@
           `;
         }).join('')}
       </div>
+      ${renderReasignarBovedaModal()}
     `;
   }
 
@@ -8377,6 +8437,12 @@
         state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoimpuesto:${cd.data}`);
         await saveKey('tesoreria', state.tesoreria, {silent:true});
         showToast('Pago de Impuestos eliminado');
+        render();
+      }
+      else if(cd.action === 'do-eliminar-movimiento-huerfano'){
+        state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=>m.id!==cd.data);
+        await saveKey('tesoreria', state.tesoreria);
+        showToast('Movimiento huérfano eliminado — el saldo de la bóveda ya quedó corregido');
         render();
       }
       else if(cd.action === 'do-delete-gasto'){
@@ -9656,6 +9722,40 @@
     }
     else if(action === 'cerrar-detalle-flujo'){
       state.detalleFlujoModal = null;
+      render();
+    }
+    else if(action === 'abrir-reasignar-boveda'){
+      state.reasignarBovedaModal = { gastoId: btn.dataset.gastoid, bovedaActual: btn.dataset.boveda };
+      render();
+    }
+    else if(action === 'cerrar-reasignar-boveda'){
+      state.reasignarBovedaModal = null;
+      render();
+    }
+    else if(action === 'confirmar-reasignar-boveda'){
+      const gastoId = btn.dataset.gastoid;
+      const select = document.getElementById('fa-reasignar-boveda-select');
+      const nuevaBoveda = select ? select.value : '';
+      if(!nuevaBoveda){ showToast('Elige la nueva bóveda.'); return; }
+      const gasto = state.gastos.find(g=>g.id===gastoId);
+      if(!gasto){ showToast('No se encontró el gasto.'); return; }
+      gasto.boveda = nuevaBoveda;
+      state.gastos = (await saveKeyMerged('gastos', current => (current||[]).map(g=> g.id===gastoId ? gasto : g))) ?? state.gastos;
+      // syncTesoreriaGasto encuentra el movimiento viejo por el mismo origen (gasto:ID) y lo reemplaza entero
+      // con la bóveda nueva — así desaparece solo de la bóveda vieja y aparece en la nueva, sin dejar rastro.
+      syncTesoreriaGasto(gasto);
+      await saveKey('tesoreria', state.tesoreria, {silent:true});
+      state.reasignarBovedaModal = null;
+      showToast('Movido a la nueva bóveda');
+      render();
+    }
+    else if(action === 'eliminar-movimiento-huerfano'){
+      state.confirmDialog = {
+        message: 'Este movimiento viene de un Gasto que ya no existe — eliminarlo corrige el saldo de esa bóveda. Esta acción no se puede deshacer.',
+        action: 'do-eliminar-movimiento-huerfano',
+        data: btn.dataset.id,
+        confirmLabel: 'Eliminar'
+      };
       render();
     }
     else if(action === 'submit-editar-historico'){
