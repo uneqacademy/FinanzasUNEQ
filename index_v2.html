@@ -5037,12 +5037,15 @@
             <div class="fa-field" id="fa-gasto-metodo-wrap"><label>Método de pago</label>
               <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editingG&&editingG.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
             </div>
-            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&editingG.monedaOriginal==='USD'?'none':''};"><label>Bóveda de origen (Tesorería)</label>
+            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&(editingG.monedaOriginal==='USD'||editingG.origenPlantilla||editingG.origenSueldoDuenos)?'none':''};"><label>Bóveda de origen (Tesorería)</label>
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
+            ${editingG && (editingG.origenPlantilla || editingG.origenSueldoDuenos) ? `
+            <div class="fa-field"><div class="fa-hint" style="margin:0; padding:8px; background:#FFF9E6; border-radius:6px;">🔒 Este gasto viene de Plantilla de Gastos Fijos — su pago (parcial o total) se registra únicamente desde el botón "Procesar Pago" en esa pantalla, nunca eligiendo una bóveda aquí. Así se evita contar el mismo pago dos veces en Flujo de Caja.</div></div>
+            ` : ''}
             <div class="fa-field" id="fa-gasto-tc-wrap" style="display:${editingG&&editingG.monedaOriginal==='USD'?'':'none'};">
               <label>Tipo de Cambio (CLP por USD)</label>
               <div style="display:flex; gap:8px;">
@@ -10184,6 +10187,16 @@
       data.monto = Number(data.monto)||0;
       if(data.monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
 
+      // Un gasto de Plantilla de Gastos Fijos (o Sueldo Dueños) NUNCA puede recibir una bóveda directa desde
+      // acá — su pago (parcial o total) se registra únicamente vía "Procesar Pago" en esa pantalla. Si se
+      // permitiera acá, se crearía un movimiento de Tesorería por el monto COMPLETO además del que genera
+      // "Procesar Pago" (por la porción realmente pagada), duplicando el gasto en Flujo de Caja.
+      const gastoEnEdicion = state.editingGastoId ? state.gastos.find(g=>g.id===state.editingGastoId) : null;
+      const esDePlantilla = gastoEnEdicion && (gastoEnEdicion.origenPlantilla || gastoEnEdicion.origenSueldoDuenos);
+      if(esDePlantilla){
+        data.boveda = null;
+      }
+
       const esUSD = data.moneda === 'USD';
       if(esUSD){
         // En USD no se elige bóveda (siempre es OPEX USD) — en cambio, se pide el Tipo de Cambio para
@@ -10199,7 +10212,7 @@
         data.monedaOriginal = 'CLP';
         data.montoUSD = null;
         data.tipoCambio = null;
-        if(!data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+        if(!esDePlantilla && !data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
       }
 
       // Sobregiro automático de OPEX: si este pago deja esa bóveda en negativo, se revisa ANTES de guardar
