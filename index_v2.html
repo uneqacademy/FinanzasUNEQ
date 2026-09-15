@@ -758,6 +758,21 @@
     await saveKey('tesoreria', state.tesoreria, {silent:true});
   }
 
+  // ---------------- Gasto pagado con Tarjeta de Crédito — enrutamiento automático ----------------
+  // Nunca toca Tesorería (nunca hay bóveda) — el monto en CLP se suma directo a la deuda de la tarjeta
+  // elegida, como un "giro" (mismo mecanismo que ya usaba Sobregiro y el viejo formulario dedicado). Se
+  // etiqueta con el id del gasto para poder deshacerlo limpio si se edita o se elimina después.
+  async function revertirGiroTarjetaDeGasto(gastoId){
+    const origen = `tarjetagasto:${gastoId}`;
+    const teniaGiro = (state.deudas.giros||[]).some(g=>g.origen===origen);
+    if(teniaGiro) state.deudas.giros = state.deudas.giros.filter(g=>g.origen!==origen);
+    return teniaGiro;
+  }
+  async function aplicarGiroTarjeta(fecha, monto, deudaTarjetaId, gastoId, descripcion){
+    if(!state.deudas.giros) state.deudas.giros = [];
+    state.deudas.giros.push({ id: uid('giro'), deudaId: deudaTarjetaId, fecha, monto, descripcion: descripcion||'Compra con tarjeta', origen:`tarjetagasto:${gastoId}` });
+  }
+
   // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
   // interés — a propósito, así funciona la Bola de Nieve). La primera de la lista es el "Objetivo Principal".
   // Cada deuda viene con su saldo, % de progreso y proyección ya calculados, listos para pintar.
@@ -1000,6 +1015,31 @@
       });
     });
     return detalle.sort((a,b)=> b.montoEsteMes - a.montoEsteMes);
+  }
+
+  // Detalle de qué gastos componen "Costos Directos", "Gastos Operacionales" o "Gastos Financieros" de un mes
+  // específico en Estado de Resultados — replica EXACTO la misma clasificación de getEstadoResultadosMensual
+  // (mismo cortafuegos de Egreso de Flujo, mismo montoNegocioGasto), así el total del detalle siempre
+  // coincide con el número de la tabla. tipo: 'costoDirecto' | 'gastoOperacional' | 'gastoFinanciero'.
+  function getDetalleGastosEERRMes(anio, mesIdx, tipo){
+    const categoriasCostoDirecto = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+    const detalle = [];
+    state.gastos.forEach(g=>{
+      if(!g.fecha) return;
+      const d = new Date(g.fecha+'T00:00:00');
+      if(d.getFullYear() !== anio || d.getMonth() !== mesIdx) return;
+      const monto = montoNegocioGasto(g);
+      if(monto === 0) return;
+      const esFinanciero = g.categoria === CAT_GASTO_FINANCIERO || g.categoria === CAT_GASTO_COSTO_LIQUIDEZ;
+      const esEgresoFlujo = categoriasEgresoFlujo.includes(g.categoria);
+      const esCostoDirecto = !esFinanciero && !esEgresoFlujo && categoriasCostoDirecto.includes(g.categoria);
+      const esOperacional = !esFinanciero && !esEgresoFlujo && !esCostoDirecto;
+      const coincide = (tipo==='gastoFinanciero' && esFinanciero) || (tipo==='costoDirecto' && esCostoDirecto) || (tipo==='gastoOperacional' && esOperacional);
+      if(!coincide) return;
+      detalle.push({ id: g.id, fecha: g.fecha, descripcion: `${g.categoria}${g.proveedor?` — ${g.proveedor}`:(g.descripcion?` — ${g.descripcion}`:'')}`, monto });
+    });
+    return detalle.sort((a,b)=> b.monto - a.monto);
   }
 
   // A qué Unidad de Negocio pertenece un Tipo de Ingreso — 'agencia' | 'academia' | null (excluido a propósito).
@@ -2146,6 +2186,7 @@
     filtroRentabilidadUnidadMes: new Date().getMonth(), // tabla única de Rentabilidad por Unidad — mes en curso por defecto
     editandoLineaLoteIndex: null, // índice (dentro de loteEnConstruccion.lineas) de la línea en edición, antes de confirmar el lote
     detalleProrrateoModal: null, // { anio, mesIdx } — qué mes de Ingresos Devengados se está mirando en detalle
+    detalleGastoEERRModal: null, // { anio, mesIdx, tipo } — tipo: 'costoDirecto' | 'gastoOperacional' | 'gastoFinanciero'
     detalleFlujoModal: null, // { anio, mesIdx, tipo } — tipo: 'ingresos' | 'gastos', qué mes de Flujo de Caja se está mirando en detalle
     reasignarBovedaModal: null, // { gastoId, bovedaActual } — qué gasto se está moviendo de bóveda
     editarMovimientoModal: null, // { movId } — edición LIBRE y directa de cualquier movimiento de Tesorería, sin depender de detectar si está huérfano o no
@@ -4069,18 +4110,32 @@
   };
   // Igual que faToggleMonedaIngreso, pero para el formulario de Gasto: cuando es USD, esconde la Bóveda (en
   // USD siempre es OPEX USD, sin otra opción) y muestra el campo de Tipo de Cambio en su lugar.
-  window.faToggleMonedaGasto = function(){
-    const sel = document.getElementById('fa-gasto-moneda');
+  // Unifica la visibilidad del formulario de Gasto según DOS campos a la vez (Método de Pago y Moneda):
+  // - Tarjeta de Crédito: nunca hay Bóveda, aparece "¿Qué tarjeta?", el 3er grupo de Categoría pasa a
+  //   llamarse "No Afecta EERR" (porque con tarjeta el Flujo nunca se toca, sin importar la categoría — lo
+  //   único que esa opción sigue controlando es si cuenta o no en Estado de Resultados).
+  // - Cualquier otro método: se comporta exactamente como antes (Bóveda para CLP, Tipo de Cambio para USD).
+  // - Tipo de Cambio aparece si la Moneda es USD, sin importar el método (incluida Tarjeta de Crédito).
+  window.faActualizarVisibilidadGasto = function(){
+    const selMetodo = document.getElementById('fa-gasto-metodo');
+    const selMoneda = document.getElementById('fa-gasto-moneda');
     const label = document.getElementById('fa-gasto-monto-label');
     const bovedaWrap = document.getElementById('fa-gasto-boveda-wrap');
+    const tarjetaWrap = document.getElementById('fa-gasto-tarjeta-wrap');
     const tcWrap = document.getElementById('fa-gasto-tc-wrap');
-    const nota = document.getElementById('fa-gasto-usd-nota');
-    if(!sel) return;
-    const esUSD = sel.value === 'USD';
+    const notaUsd = document.getElementById('fa-gasto-usd-nota');
+    const notaTarjeta = document.getElementById('fa-gasto-tarjeta-nota');
+    const optgroupFlujo = document.getElementById('fa-gasto-optgroup-flujo');
+    if(!selMetodo || !selMoneda) return;
+    const esTarjeta = selMetodo.value === 'Tarjeta de Crédito';
+    const esUSD = selMoneda.value === 'USD';
     if(label) label.textContent = esUSD ? 'Monto (USD)' : 'Monto';
-    if(bovedaWrap) bovedaWrap.style.display = esUSD ? 'none' : '';
+    if(bovedaWrap) bovedaWrap.style.display = (esUSD || esTarjeta) ? 'none' : '';
+    if(tarjetaWrap) tarjetaWrap.style.display = esTarjeta ? '' : 'none';
     if(tcWrap) tcWrap.style.display = esUSD ? '' : 'none';
-    if(nota) nota.style.display = esUSD ? '' : 'none';
+    if(notaUsd) notaUsd.style.display = (esUSD && !esTarjeta) ? '' : 'none';
+    if(notaTarjeta) notaTarjeta.style.display = esTarjeta ? '' : 'none';
+    if(optgroupFlujo) optgroupFlujo.label = esTarjeta ? 'No Afecta EERR' : 'Egresos de Flujo (no afecta Estado de Resultados)';
   };
   // Indicador en vivo de cuánto suman los 4 % de Línea de Negocio, mientras se escriben — no valida ni
   // bloquea nada (eso ya lo hace submit-gasto/submit-plantilla-gasto-fijo al guardar), solo ayuda a ver de
@@ -4559,6 +4614,60 @@
     `;
   }
 
+  // Modal de detalle de Costos Directos / Gastos Operacionales / Gastos Financieros de un mes — mismo patrón
+  // que los otros (scroll con 5+, X grande) — y acá además se puede Editar o Eliminar cada gasto directo,
+  // reutilizando los mismos botones que ya existen en la tabla de Gastos.
+  function renderDetalleGastoEERRModal(){
+    const m = state.detalleGastoEERRModal;
+    if(!m) return '';
+    const detalle = getDetalleGastosEERRMes(m.anio, m.mesIdx, m.tipo);
+    const total = detalle.reduce((s,d)=>s+d.monto, 0);
+    const TITULOS = { costoDirecto:'Costos Directos', gastoOperacional:'Gastos Operacionales', gastoFinanciero:'Gastos Financieros' };
+    const necesitaScroll = detalle.length > 5;
+    return `
+      <div class="fa-modal-overlay" data-action="cerrar-detalle-gasto-eerr">
+        <div class="fa-modal" data-action="confirm-noop" style="max-width:600px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div class="fa-modal-title" style="margin:0;">${TITULOS[m.tipo]} — ${MESES[m.mesIdx]} ${m.anio}</div>
+            <button type="button" data-action="cerrar-detalle-gasto-eerr" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
+          </div>
+          <div class="fa-hint" style="margin-top:0;">Cada gasto abajo es una transacción real que compone este número — juntas suman exactamente lo que ves en la tabla.</div>
+          ${detalle.length===0 ? `<div class="fa-empty">Sin gastos que aporten a este mes.</div>` : `
+          <div class="fa-table-wrap" style="${necesitaScroll?'max-height:280px; overflow-y:auto;':''}">
+            <table class="fa-table">
+              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th></th></tr></thead>
+              <tbody>
+                ${detalle.map(d=>`
+                  <tr>
+                    <td>${fmtDate(d.fecha)}</td>
+                    <td>${escapeHtml(d.descripcion)}</td>
+                    <td class="num money" style="color:var(--expense);">${fmtMoneyC(d.monto)}</td>
+                    <td>
+                      <div class="fa-row-actions">
+                        <button class="fa-icon-btn" data-action="edit-gasto" data-id="${d.id}">Editar</button>
+                        <button class="fa-icon-btn danger" data-action="delete-gasto" data-id="${d.id}">Eliminar</button>
+                      </div>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="fa-table-wrap"><table class="fa-table"><tbody>
+            <tr style="font-weight:700; background:#F8F9FA;">
+              <td colspan="2">Total del mes (${detalle.length} gasto${detalle.length===1?'':'s'})</td>
+              <td class="num money" style="color:var(--expense);">${fmtMoneyC(total)}</td>
+              <td></td>
+            </tr>
+          </tbody></table></div>`}
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="cerrar-detalle-gasto-eerr">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   // Modal de detalle de un mes de Flujo de Caja — qué transacciones componen "(+) Ingresos cobrados" o "(-)
   // Gastos pagados" al hacer clic en cualquiera de los dos números. Con scroll interno cuando hay más de 5
   // movimientos (para que quepan todos sin que el cuadro crezca sin límite, sobre todo en el celular) y una
@@ -4818,12 +4927,12 @@
                   <td>${MESES[i]}</td>
                   <td class="num money">${fmtMoneyC(ventaBrutaMes)}</td>
                   <td class="num money" style="color:var(--income); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-prorrateo" data-anio="${anio}" data-mes="${i}" title="Ver qué ventas componen este número">${fmtMoneyC(m.ingresosDevengados)}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.costosDirectos)}</td>
+                  <td class="num money" style="color:var(--expense); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-gasto-eerr" data-anio="${anio}" data-mes="${i}" data-tipo="costoDirecto" title="Ver qué gastos componen este número">${fmtMoneyC(m.costosDirectos)}</td>
                   <td class="num money">${fmtMoneyC(m.margenBruto)}</td>
                   <td class="num">${m.margenBrutoPct!==null?m.margenBrutoPct.toFixed(1)+'%':'—'}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.gastosOperacionales)}</td>
+                  <td class="num money" style="color:var(--expense); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-gasto-eerr" data-anio="${anio}" data-mes="${i}" data-tipo="gastoOperacional" title="Ver qué gastos componen este número">${fmtMoneyC(m.gastosOperacionales)}</td>
                   <td class="num money" style="font-weight:700; color:${m.utilidadOperativa>=0?'var(--income)':'var(--expense)'};">${m.utilidadOperativa>=0?'🟢':'🔴'} ${fmtMoneyC(m.utilidadOperativa)}</td>
-                  <td class="num money" style="color:var(--expense);">${fmtMoneyC(m.gastosFinancieros)}</td>
+                  <td class="num money" style="color:var(--expense); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-gasto-eerr" data-anio="${anio}" data-mes="${i}" data-tipo="gastoFinanciero" title="Ver qué gastos componen este número">${fmtMoneyC(m.gastosFinancieros)}</td>
                   <td class="num money" style="font-weight:700;">${fmtMoneyC(m.utilidadNeta)}</td>
                   <td class="num">${m.margenRentabilidad!==null?m.margenRentabilidad.toFixed(1)+'%':'—'}</td>
                 </tr>
@@ -5127,8 +5236,11 @@
         <div data-form="gasto">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" id="fa-gasto-fecha" name="fecha" value="${editingG?editingG.fecha:todayISO()}"></div>
+            <div class="fa-field" id="fa-gasto-metodo-wrap"><label>Método de pago</label>
+              <select name="metodo" id="fa-gasto-metodo" onchange="window.faActualizarVisibilidadGasto()">${state.config.metodosPago.map(m=>`<option ${editingG&&editingG.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+            </div>
             <div class="fa-field"><label>Moneda</label>
-              <select name="moneda" id="fa-gasto-moneda" onchange="window.faToggleMonedaGasto()">
+              <select name="moneda" id="fa-gasto-moneda" onchange="window.faActualizarVisibilidadGasto()">
                 <option value="CLP" ${(!editingG || editingG.monedaOriginal!=='USD')?'selected':''}>CLP</option>
                 <option value="USD" ${editingG && editingG.monedaOriginal==='USD'?'selected':''}>USD</option>
               </select>
@@ -5143,16 +5255,19 @@
                 <optgroup label="Gastos Operacionales y otros">
                   ${state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c)).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
-                <optgroup label="Egresos de Flujo (no afecta Estado de Resultados)">
+                <optgroup id="fa-gasto-optgroup-flujo" label="${editingG&&editingG.metodo==='Tarjeta de Crédito'?'No Afecta EERR':'Egresos de Flujo (no afecta Estado de Resultados)'}">
                   ${(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).map(c=>`<option ${editingG&&editingG.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
                 </optgroup>
               </select>
             </div>
             <div class="fa-field"><label id="fa-gasto-monto-label">Monto${editingG && editingG.monedaOriginal==='USD'?' (USD)':''}</label><input type="number" id="fa-gasto-monto" name="monto" min="0" step="0.01" placeholder="0" value="${editingG?(editingG.monedaOriginal==='USD'?editingG.montoUSD:editingG.monto):''}"></div>
-            <div class="fa-field" id="fa-gasto-metodo-wrap"><label>Método de pago</label>
-              <select name="metodo">${state.config.metodosPago.map(m=>`<option ${editingG&&editingG.metodo===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+            <div class="fa-field" id="fa-gasto-tarjeta-wrap" style="display:none;"><label>¿Qué tarjeta?</label>
+              <select name="deudaTarjetaId">
+                ${state.deudas.inventario.filter(d=>d.activa && d.categoria==='Tarjeta de Crédito').map(d=>`<option value="${d.id}" ${editingG&&editingG.deudaTarjetaId===d.id?'selected':''}>${escapeHtml(d.nombre)}</option>`).join('')}
+              </select>
+              ${state.deudas.inventario.filter(d=>d.activa && d.categoria==='Tarjeta de Crédito').length===0?'<div class="fa-hint" style="margin:4px 0 0 0; color:var(--expense);">No tienes ninguna tarjeta activa — créala primero en Gestión de Deudas.</div>':''}
             </div>
-            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&(editingG.monedaOriginal==='USD'||editingG.origenPlantilla||editingG.origenSueldoDuenos)?'none':''};"><label>Bóveda de origen (Tesorería)</label>
+            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&(editingG.monedaOriginal==='USD'||editingG.origenPlantilla||editingG.origenSueldoDuenos||editingG.metodo==='Tarjeta de Crédito')?'none':''};"><label>Bóveda de origen (Tesorería)</label>
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
@@ -5167,10 +5282,11 @@
                 <input type="number" id="fa-gasto-tc" name="tipoCambio" min="0" step="0.01" placeholder="0" value="${editingG&&editingG.tipoCambio?editingG.tipoCambio:''}">
                 <button type="button" class="fa-btn fa-btn-ghost" onclick="window.faBuscarTipoCambioGasto()">Buscar</button>
               </div>
-              <div class="fa-hint" id="fa-gasto-tc-status" style="margin:4px 0 0 0;"></div>
+              <div class="fa-hint" id="fa-gasto-tc-status" style="margin:4px 0 0 0;">${editingG&&editingG.metodo==='Tarjeta de Crédito'?'Editable en cualquier momento — cuando pagues la tarjeta de verdad, ajústalo aquí si el tipo de cambio real fue distinto.':''}</div>
             </div>
           </div>
-          <div class="fa-hint" id="fa-gasto-usd-nota" style="display:${editingG&&editingG.monedaOriginal==='USD'?'':'none'};">Este gasto sale de la bóveda OPEX USD (aislada) — no hay otra opción de bóveda mientras la moneda sea USD. El monto convertido a CLP con el Tipo de Cambio de arriba es el que cuenta para Estado de Resultados, salvo que elijas Egreso de Flujo (ese nunca entra a EERR, sin importar la moneda).</div>
+          <div class="fa-hint" id="fa-gasto-usd-nota" style="display:${editingG&&editingG.monedaOriginal==='USD'&&editingG.metodo!=='Tarjeta de Crédito'?'':'none'};">Este gasto sale de la bóveda OPEX USD (aislada) — no hay otra opción de bóveda mientras la moneda sea USD. El monto convertido a CLP con el Tipo de Cambio de arriba es el que cuenta para Estado de Resultados, salvo que elijas Egreso de Flujo (ese nunca entra a EERR, sin importar la moneda).</div>
+          <div class="fa-hint" id="fa-gasto-tarjeta-nota" style="display:${editingG&&editingG.metodo==='Tarjeta de Crédito'?'':'none'};">Este pago no toca ninguna bóveda ni el Flujo de Caja — se suma directo a la deuda de la tarjeta elegida. Se paga después, todo junto, cuando registres el pago de la facturación en Gestión de Deudas.</div>
           <div class="fa-form-grid" style="margin-top:6px;">
             ${UNIDADES_NEGOCIO.map(u=>`
             <div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingG&&editingG['pct_'+u.id]!==undefined?editingG['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctGasto()"></div>
@@ -5220,6 +5336,7 @@
         })()}
       </div>
       ${renderDetalleProrrateoModal()}
+      ${renderDetalleGastoEERRModal()}
     `;
   }
 
@@ -5897,6 +6014,38 @@
   }
 
   // ---------------- ASESOR IA ----------------
+  // Arma un resumen de las cifras actuales del negocio (Estado de Resultados del mes en curso, Flujo de Caja,
+  // y Deudas activas) para que el Asesor IA responda usando datos reales, sin necesitar que Felipe los escriba
+  // a mano. Se antepone a la pregunta antes de mandarla a la Cloud Function — para esa función, es solo texto
+  // más largo, no necesita ningún cambio de su lado.
+  function construirContextoFinancieroAsesor(){
+    const hoy = new Date();
+    const anio = hoy.getFullYear();
+    const mesIdx = hoy.getMonth();
+    const eerr = getEstadoResultadosMensual(anio)[mesIdx];
+    const flujo = getMonthlyStats(anio)[mesIdx];
+    const deudas = getDeudasBolaDeNieve();
+    const lineasDeuda = deudas.length
+      ? deudas.map(d=>`  - ${d.nombre}: ${fmtMoney(d.saldo)} de saldo`).join('\n')
+      : '  (sin deudas activas)';
+    return `[Cifras reales del negocio — ${MESES[mesIdx]} ${anio}, generadas automáticamente por la app, no las escribió el usuario]
+Estado de Resultados del mes:
+  Ingresos Devengados: ${fmtMoney(eerr.ingresosDevengados)}
+  Costos Directos: ${fmtMoney(eerr.costosDirectos)}
+  Gastos Operacionales: ${fmtMoney(eerr.gastosOperacionales)}
+  Utilidad Operativa: ${fmtMoney(eerr.utilidadOperativa)}
+  Gastos Financieros: ${fmtMoney(eerr.gastosFinancieros)}
+  Utilidad Neta: ${fmtMoney(eerr.utilidadNeta)}
+  Margen de Rentabilidad: ${eerr.margenRentabilidad!==null ? eerr.margenRentabilidad.toFixed(1)+'%' : '—'}
+Flujo de Caja:
+  Saldo acumulado a fin de mes: ${fmtMoney(flujo.operativoAcumFinal)}
+Deudas activas:
+${lineasDeuda}
+
+[Pregunta del usuario]
+`;
+  }
+
   function renderAsesorIA(){
     const mensajes = state.asesorChat;
     return `
@@ -5939,6 +6088,7 @@
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'deudas', label:'Gestión de Deudas', icon:'&#8987;'},
       ...(pendientesHistoricos>0 ? [{id:'importarhistoricos', label:`Importar Históricos (${pendientesHistoricos})`, icon:'&#128229;'}] : []),
+      {id:'asesorIA', label:'Asesor IA', icon:'&#128172;'},
       {id:'config', label:'Configuración', icon:'&#9881;'}
     ];
     return `
@@ -6130,6 +6280,7 @@
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'importarhistoricos': return renderImportarHistoricos();
+      case 'asesorIA': return renderAsesorIA();
       case 'config': return renderConfig();
       default: return '';
     }
@@ -8585,7 +8736,9 @@
         // Si este gasto había generado un Sobregiro automático de OPEX, se deshace también (el giro y su
         // entrada compensatoria) — si no, quedaría una deuda fantasma sin el gasto que la originó.
         const revertido = revertirSobregiroDeGasto(cd.data);
-        if(revertido.teniaGiro) await saveKey('deudas', state.deudas, {silent:true});
+        // Igual, si este gasto se había pagado con Tarjeta de Crédito, se deshace el giro a esa tarjeta.
+        const teniaGiroTarjeta = await revertirGiroTarjetaDeGasto(cd.data);
+        if(revertido.teniaGiro || teniaGiroTarjeta) await saveKey('deudas', state.deudas, {silent:true});
         // Importar Históricos: si este gasto venía de ahí, se desbloquea solo — vuelve a quedar disponible
         // para agregarlo de nuevo, conservando el Tipo/Subcategoría que ya le habías elegido.
         const historicoVinculado = (state.importacionHistorica||[]).find(h=>h.gastoRealId===cd.data);
@@ -8620,8 +8773,15 @@
         state.pendingGastoData = null;
         if(pending){
           await guardarGastoYSyncTesoreria(pending.data, pending.editId);
-          if(pending.editId) revertirSobregiroDeGasto(pending.editId);
+          if(pending.editId){
+            revertirSobregiroDeGasto(pending.editId);
+            await revertirGiroTarjetaDeGasto(pending.editId);
+          }
           if(pending.deficitSobregiro > 0) await aplicarSobregiro(pending.data.fecha, pending.deficitSobregiro, pending.editId || pending.data.id);
+          if(pending.data.metodo === 'Tarjeta de Crédito'){
+            await aplicarGiroTarjeta(pending.data.fecha, pending.data.monto, pending.data.deudaTarjetaId, pending.editId || pending.data.id, pending.data.descripcion || pending.data.categoria);
+          }
+          await saveKey('deudas', state.deudas, {silent:true});
           state.editingGastoId = null;
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
@@ -9784,13 +9944,18 @@
       const input = document.getElementById('fa-asesor-input');
       const pregunta = (input && input.value || '').trim();
       if(!pregunta || state.asesorCargando) return;
-      state.asesorChat.push({role:'user', text: pregunta});
+      state.asesorChat.push({role:'user', text: pregunta}); // el chat en pantalla muestra SOLO lo que escribió
       state.asesorCargando = true;
       state.asesorError = null;
       render();
       try{
+        // Se antepone el contexto financiero FRESCO en cada pregunta (no solo la primera) — así, si Felipe
+        // agrega un gasto o un pago entre una pregunta y otra, el asesor siempre ve las cifras más actuales,
+        // no las de cuando empezó la conversación. La Cloud Function no necesita saber nada de esto — para
+        // ella es simplemente una pregunta más larga.
+        const preguntaConContexto = construirContextoFinancieroAsesor() + pregunta;
         const llamarAsesor = firebase.functions().httpsCallable('asesorIA');
-        const resp = await llamarAsesor({ pregunta, historial: state.asesorHistorialAPI });
+        const resp = await llamarAsesor({ pregunta: preguntaConContexto, historial: state.asesorHistorialAPI });
         state.asesorChat.push({role:'assistant', text: resp.data.respuesta});
         state.asesorHistorialAPI = resp.data.historial;
       } catch(err){
@@ -9884,6 +10049,14 @@
     }
     else if(action === 'cerrar-detalle-prorrateo'){
       state.detalleProrrateoModal = null;
+      render();
+    }
+    else if(action === 'ver-detalle-gasto-eerr'){
+      state.detalleGastoEERRModal = { anio: Number(btn.dataset.anio), mesIdx: Number(btn.dataset.mes), tipo: btn.dataset.tipo };
+      render();
+    }
+    else if(action === 'cerrar-detalle-gasto-eerr'){
+      state.detalleGastoEERRModal = null;
       render();
     }
     else if(action === 'ver-detalle-flujo'){
@@ -10398,10 +10571,13 @@
         data.boveda = null;
       }
 
+      const esTarjeta = data.metodo === 'Tarjeta de Crédito';
       const esUSD = data.moneda === 'USD';
       if(esUSD){
-        // En USD no se elige bóveda (siempre es OPEX USD) — en cambio, se pide el Tipo de Cambio para
-        // calcular el equivalente en CLP, que es el que efectivamente cuenta para Estado de Resultados.
+        // En USD no se elige bóveda (siempre es OPEX USD, salvo que sea Tarjeta) — en cambio, se pide el
+        // Tipo de Cambio para calcular el equivalente en CLP, que es el que efectivamente cuenta para Estado
+        // de Resultados. Queda editable siempre — si pagas la tarjeta con un tipo de cambio real distinto,
+        // se puede ajustar después sin problema.
         const tipoCambio = Number(data.tipoCambio) || 0;
         if(tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — este gasto es en USD.'); return; }
         data.montoUSD = data.monto;
@@ -10413,7 +10589,15 @@
         data.monedaOriginal = 'CLP';
         data.montoUSD = null;
         data.tipoCambio = null;
-        if(!esDePlantilla && !data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+        if(!esDePlantilla && !esTarjeta && !data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+      }
+
+      // Tarjeta de Crédito: nunca toca ninguna bóveda ni Sobregiro — el monto (ya convertido a CLP si era
+      // USD) se suma directo a la deuda de la tarjeta elegida, no a Tesorería. Se fuerza null incluso si el
+      // formulario (por algún motivo) trajera algo en boveda.
+      if(esTarjeta){
+        if(!data.deudaTarjetaId){ showToast('Elige con qué tarjeta se pagó este gasto.'); return; }
+        data.boveda = null;
       }
 
       // Sobregiro automático de OPEX: si este pago deja esa bóveda en negativo, se revisa ANTES de guardar
@@ -10457,8 +10641,17 @@
       }
       const editIdAntes = state.editingGastoId;
       await guardarGastoYSyncTesoreria(data, editIdAntes);
-      if(editIdAntes) revertirSobregiroDeGasto(editIdAntes);
+      if(editIdAntes){
+        revertirSobregiroDeGasto(editIdAntes);
+        await revertirGiroTarjetaDeGasto(editIdAntes);
+      }
       if(deficitSobregiro > 0) await aplicarSobregiro(data.fecha, deficitSobregiro, editIdAntes || data.id);
+      if(esTarjeta){
+        await aplicarGiroTarjeta(data.fecha, data.monto, data.deudaTarjetaId, editIdAntes || data.id, data.descripcion || data.categoria);
+        await saveKey('deudas', state.deudas);
+      } else if(editIdAntes){
+        await saveKey('deudas', state.deudas, {silent:true}); // por si se venía de tarjeta y se sacó el giro arriba
+      }
       state.editingGastoId = null;
       showToast('Gasto guardado');
       render();
