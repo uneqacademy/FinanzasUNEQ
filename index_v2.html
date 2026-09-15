@@ -4679,10 +4679,10 @@
                 ${BOVEDAS.map(b=>`<option value="${b.id}" ${mov.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
-          </div>
-          <div class="fa-modal-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-editar-movimiento" data-id="${mov.id}">Guardar cambios</button>
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-editar-movimiento">Cancelar</button>
+            <div class="fa-modal-actions">
+              <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-editar-movimiento" data-id="${mov.id}">Guardar cambios</button>
+              <button type="button" class="fa-btn fa-btn-ghost" data-action="cerrar-editar-movimiento">Cancelar</button>
+            </div>
           </div>
         </div>
       </div>
@@ -7488,7 +7488,7 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Movimientos por bóveda (últimos 8 de cada una)</div>
+        <div class="fa-card-title">Movimientos por bóveda (historial completo)</div>
         ${(() => {
           // Escanea TODAS las bóvedas y TODOS los movimientos (sin el límite de 8) buscando huérfanos: un
           // movimiento cuyo "padre" (Gasto, Pago de Deuda, Pago de Cuenta por Pagar, F29) ya no existe — se
@@ -7528,7 +7528,7 @@
           `;
         })()}
         ${BOVEDAS.map(b=>{
-          const movs = getMovimientosBoveda(b.id).slice().reverse().slice(0,8);
+          const movs = getMovimientosBoveda(b.id).slice().reverse();
           return `
             <div style="margin-bottom:20px;">
               <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${escapeHtml(b.label)}</div>
