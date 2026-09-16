@@ -5468,6 +5468,28 @@
         <div class="fa-kpi income"><div class="fa-kpi-label">Disponible en Ganancia para atacar</div><div class="fa-kpi-value income money">${fmtMoneyC(saldoGanancia)}</div></div>
       </div>
 
+      ${(() => {
+        const saldoTarjeta = getSaldoTarjeta();
+        if(saldoTarjeta <= 0) return '';
+        // La Tarjeta de Crédito se calcula sola (compras con ese método, menos pagos) — no vive en el
+        // inventario de deudas como las demás, así que se muestra aparte, con un enlace directo a su
+        // pantalla propia (dentro de Flujo de Caja) para ver el detalle y registrar el pago.
+        return `
+        <div class="fa-card" style="border:1.5px solid var(--expense); background:#FFF5F5;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:700; font-size:14px;">💳 Tarjeta de Crédito</div>
+              <div class="fa-hint" style="margin:2px 0 0 0;">Se va sumando sola con cada compra que pagues con este método, y baja con cada pago que registres.</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="fa-kpi-value expense money" style="font-size:20px;">${fmtMoneyC(saldoTarjeta)}</div>
+              <button type="button" class="fa-btn fa-btn-primary" style="margin-top:6px;" data-action="ir-a-tarjeta">Ver detalle y pagar</button>
+            </div>
+          </div>
+        </div>
+        `;
+      })()}
+
       ${deudas.length===0 ? `<div class="fa-card"><div class="fa-empty">Aún no registras deudas activas. Agrega la primera abajo.</div></div>` : `
       <div class="fa-card">
         <div class="fa-card-title">Tus deudas, ordenadas por Bola de Nieve</div>
@@ -9054,6 +9076,11 @@ ${lineasDeuda}
       state.selected.ingresos.clear();
       state.selected.gastos.clear();
       state.mobileMenuOpen = false; // al elegir una sección en el celular, el cajón se cierra solo
+      render();
+    }
+    else if(action === 'ir-a-tarjeta'){
+      state.activeTab = 'flujo';
+      state.moduloFlujoVista = 'tarjeta';
       render();
     }
     else if(action === 'toggle-mobile-menu'){
