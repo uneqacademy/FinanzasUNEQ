@@ -758,19 +758,28 @@
     await saveKey('tesoreria', state.tesoreria, {silent:true});
   }
 
-  // ---------------- Gasto pagado con Tarjeta de Crédito — enrutamiento automático ----------------
-  // Nunca toca Tesorería (nunca hay bóveda) — el monto en CLP se suma directo a la deuda de la tarjeta
-  // elegida, como un "giro" (mismo mecanismo que ya usaba Sobregiro y el viejo formulario dedicado). Se
-  // etiqueta con el id del gasto para poder deshacerlo limpio si se edita o se elimina después.
-  async function revertirGiroTarjetaDeGasto(gastoId){
-    const origen = `tarjetagasto:${gastoId}`;
-    const teniaGiro = (state.deudas.giros||[]).some(g=>g.origen===origen);
-    if(teniaGiro) state.deudas.giros = state.deudas.giros.filter(g=>g.origen!==origen);
-    return teniaGiro;
+  // ---------------- Gasto Retroactivo Impago — de un mes ya cerrado que nunca se pagó ----------------
+  // Nunca toca Tesorería (nunca hay bóveda) — en cambio, crea automáticamente una Cuenta por Pagar por el
+  // monto completo, usando el mismo mecanismo (origenGasto) que ya usa "Procesar Pago" parcial de Plantilla
+  // — así, cuando se pague de verdad desde Gestión de Deudas, sincronizarEstadoGastoDesdeCtaPagar ya sabe
+  // marcar el gasto como "Pagado" solo. Se etiqueta con el id del gasto para deshacerlo limpio si se edita o
+  // se elimina después.
+  async function revertirCtaPagarRetroactiva(gastoId){
+    const cta = state.cuentasPorPagar.items.find(c=>c.origenGasto===gastoId && c.esRetroactivo);
+    if(!cta) return false;
+    const pagosDeEstaCuenta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===cta.id);
+    pagosDeEstaCuenta.forEach(p=>{
+      state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `pagoctapagar:${p.id}`);
+    });
+    state.cuentasPorPagar.items = state.cuentasPorPagar.items.filter(c=>c.id!==cta.id);
+    state.cuentasPorPagar.pagos = state.cuentasPorPagar.pagos.filter(p=>p.ctaId!==cta.id);
+    return true;
   }
-  async function aplicarGiroTarjeta(fecha, monto, deudaTarjetaId, gastoId, descripcion){
-    if(!state.deudas.giros) state.deudas.giros = [];
-    state.deudas.giros.push({ id: uid('giro'), deudaId: deudaTarjetaId, fecha, monto, descripcion: descripcion||'Compra con tarjeta', origen:`tarjetagasto:${gastoId}` });
+  async function aplicarCtaPagarRetroactiva(fecha, monto, gastoId, nombre){
+    state.cuentasPorPagar.items.push({
+      id: uid('ctapagar'), nombre: nombre || 'Gasto retroactivo impago', montoOriginal: monto,
+      origenGasto: gastoId, esRetroactivo: true, fechaCreacion: fecha, activa: true
+    });
   }
 
   // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
@@ -4117,24 +4126,30 @@
   // - Cualquier otro método: se comporta exactamente como antes (Bóveda para CLP, Tipo de Cambio para USD).
   // - Tipo de Cambio aparece si la Moneda es USD, sin importar el método (incluida Tarjeta de Crédito).
   window.faActualizarVisibilidadGasto = function(){
+    const chkRetroactivo = document.getElementById('fa-gasto-retroactivo');
     const selMetodo = document.getElementById('fa-gasto-metodo');
     const selMoneda = document.getElementById('fa-gasto-moneda');
     const label = document.getElementById('fa-gasto-monto-label');
+    const metodoWrap = document.getElementById('fa-gasto-metodo-wrap');
     const bovedaWrap = document.getElementById('fa-gasto-boveda-wrap');
-    const tarjetaWrap = document.getElementById('fa-gasto-tarjeta-wrap');
     const tcWrap = document.getElementById('fa-gasto-tc-wrap');
     const notaUsd = document.getElementById('fa-gasto-usd-nota');
     const notaTarjeta = document.getElementById('fa-gasto-tarjeta-nota');
+    const notaRetroactivo = document.getElementById('fa-gasto-retroactivo-nota');
     const optgroupFlujo = document.getElementById('fa-gasto-optgroup-flujo');
     if(!selMetodo || !selMoneda) return;
-    const esTarjeta = selMetodo.value === 'Tarjeta de Crédito';
+    const esRetroactivo = !!(chkRetroactivo && chkRetroactivo.checked);
+    // Con Retroactivo Impago marcado, el Método de Pago deja de ser relevante — nunca se pagó nada, así que
+    // no hay bóveda, ni tarjeta, ni nada que "salga" de ningún lado.
+    const esTarjeta = !esRetroactivo && selMetodo.value === 'Tarjeta de Crédito';
     const esUSD = selMoneda.value === 'USD';
     if(label) label.textContent = esUSD ? 'Monto (USD)' : 'Monto';
-    if(bovedaWrap) bovedaWrap.style.display = (esUSD || esTarjeta) ? 'none' : '';
-    if(tarjetaWrap) tarjetaWrap.style.display = esTarjeta ? '' : 'none';
+    if(metodoWrap) metodoWrap.style.display = esRetroactivo ? 'none' : '';
+    if(bovedaWrap) bovedaWrap.style.display = (esUSD || esTarjeta || esRetroactivo) ? 'none' : '';
     if(tcWrap) tcWrap.style.display = esUSD ? '' : 'none';
-    if(notaUsd) notaUsd.style.display = (esUSD && !esTarjeta) ? '' : 'none';
+    if(notaUsd) notaUsd.style.display = (esUSD && !esTarjeta && !esRetroactivo) ? '' : 'none';
     if(notaTarjeta) notaTarjeta.style.display = esTarjeta ? '' : 'none';
+    if(notaRetroactivo) notaRetroactivo.style.display = esRetroactivo ? '' : 'none';
     if(optgroupFlujo) optgroupFlujo.label = esTarjeta ? 'No Afecta EERR' : 'Egresos de Flujo (no afecta Estado de Resultados)';
   };
   // Indicador en vivo de cuánto suman los 4 % de Línea de Negocio, mientras se escriben — no valida ni
@@ -5234,6 +5249,12 @@
           const categoriasConGasto = [...new Set(gastosDelAnio.map(g=>g.categoria))].sort();
           return `
         <div data-form="gasto">
+          <div class="fa-field" style="margin-bottom:10px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600;">
+              <input type="checkbox" id="fa-gasto-retroactivo" name="esRetroactivoImpago" onchange="window.faActualizarVisibilidadGasto()" ${editingG&&editingG.esRetroactivoImpago?'checked':''}>
+              🕐 Gasto Retroactivo Impago (de un mes ya cerrado, que nunca se pagó)
+            </label>
+          </div>
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" id="fa-gasto-fecha" name="fecha" value="${editingG?editingG.fecha:todayISO()}"></div>
             <div class="fa-field" id="fa-gasto-metodo-wrap"><label>Método de pago</label>
@@ -5261,13 +5282,7 @@
               </select>
             </div>
             <div class="fa-field"><label id="fa-gasto-monto-label">Monto${editingG && editingG.monedaOriginal==='USD'?' (USD)':''}</label><input type="number" id="fa-gasto-monto" name="monto" min="0" step="0.01" placeholder="0" value="${editingG?(editingG.monedaOriginal==='USD'?editingG.montoUSD:editingG.monto):''}"></div>
-            <div class="fa-field" id="fa-gasto-tarjeta-wrap" style="display:none;"><label>¿Qué tarjeta?</label>
-              <select name="deudaTarjetaId">
-                ${state.deudas.inventario.filter(d=>d.activa && d.categoria==='Tarjeta de Crédito').map(d=>`<option value="${d.id}" ${editingG&&editingG.deudaTarjetaId===d.id?'selected':''}>${escapeHtml(d.nombre)}</option>`).join('')}
-              </select>
-              ${state.deudas.inventario.filter(d=>d.activa && d.categoria==='Tarjeta de Crédito').length===0?'<div class="fa-hint" style="margin:4px 0 0 0; color:var(--expense);">No tienes ninguna tarjeta activa — créala primero en Gestión de Deudas.</div>':''}
-            </div>
-            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&(editingG.monedaOriginal==='USD'||editingG.origenPlantilla||editingG.origenSueldoDuenos||editingG.metodo==='Tarjeta de Crédito')?'none':''};"><label>Bóveda de origen (Tesorería)</label>
+            <div class="fa-field" id="fa-gasto-boveda-wrap" style="display:${editingG&&(editingG.monedaOriginal==='USD'||editingG.origenPlantilla||editingG.origenSueldoDuenos||editingG.metodo==='Tarjeta de Crédito'||editingG.esRetroactivoImpago)?'none':''};"><label>Bóveda de origen (Tesorería)</label>
               <select name="boveda">
                 <option value="">— Elige una bóveda —</option>
                 ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}" ${editingG&&editingG.boveda===b.id?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
@@ -5287,6 +5302,7 @@
           </div>
           <div class="fa-hint" id="fa-gasto-usd-nota" style="display:${editingG&&editingG.monedaOriginal==='USD'&&editingG.metodo!=='Tarjeta de Crédito'?'':'none'};">Este gasto sale de la bóveda OPEX USD (aislada) — no hay otra opción de bóveda mientras la moneda sea USD. El monto convertido a CLP con el Tipo de Cambio de arriba es el que cuenta para Estado de Resultados, salvo que elijas Egreso de Flujo (ese nunca entra a EERR, sin importar la moneda).</div>
           <div class="fa-hint" id="fa-gasto-tarjeta-nota" style="display:${editingG&&editingG.metodo==='Tarjeta de Crédito'?'':'none'};">Este pago no toca ninguna bóveda ni el Flujo de Caja — se suma directo a la deuda de la tarjeta elegida. Se paga después, todo junto, cuando registres el pago de la facturación en Gestión de Deudas.</div>
+          <div class="fa-hint" id="fa-gasto-retroactivo-nota" style="display:${editingG&&editingG.esRetroactivoImpago?'':'none'};">Este gasto va a ajustar la rentabilidad de ese mes en Estado de Resultados, y va a crear automáticamente una Cuenta por Pagar por el monto completo — no toca ninguna bóveda ni el Flujo de Caja, ya que nunca se pagó. Cuando la pagues de verdad, hazlo desde Gestión de Deudas.</div>
           <div class="fa-form-grid" style="margin-top:6px;">
             ${UNIDADES_NEGOCIO.map(u=>`
             <div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingG&&editingG['pct_'+u.id]!==undefined?editingG['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctGasto()"></div>
@@ -5788,10 +5804,10 @@
             ${esCarga ? `
             <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label><input type="text" value="Operación (fija — las Cargas Iniciales siempre pagan de ahí)" disabled style="background:#F1F2F4;"></div>
             ` : `
-            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label>
+            <div class="fa-field" style="margin-top:10px;"><label>Bóveda de origen (Tesorería)</label>
               <select name="cuentaOrigen">
-                <option value="operacion">Operación (cuota mínima)</option>
-                <option value="ganancia">Ganancia (abono extra, Bola de Nieve)</option>
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
             `}
@@ -5838,10 +5854,10 @@
             ${deuda.esCargaInicial ? `
             <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label><input type="text" value="Operación (fija — las Cargas Iniciales siempre pagan de ahí)" disabled style="background:#F1F2F4;"></div>
             ` : `
-            <div class="fa-field" style="margin-top:10px;"><label>Cuenta de Origen</label>
+            <div class="fa-field" style="margin-top:10px;"><label>Bóveda de origen (Tesorería)</label>
               <select name="cuentaOrigen">
-                <option value="operacion">Operación (cuota mínima)</option>
-                <option value="ganancia">Ganancia (abono extra, Bola de Nieve)</option>
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
               </select>
             </div>
             `}
@@ -6277,7 +6293,7 @@ ${lineasDeuda}
       case 'dashboard': return renderDashboard();
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderEstadoResultados();
-      case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : renderFlujo();
+      case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : state.moduloFlujoVista === 'tarjeta' ? renderTarjeta() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'importarhistoricos': return renderImportarHistoricos();
       case 'asesorIA': return renderAsesorIA();
@@ -7328,6 +7344,7 @@ ${lineasDeuda}
         <div><h1>Tarjeta de Crédito</h1><div class="fa-sub">Compras hechas con la tarjeta y pagos del estado de cuenta.</div></div>
         ${yearSelect('tarjeta')}
       </div>
+      ${moduloFlujoTabs()}
 
       <div class="fa-kpi-grid" style="grid-template-columns:repeat(3,1fr); max-width:720px;">
         <div class="fa-kpi expense"><div class="fa-kpi-label">Deuda actual (histórico completo)</div><div class="fa-kpi-value expense money">${fmtMoneyC(saldo)}</div></div>
@@ -7343,6 +7360,12 @@ ${lineasDeuda}
           <div class="fa-form-grid">
             <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
             <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
+            <div class="fa-field"><label>Bóveda de origen</label>
+              <select name="boveda">
+                <option value="">— Elige una bóveda —</option>
+                ${BOVEDAS_PAGABLES.map(b=>`<option value="${b.id}">${escapeHtml(b.label)}</option>`).join('')}
+              </select>
+            </div>
             <div class="fa-field"><label>Descripción (opcional)</label><input type="text" name="descripcion" placeholder="Ej: Pago total estado de cuenta agosto"></div>
           </div>
           <div class="fa-form-actions">
@@ -7378,10 +7401,11 @@ ${lineasDeuda}
   // Sub-pestañas del Módulo 4 (Flujo de Caja y Tesorería) — mismo módulo, dos vistas.
   function moduloFlujoTabs(){
     return `
-      <div style="display:flex; gap:8px; margin-bottom:16px;">
-        <button type="button" class="fa-btn ${state.moduloFlujoVista!=='tesoreria' && state.moduloFlujoVista!=='flujoUSD'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujo">Flujo de Caja</button>
+      <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+        <button type="button" class="fa-btn ${!['tesoreria','flujoUSD','tarjeta'].includes(state.moduloFlujoVista)?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujo">Flujo de Caja</button>
         <button type="button" class="fa-btn ${state.moduloFlujoVista==='tesoreria'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="tesoreria">Tesorería (5 bóvedas)</button>
         <button type="button" class="fa-btn ${state.moduloFlujoVista==='flujoUSD'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="flujoUSD">💵 Flujo en USD</button>
+        <button type="button" class="fa-btn ${state.moduloFlujoVista==='tarjeta'?'fa-btn-primary':'fa-btn-ghost'}" data-action="switch-modulo-flujo-vista" data-vista="tarjeta">💳 Tarjeta de Crédito</button>
       </div>
     `;
   }
@@ -8736,9 +8760,11 @@ ${lineasDeuda}
         // Si este gasto había generado un Sobregiro automático de OPEX, se deshace también (el giro y su
         // entrada compensatoria) — si no, quedaría una deuda fantasma sin el gasto que la originó.
         const revertido = revertirSobregiroDeGasto(cd.data);
-        // Igual, si este gasto se había pagado con Tarjeta de Crédito, se deshace el giro a esa tarjeta.
-        const teniaGiroTarjeta = await revertirGiroTarjetaDeGasto(cd.data);
-        if(revertido.teniaGiro || teniaGiroTarjeta) await saveKey('deudas', state.deudas, {silent:true});
+        if(revertido.teniaGiro) await saveKey('deudas', state.deudas, {silent:true});
+        // Si este gasto era Retroactivo Impago, se elimina también la Cuenta por Pagar que había creado (y
+        // cualquier pago que ya se le hubiera hecho) — si no, quedaría una deuda fantasma sin su origen.
+        const teniaCtaRetroactiva = await revertirCtaPagarRetroactiva(cd.data);
+        if(teniaCtaRetroactiva) await saveKey('cuentasPorPagar', state.cuentasPorPagar, {silent:true});
         // Importar Históricos: si este gasto venía de ahí, se desbloquea solo — vuelve a quedar disponible
         // para agregarlo de nuevo, conservando el Tipo/Subcategoría que ya le habías elegido.
         const historicoVinculado = (state.importacionHistorica||[]).find(h=>h.gastoRealId===cd.data);
@@ -8775,11 +8801,12 @@ ${lineasDeuda}
           await guardarGastoYSyncTesoreria(pending.data, pending.editId);
           if(pending.editId){
             revertirSobregiroDeGasto(pending.editId);
-            await revertirGiroTarjetaDeGasto(pending.editId);
+            await revertirCtaPagarRetroactiva(pending.editId);
           }
           if(pending.deficitSobregiro > 0) await aplicarSobregiro(pending.data.fecha, pending.deficitSobregiro, pending.editId || pending.data.id);
-          if(pending.data.metodo === 'Tarjeta de Crédito'){
-            await aplicarGiroTarjeta(pending.data.fecha, pending.data.monto, pending.data.deudaTarjetaId, pending.editId || pending.data.id, pending.data.descripcion || pending.data.categoria);
+          if(pending.data.esRetroactivoImpago){
+            await aplicarCtaPagarRetroactiva(pending.data.fecha, pending.data.monto, pending.editId || pending.data.id, pending.data.descripcion || pending.data.proveedor || pending.data.categoria);
+            await saveKey('cuentasPorPagar', state.cuentasPorPagar, {silent:true});
           }
           await saveKey('deudas', state.deudas, {silent:true});
           state.editingGastoId = null;
@@ -9791,8 +9818,18 @@ ${lineasDeuda}
         capital = Number(data.capital) || 0;
         interes = Number(data.interes) || 0;
         cuentaOrigen = data.cuentaOrigen;
+        if(!cuentaOrigen){ showToast('Elige de qué bóveda sale este pago.'); return; }
         // Desglose obligatorio: capital + interés debe sumar exactamente el monto total, sin excepción.
         if(capital + interes !== montoTotal){ showToast(`Capital + Interés debe sumar exactamente ${fmtMoney(montoTotal)} — hoy suman ${fmtMoney(capital+interes)}.`); return; }
+      }
+
+      // Mismo chequeo que en cualquier otro pago desde OPEX: si esto la deja en negativo, se revisa el cupo
+      // del Sobregiro ANTES de guardar nada.
+      let deficitSobregiroPagoDeuda = 0;
+      if(cuentaOrigen === 'operacion'){
+        const chequeo = verificarYPrepararSobregiro(data.fecha, montoTotal, null);
+        if(chequeo.bloqueado){ showToast(chequeo.mensaje); return; }
+        deficitSobregiroPagoDeuda = chequeo.deficit;
       }
 
       const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, capital, interes, cuentaOrigen };
@@ -9812,6 +9849,7 @@ ${lineasDeuda}
         descripcion: `Pago cuota — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
+      if(deficitSobregiroPagoDeuda > 0) await aplicarSobregiro(data.fecha, deficitSobregiroPagoDeuda, pago.id);
 
       // Solo el interés es gasto operacional real (Estado de Resultados) — el capital nunca se registra
       // como gasto, porque solo reduce lo que se debe.
@@ -9873,6 +9911,16 @@ ${lineasDeuda}
       }
 
       const montoTotalPagado = montoTotal + interesMora; // la cuota fija + la Mora encima, si existe
+
+      // Mismo chequeo que en cualquier otro pago desde OPEX: si esto la deja en negativo, se revisa el cupo
+      // del Sobregiro ANTES de guardar nada.
+      let deficitSobregiroCuota = 0;
+      if(cuentaOrigen === 'operacion'){
+        const chequeo = verificarYPrepararSobregiro(data.fecha, montoTotalPagado, null);
+        if(chequeo.bloqueado){ showToast(chequeo.mensaje); return; }
+        deficitSobregiroCuota = chequeo.deficit;
+      }
+
       const pago = { id: uid('pagodeuda'), deudaId, fecha: data.fecha, montoTotal, montoTotalPagado, capital, interes, interesMora, cuentaOrigen, cuotaCronogramaId: cuota.id };
       state.deudas.pagos.push(pago);
       cuota.estado = 'Pagada';
@@ -9891,6 +9939,7 @@ ${lineasDeuda}
         descripcion: `Pago cuota ${cuota.numero}${interesMora>0?' + Mora':''} — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
       });
       await saveKey('tesoreria', state.tesoreria, {silent:true});
+      if(deficitSobregiroCuota > 0) await aplicarSobregiro(data.fecha, deficitSobregiroCuota, pago.id);
 
       // Interés Cuota E Interés por Mora van AMBOS a Gastos Financieros — se guardan como líneas separadas
       // para que quede claro cuál es cuál si Felipe revisa el detalle después.
@@ -10589,16 +10638,19 @@ ${lineasDeuda}
         data.monedaOriginal = 'CLP';
         data.montoUSD = null;
         data.tipoCambio = null;
-        if(!esDePlantilla && !esTarjeta && !data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
+        if(!esDePlantilla && !esTarjeta && !data.esRetroactivoImpago && !data.boveda){ showToast('Elige de qué bóveda sale este pago (Tesorería).'); return; }
       }
 
-      // Tarjeta de Crédito: nunca toca ninguna bóveda ni Sobregiro — el monto (ya convertido a CLP si era
-      // USD) se suma directo a la deuda de la tarjeta elegida, no a Tesorería. Se fuerza null incluso si el
-      // formulario (por algún motivo) trajera algo en boveda.
-      if(esTarjeta){
-        if(!data.deudaTarjetaId){ showToast('Elige con qué tarjeta se pagó este gasto.'); return; }
-        data.boveda = null;
-      }
+      // Tarjeta de Crédito: nunca toca ninguna bóveda — el monto (ya convertido a CLP si era USD) cuenta
+      // igual en Estado de Resultados, y la deuda de la tarjeta se calcula sola (todas las compras con este
+      // método menos todos los pagos registrados en la pantalla "Tarjeta de Crédito") — no hace falta elegir
+      // nada más acá.
+      if(esTarjeta) data.boveda = null;
+
+      // Retroactivo Impago: gasto de un mes ya cerrado que nunca se pagó — cuenta en Estado de Resultados del
+      // mes histórico, nunca toca ninguna bóveda, y (más abajo) crea automáticamente una Cuenta por Pagar por
+      // el monto completo.
+      if(data.esRetroactivoImpago) data.boveda = null;
 
       // Sobregiro automático de OPEX: si este pago deja esa bóveda en negativo, se revisa ANTES de guardar
       // nada — si supera el cupo configurado, se bloquea por completo (no se guarda el gasto ni nada más).
@@ -10627,7 +10679,7 @@ ${lineasDeuda}
       // vuelve a preguntar — así editar cosas como la distribución por Línea de Negocio en gastos históricos
       // no tropieza con este aviso una y otra vez, ya que eso no toca Tesorería para nada.
       const esGastoNuevo = !state.editingGastoId;
-      const esHistorico = esGastoNuevo && state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero;
+      const esHistorico = esGastoNuevo && state.config.fechaDiaCero && data.fecha < state.config.fechaDiaCero && !esTarjeta && !data.esRetroactivoImpago;
       if(esHistorico){
         state.pendingGastoData = { data: {...data}, editId: state.editingGastoId, deficitSobregiro };
         state.confirmDialog = {
@@ -10643,15 +10695,16 @@ ${lineasDeuda}
       await guardarGastoYSyncTesoreria(data, editIdAntes);
       if(editIdAntes){
         revertirSobregiroDeGasto(editIdAntes);
-        await revertirGiroTarjetaDeGasto(editIdAntes);
+        await revertirCtaPagarRetroactiva(editIdAntes);
       }
       if(deficitSobregiro > 0) await aplicarSobregiro(data.fecha, deficitSobregiro, editIdAntes || data.id);
-      if(esTarjeta){
-        await aplicarGiroTarjeta(data.fecha, data.monto, data.deudaTarjetaId, editIdAntes || data.id, data.descripcion || data.categoria);
-        await saveKey('deudas', state.deudas);
+      if(data.esRetroactivoImpago){
+        await aplicarCtaPagarRetroactiva(data.fecha, data.monto, editIdAntes || data.id, data.descripcion || data.proveedor || data.categoria);
+        await saveKey('cuentasPorPagar', state.cuentasPorPagar);
       } else if(editIdAntes){
-        await saveKey('deudas', state.deudas, {silent:true}); // por si se venía de tarjeta y se sacó el giro arriba
+        await saveKey('cuentasPorPagar', state.cuentasPorPagar, {silent:true}); // por si venía de Retroactivo y se sacó la cuenta arriba
       }
+      if(editIdAntes) await saveKey('deudas', state.deudas, {silent:true});
       state.editingGastoId = null;
       showToast('Gasto guardado');
       render();
@@ -10661,6 +10714,13 @@ ${lineasDeuda}
       if(!data.fecha){ showToast('Elige una fecha para el pago.'); return; }
       const monto = Number(data.monto)||0;
       if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+      if(!data.boveda){ showToast('Elige de qué bóveda sale el pago.'); return; }
+      let deficitSobregiro = 0;
+      if(data.boveda === 'operacion'){
+        const chequeo = verificarYPrepararSobregiro(data.fecha, monto, null);
+        if(chequeo.bloqueado){ showToast(chequeo.mensaje); return; }
+        deficitSobregiro = chequeo.deficit;
+      }
       const gasto = {
         id: uid('gas'),
         fecha: data.fecha,
@@ -10668,10 +10728,11 @@ ${lineasDeuda}
         descripcion: data.descripcion || '',
         categoria: CAT_GASTO_PAGO_TARJETA,
         monto,
-        metodo: 'Transferencia'
+        metodo: 'Transferencia',
+        boveda: data.boveda
       };
-      state.gastos.push(gasto);
-      await saveKey('gastos', state.gastos);
+      await guardarGastoYSyncTesoreria(gasto, null);
+      if(deficitSobregiro > 0) await aplicarSobregiro(data.fecha, deficitSobregiro, gasto.id);
       showToast('Pago a la tarjeta registrado');
       render();
     }
