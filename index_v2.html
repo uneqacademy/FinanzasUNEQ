@@ -3099,6 +3099,24 @@
     return { ingresos, gastos };
   }
 
+  // Espejo de getDetalleFlujoMes, pero para Flujo en USD — lee de state.tesoreriaUSD.movimientos, sin filtro
+  // de prefijos de origen (a diferencia del CLP, acá no hay transferencias internas entre bóvedas que excluir
+  // — es un solo cofre aislado, así que CUALQUIER entrada o salida ya es un movimiento real).
+  function getDetalleFlujoUSDMes(anio, mesIdx, tipo){
+    const lista = [];
+    state.tesoreriaUSD.movimientos.forEach(mov=>{
+      if(!mov.fecha || !esMovimientoVigente(mov)) return;
+      const d = new Date(mov.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const tipoMov = mov.tipo==='entrada' ? 'ingresos' : 'gastos';
+      if(tipoMov !== tipo) return;
+      const ref = getReferenciaMovimiento(mov);
+      const huerfano = ref ? !ref.existe : false;
+      lista.push({ id: mov.id, fecha: mov.fecha, descripcion: mov.descripcion||'', monto: Number(mov.monto)||0, huerfano });
+    });
+    return lista.sort((a,b)=> b.monto - a.monto);
+  }
+
   // Espejo de getMonthlyStats, pero para el Flujo en USD — mismo patrón (mes a mes, acumulado corrido), pero
   // leyendo de state.tesoreriaUSD.movimientos en vez de las 5 bóvedas en CLP. Nunca se mezclan los dos.
   function getMonthlyStatsUSD(anio){
@@ -4693,10 +4711,11 @@
   function renderDetalleFlujoModal(){
     const m = state.detalleFlujoModal;
     if(!m) return '';
-    const { ingresos, gastos } = getDetalleFlujoMes(m.anio, m.mesIdx);
-    const lista = m.tipo === 'ingresos' ? ingresos : gastos;
+    const esUSD = m.moneda === 'USD';
+    const lista = esUSD ? getDetalleFlujoUSDMes(m.anio, m.mesIdx, m.tipo) : getDetalleFlujoMes(m.anio, m.mesIdx)[m.tipo];
+    const fmt = esUSD ? fmtMoneyUSDC : fmtMoneyC;
     const total = lista.reduce((s,d)=>s+d.monto, 0);
-    const titulo = m.tipo === 'ingresos' ? 'Ingresos cobrados' : 'Gastos pagados';
+    const titulo = m.tipo === 'ingresos' ? `Ingresos${esUSD?' USD':' cobrados'}` : `Gastos${esUSD?' USD':' pagados'}`;
     const colorMonto = m.tipo === 'ingresos' ? 'var(--income)' : 'var(--expense)';
     const necesitaScroll = lista.length > 5;
     return `
@@ -4706,23 +4725,23 @@
             <div class="fa-modal-title" style="margin:0;">${titulo} — ${MESES[m.mesIdx]} ${m.anio}</div>
             <button type="button" data-action="cerrar-detalle-flujo" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:#F1F3F5; color:var(--ink); font-size:20px; font-weight:700; line-height:1; cursor:pointer;">✕</button>
           </div>
-          <div class="fa-hint" style="margin-top:0;">Cada movimiento abajo es una transacción real que compone este número — juntas suman exactamente lo que ves en la tabla.</div>
+          <div class="fa-hint" style="margin-top:0;">Cada movimiento abajo es una transacción real que compone este número — juntas suman exactamente lo que ves en la tabla.${esUSD?' Aislado de OPEX en CLP — para editar o eliminar uno, hazlo desde Gastos o Ingresos.':''}</div>
           ${lista.length===0 ? `<div class="fa-empty">Sin movimientos que aporten a este mes.</div>` : `
           <div class="fa-table-wrap" style="${necesitaScroll?'max-height:280px; overflow-y:auto;':''}">
             <table class="fa-table">
-              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th></th></tr></thead>
+              <thead style="position:sticky; top:0; background:#fff; z-index:1;"><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th>${esUSD?'':'<th></th>'}</tr></thead>
               <tbody>
                 ${lista.map(d=>`
                   <tr style="${d.huerfano?'background:#FFF5F5;':''}">
                     <td>${fmtDate(d.fecha)}</td>
                     <td>${escapeHtml(d.descripcion)}${d.huerfano?' <span style="color:var(--expense); font-weight:700;">⚠️ huérfano</span>':''}</td>
-                    <td class="num money" style="color:${colorMonto};">${fmtMoneyC(d.monto)}</td>
-                    <td>
+                    <td class="num money" style="color:${colorMonto};">${fmt(d.monto)}</td>
+                    ${esUSD?'':`<td>
                       <div class="fa-row-actions">
                         <button class="fa-icon-btn" data-action="abrir-editar-movimiento" data-id="${d.id}">Editar</button>
                         <button class="fa-icon-btn danger" data-action="eliminar-movimiento-directo" data-id="${d.id}">Eliminar</button>
                       </div>
-                    </td>
+                    </td>`}
                   </tr>
                 `).join('')}
               </tbody>
@@ -4730,8 +4749,8 @@
           </div>
           <div class="fa-table-wrap"><table class="fa-table"><tbody>
             <tr style="font-weight:700; background:#F8F9FA;">
-              <td colspan="3">Total del mes (${lista.length} movimiento${lista.length===1?'':'s'})</td>
-              <td class="num money" style="color:${colorMonto};">${fmtMoneyC(total)}</td>
+              <td colspan="${esUSD?2:3}">Total del mes (${lista.length} movimiento${lista.length===1?'':'s'})</td>
+              <td class="num money" style="color:${colorMonto};">${fmt(total)}</td>
             </tr>
           </tbody></table></div>`}
           <div class="fa-modal-actions">
@@ -7517,8 +7536,8 @@ ${lineasDeuda}
               ${months.map((m,i)=>`
                 <tr>
                   <td>${MESES[i]}</td>
-                  <td class="num money" style="color:var(--income)">${fmtMoneyUSDC(m.ingresos)}</td>
-                  <td class="num money" style="color:var(--expense)">${fmtMoneyUSDC(m.gastos)}</td>
+                  <td class="num money" style="color:var(--income); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-flujo" data-anio="${state.config.anio}" data-mes="${i}" data-tipo="ingresos" data-moneda="USD" title="Ver qué movimientos componen este número">${fmtMoneyUSDC(m.ingresos)}</td>
+                  <td class="num money" style="color:var(--expense); cursor:pointer; text-decoration:underline dotted;" data-action="ver-detalle-flujo" data-anio="${state.config.anio}" data-mes="${i}" data-tipo="gastos" data-moneda="USD" title="Ver qué movimientos componen este número">${fmtMoneyUSDC(m.gastos)}</td>
                   <td class="num money">${fmtMoneyUSDC(m.resultado)}</td>
                   <td class="num money" style="font-weight:700">${fmtMoneyUSDC(m.acumulado)}</td>
                 </tr>
@@ -7534,6 +7553,7 @@ ${lineasDeuda}
           </table>
         </div>
       </div>
+      ${renderDetalleFlujoModal()}
 
       <div class="fa-card">
         <div class="fa-card-title">Movimientos (${movs.length})</div>
@@ -10139,7 +10159,7 @@ ${lineasDeuda}
       render();
     }
     else if(action === 'ver-detalle-flujo'){
-      state.detalleFlujoModal = { anio: Number(btn.dataset.anio), mesIdx: Number(btn.dataset.mes), tipo: btn.dataset.tipo };
+      state.detalleFlujoModal = { anio: Number(btn.dataset.anio), mesIdx: Number(btn.dataset.mes), tipo: btn.dataset.tipo, moneda: btn.dataset.moneda || 'CLP' };
       render();
     }
     else if(action === 'cerrar-detalle-flujo'){
