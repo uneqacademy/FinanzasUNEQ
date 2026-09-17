@@ -3382,7 +3382,10 @@
   function syncTesoreriaGastoUSD(gasto){
     const origen = `gasto:${gasto.id}`;
     const idx = state.tesoreriaUSD.movimientos.findIndex(m=> m.origen === origen);
-    if(gasto.monedaOriginal !== 'USD'){
+    // Tarjeta de Crédito NUNCA toca ninguna bóveda ni Tesorería, tampoco la de OPEX USD — el monto en USD
+    // solo cuenta en Estado de Resultados y se calcula solo dentro de la deuda de la tarjeta (ver
+    // getSaldoTarjeta), igual que su versión en CLP.
+    if(gasto.monedaOriginal !== 'USD' || gasto.metodo === 'Tarjeta de Crédito'){
       if(idx>-1) state.tesoreriaUSD.movimientos.splice(idx,1);
       return;
     }
