@@ -713,7 +713,14 @@
   // Sobregiro por el déficit exacto — nunca como Ingreso ni Venta. Si SÍ supera el cupo, bloquea por completo
   // (no guarda nada) y avisa que hay que revisar. gastoIdSiEditando permite recalcular limpio en una edición,
   // sumando de vuelta lo que el movimiento VIEJO de ese mismo gasto ya había restado.
+  // SOBREGIRO AUTOMÁTICO DESACTIVADO: si un pago deja OPEX en negativo, el saldo simplemente queda negativo —
+  // ya no se usa la línea sola ni se bloquea por cupo. El uso de la línea se registra a mano como ingreso
+  // "Línea de Crédito" (Ingresos y Distribución). Se deja la función (siempre sin déficit) para no tocar los
+  // 6 lugares que la llaman; y revertirSobregiroDeGasto sigue limpiando los sobregiros viejos al editar/borrar.
   function verificarYPrepararSobregiro(fecha, monto, gastoIdSiEditando){
+    return { bloqueado:false, deficit:0 };
+  }
+  function verificarYPrepararSobregiroAutomatico(fecha, monto, gastoIdSiEditando){
     let saldoBase = getSaldoBoveda('operacion');
     let deficitViejoDeEsteGasto = 0;
     if(gastoIdSiEditando){
@@ -5872,7 +5879,7 @@
         return `
       <div class="fa-card">
         <div class="fa-card-title">🚨 Sobregiro / Línea de Crédito Activa — OPEX</div>
-        <div class="fa-section-note">Ya no se registra a mano. Si un Gasto pagado desde OPEX deja esa bóveda en negativo, la app sube el saldo de OPEX a $0 sola y esta deuda crece automáticamente por el mismo monto — nunca cuenta como Ingreso ni Venta. Para pagarla (abono parcial o total), usa el formulario de pago más abajo, en su tarjeta.</div>
+        <div class="fa-section-note">El sobregiro automático está desactivado: si un Gasto pagado desde OPEX deja esa bóveda en negativo, el saldo queda en negativo y la línea NO se usa sola. Cuando uses la línea de verdad, regístralo en Ingresos y Distribución como ingreso "Línea de Crédito" (sube esta deuda y entra a Operación). Para pagarla (abono parcial o total), usa el formulario de pago más abajo, en su tarjeta.</div>
         <div class="fa-form-grid" style="max-width:500px;">
           <div class="fa-field"><label>Cupo de la línea (tope máximo permitido)</label><input type="number" id="fa-cupo-sobregiro" min="0" step="1" placeholder="Ej: 1000000" value="${cupo||''}"></div>
         </div>
