@@ -476,6 +476,14 @@
   // Otros Ingresos: mismo tratamiento — no es venta (fuera de Rentabilidad y Fijos vs Variables), pero sí es
   // plata real que entra al banco (dentro de Flujo de Caja y Cuenta Corriente).
   const CAT_INGRESO_OTROS = "Otros Ingresos";
+  // Ingresos "prestados": Línea de Crédito y Avance de Tarjeta de Crédito. Mismo tratamiento que Crédito
+  // Comercial (no-venta: fuera de Rentabilidad y Estado de Resultados; sí en Flujo y Cuenta Corriente), pero
+  // además aterrizan directo en Operación y dejan su deuda en Gestión de Deudas (ver sincronizarDeudaDeIngreso).
+  const CAT_INGRESO_LINEA_CREDITO = "Línea de Crédito";
+  const CAT_INGRESO_AVANCE_TARJETA = "Avance Tarjeta de Crédito";
+  function esIngresoPorDeuda(ing){
+    return !!ing && (ing.categoria === CAT_INGRESO_LINEA_CREDITO || ing.categoria === CAT_INGRESO_AVANCE_TARJETA);
+  }
 
   // ---- Tesorería: las 5 "bóvedas" (cuentas reales) del Módulo 4 ----
   // "recepcion" es puente: todo ingreso Pagado cae ahí automáticamente, y debe volver a $0 cada vez que se
@@ -817,6 +825,8 @@
     state.deudas.giros = state.deudas.giros.filter(g=>g.id!==giroId);
     if(giro.origen === 'linea_credito'){
       state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `giro:${giroId}`);
+      // Si el giro nació de un Ingreso "Línea de Crédito", quitarlo deshace también ese ingreso y su entrada a Operación.
+      if(giro.origenIngreso) quitarIngresoYMovimiento(giro.origenIngreso);
     } else if(giro.origen === 'tarjeta_credito' || giro.origen === 'cuota_atrasada'){
       state.gastos = state.gastos.filter(g=> g.origenGiro !== giroId);
     }
@@ -826,9 +836,164 @@
   // Elimina una deuda completa del inventario, en cascada: todos sus pagos y giros (con su limpieza de
   // Tesorería/Gastos respectiva) antes de quitar la deuda misma.
   function deleteDeudaCompleta(deudaId){
+    const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
     state.deudas.pagos.filter(p=>p.deudaId===deudaId).forEach(p=> deletePagoDeuda(p.id));
     (state.deudas.giros||[]).filter(g=>g.deudaId===deudaId).forEach(g=> deleteGiroDeuda(g.id));
     state.deudas.inventario = state.deudas.inventario.filter(d=>d.id!==deudaId);
+    // Un Avance de Tarjeta nace de un Ingreso: borrar su deuda deshace también ese ingreso y su entrada a Operación.
+    if(deuda && deuda.origenIngresoId) quitarIngresoYMovimiento(deuda.origenIngresoId);
+  }
+
+  // ---------------- Ingresos por deuda: Línea de Crédito / Avance Tarjeta de Crédito ----------------
+  // Guarda un ingreso de Línea de Crédito / Avance de Tarjeta (nuevo o editado): el total entra a Operación
+  // (Flujo de Caja), NO pasa por Profit First ni por Estado de Resultados, y deja su deuda en Gestión de Deudas.
+  async function guardarIngresoPorDeuda(form){
+    const data = readFields(form);
+    const monto = Number(data.monto) || 0;
+    if(!data.fecha){ showToast('Elige una fecha para el ingreso.'); return; }
+    if(monto <= 0){ showToast('Ingresa un monto mayor a 0.'); return; }
+    const editId = state.editingIngresoId;
+    const previo = editId ? state.ingresos.find(i=>i.id===editId) : null;
+    const ingresoId = previo ? previo.id : uid('ing');
+    const ingreso = {
+      id: ingresoId, fecha: data.fecha, categoria: data.categoria, cliente: data.cliente || '',
+      pasarela: '', monto, moneda: 'CLP', estado: 'Pagado', distribucion: null
+    };
+    if(data.categoria === CAT_INGRESO_LINEA_CREDITO && data.lineaId) ingreso.lineaId = data.lineaId;
+    if(data.categoria === CAT_INGRESO_AVANCE_TARJETA){
+      if(data.avanceCuotas) ingreso.avanceCuotas = data.avanceCuotas;
+      if(data.avanceMontoCuota) ingreso.avanceMontoCuota = data.avanceMontoCuota;
+      if(data.avanceFechaCuota1) ingreso.avanceFechaCuota1 = data.avanceFechaCuota1;
+      const nC = parseInt(data.avanceCuotas, 10) || 0, mC = Number(data.avanceMontoCuota) || 0;
+      const algunaCuota = !!(data.avanceCuotas || data.avanceMontoCuota || data.avanceFechaCuota1);
+      if(algunaCuota && !(nC > 0 && mC > 0 && data.avanceFechaCuota1)){
+        showToast('Si indicas cuotas, completa N° de cuotas, monto de cada cuota y fecha de la 1ª — o deja los tres vacíos.');
+        return;
+      }
+      if(algunaCuota && nC * mC < monto){
+        showToast(`Las ${nC} cuotas de ${fmtMoney(mC)} suman menos que lo recibido (${fmtMoney(monto)}). Revisa los números.`);
+        return;
+      }
+    }
+    // Primero la deuda (puede rechazar, ej. por cupo de la línea): si falla, no se guarda nada.
+    const resultado = sincronizarDeudaDeIngreso(previo ? {...previo, ...ingreso} : ingreso);
+    if(!resultado.ok){ showToast(resultado.mensaje); return; }
+    if(editId){
+      state.ingresos = (await saveKeyMerged('ingresos', current => (current||[]).map(i=> i.id===editId ? ingreso : i))) ?? state.ingresos;
+      state.editingIngresoId = null;
+    } else {
+      state.ingresos = (await saveKeyMerged('ingresos', current => [...(current||[]), ingreso])) ?? state.ingresos;
+    }
+    removeTesoreriaPorIngresoPF(ingresoId);
+    state.tesoreria.movimientos.push({
+      id: uid('tes'), fecha: ingreso.fecha, boveda:'operacion', tipo:'entrada', monto,
+      descripcion: ingreso.categoria + (ingreso.cliente ? ` — ${ingreso.cliente}` : ''), origen:`ingreso:${ingresoId}`
+    });
+    await saveKey('deudas', state.deudas);
+    await saveKey('tesoreria', state.tesoreria, {silent:true});
+    showToast(resultado.aviso || 'Ingreso registrado en Operación — la deuda quedó en Gestión de Deudas');
+    render();
+  }
+
+  // Quita un ingreso y su entrada de Tesorería (sin tocar la deuda — quien llama ya la limpió).
+  function quitarIngresoYMovimiento(ingresoId){
+    state.ingresos = state.ingresos.filter(i=>i.id!==ingresoId);
+    removeTesoreriaIngreso(ingresoId);
+  }
+
+  // Crea o actualiza el pasivo que corresponde a un ingreso por deuda:
+  // - Línea de Crédito: un "giro" que aumenta el saldo de la línea (por defecto la de Sobregiro, que se crea
+  //   si aún no existe). Respeta el cupo si la línea tiene uno definido.
+  // - Avance Tarjeta: una deuda tipo Banco con cronograma de cuotas. Si al ingresar no se indicó cuotas,
+  //   monto de cuota y fecha, queda con una sola cuota provisoria ("por confirmar") que se edita en Deudas.
+  // Devuelve { ok:false, mensaje } si no se pudo (nada queda modificado), o { ok:true, aviso? }.
+  function sincronizarDeudaDeIngreso(ing){
+    if(!state.deudas.giros) state.deudas.giros = [];
+    const monto = Number(ing.monto) || 0;
+    if(ing.categoria === CAT_INGRESO_LINEA_CREDITO){
+      const lineaId = ing.lineaId || SOBREGIRO_OPEX_ID;
+      let linea = state.deudas.inventario.find(d=>d.id===lineaId);
+      if(!linea && lineaId === SOBREGIRO_OPEX_ID){
+        linea = { id: SOBREGIRO_OPEX_ID, nombre:'Sobregiro / Línea de Crédito Activa', categoria:'Línea de Crédito', montoOriginal:0, cupo:0, activa:true, tipoDeuda:'sobregiro' };
+        state.deudas.inventario.push(linea);
+      }
+      if(!linea) return { ok:false, mensaje:'No se encontró la línea de crédito elegida.' };
+      const giroPrevio = state.deudas.giros.find(g=>g.origenIngreso === ing.id);
+      const cupo = Number(linea.cupo) || 0;
+      if(cupo > 0){
+        const saldoSinEste = getSaldoDeuda(linea.id) - (giroPrevio && giroPrevio.deudaId === linea.id ? Number(giroPrevio.monto)||0 : 0);
+        if(saldoSinEste + monto > cupo){
+          return { ok:false, mensaje:`Este giro dejaría la línea en ${fmtMoney(saldoSinEste + monto)}, superando su cupo de ${fmtMoney(cupo)}.` };
+        }
+      }
+      linea.activa = true;
+      const datos = { deudaId: linea.id, fecha: ing.fecha, monto, descripcion: ing.descripcion || ing.cliente || 'Uso de línea de crédito', origen:'linea_credito', origenIngreso: ing.id };
+      if(giroPrevio) Object.assign(giroPrevio, datos);
+      else state.deudas.giros.push({ id: uid('giro'), ...datos });
+      return { ok:true };
+    }
+    if(ing.categoria === CAT_INGRESO_AVANCE_TARJETA){
+      const numCuotas = Math.max(parseInt(ing.avanceCuotas, 10) || 0, 0);
+      const montoCuota = Number(ing.avanceMontoCuota) || 0;
+      const fecha1 = ing.avanceFechaCuota1 || '';
+      const completo = numCuotas > 0 && montoCuota > 0 && !!fecha1;
+      const deudaPrevia = state.deudas.inventario.find(d=>d.origenIngresoId === ing.id);
+      const detalle = ing.descripcion || ing.cliente || '';
+      const nombre = `Avance Tarjeta de Crédito${detalle ? ' — ' + detalle : ''} (${fmtDate(ing.fecha)})`;
+      if(deudaPrevia){
+        const conPagos = state.deudas.pagos.some(p=>p.deudaId === deudaPrevia.id)
+          || (deudaPrevia.cronogramaCuotas||[]).some(c=>c.estado === 'Pagada');
+        if(conPagos) return { ok:true, aviso:'El avance ya tiene pagos: el ingreso se actualizó, pero ajusta la deuda en Gestión de Deudas.' };
+        deudaPrevia.montoOriginal = monto;
+        deudaPrevia.nombre = nombre;
+        if(completo){
+          deudaPrevia.cronogramaCuotas = generarCronogramaCuotas(numCuotas, fecha1, { montoPorCuota: montoCuota });
+          deudaPrevia.cuotaMinima = montoCuota;
+          deudaPrevia.cronogramaProvisional = false;
+        } else if(deudaPrevia.cronogramaProvisional){
+          deudaPrevia.cronogramaCuotas = cronogramaProvisorioAvance(ing.fecha, monto);
+          deudaPrevia.cuotaMinima = monto;
+        }
+        return { ok:true };
+      }
+      state.deudas.inventario.push({
+        id: uid('deuda'), tipoDeuda:'banco', nombre, montoOriginal: monto,
+        tasaInteres: 0, tasaInteresPeriodo:'mensual', cuotaMinima: completo ? montoCuota : monto,
+        fechaVencimiento:'', categoria: CAT_INGRESO_AVANCE_TARJETA, cupo: null,
+        cronogramaCuotas: completo ? generarCronogramaCuotas(numCuotas, fecha1, { montoPorCuota: montoCuota }) : cronogramaProvisorioAvance(ing.fecha, monto),
+        cronogramaProvisional: !completo,
+        esCargaInicial: false, fechaCreacion: todayISO(), activa: true, origenIngresoId: ing.id
+      });
+      return { ok:true, aviso: completo ? null : 'Avance registrado — confirma las cuotas en Gestión de Deudas (botón Editar).' };
+    }
+    return { ok:true };
+  }
+
+  // Cronograma de relleno para un avance sin cuotas definidas: una sola cuota por el total, a un mes de la fecha.
+  function cronogramaProvisorioAvance(fecha, monto){
+    const d = new Date(fecha + 'T00:00:00');
+    const f = new Date(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    const iso = `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+    return generarCronogramaCuotas(1, iso, { montoTotal: monto });
+  }
+
+  // Deshace la deuda de un ingreso por deuda (al eliminar el ingreso). Un avance con pagos registrados no se
+  // puede deshacer solo: devuelve el mensaje de por qué. Si todo salió bien devuelve null.
+  function quitarDeudaDeIngreso(ingresoId){
+    const deuda = state.deudas.inventario.find(d=>d.origenIngresoId === ingresoId);
+    if(deuda){
+      const conPagos = state.deudas.pagos.some(p=>p.deudaId === deuda.id)
+        || (deuda.cronogramaCuotas||[]).some(c=>c.estado === 'Pagada');
+      if(conPagos) return 'Este avance ya tiene cuotas pagadas. Elimina primero esos pagos en Gestión de Deudas.';
+      state.deudas.inventario = state.deudas.inventario.filter(d=>d.id !== deuda.id);
+    }
+    const giro = (state.deudas.giros||[]).find(g=>g.origenIngreso === ingresoId);
+    if(giro){
+      state.deudas.giros = state.deudas.giros.filter(g=>g.id !== giro.id);
+      const linea = state.deudas.inventario.find(d=>d.id === giro.deudaId);
+      if(linea && linea.id === SOBREGIRO_OPEX_ID && getSaldoDeuda(linea.id) <= 0) linea.activa = false;
+    }
+    return null;
   }
 
   // Genera el Cronograma de Cuotas de una deuda: 'montoTotal' se reparte en partes iguales (Persona/Proveedor
@@ -1414,6 +1579,12 @@
     if(!config.categoriasIngresosSoloFlujo) config.categoriasIngresosSoloFlujo = [];
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_CREDITO_COMERCIAL)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_CREDITO_COMERCIAL); changed = true; }
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_APORTE_INVERSIONISTA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_APORTE_INVERSIONISTA); changed = true; }
+    // Línea de Crédito y Avance Tarjeta de Crédito: mismo refuerzo que Crédito Comercial.
+    [CAT_INGRESO_LINEA_CREDITO, CAT_INGRESO_AVANCE_TARJETA].forEach(cat=>{
+      if(!config.categoriasIngresos.includes(cat)){ config.categoriasIngresos.push(cat); changed = true; }
+      if(!config.categoriasNoVenta.includes(cat)){ config.categoriasNoVenta.push(cat); changed = true; }
+      if(!config.categoriasIngresosSoloFlujo.includes(cat)){ config.categoriasIngresosSoloFlujo.push(cat); changed = true; }
+    });
     // "Otros Ingresos" DEJÓ de ser no-venta: en Ingresos y Distribución (V2) es una de las 5 categorías
     // oficiales del embudo Profit First — es venta real, no financiamiento. Se saca de las listas de
     // exclusión si quedó ahí de una versión anterior (self-healing en la otra dirección).
@@ -2420,7 +2591,7 @@
   // Acciones que modifican datos: se bloquean por completo (antes de tocar el estado) si el usuario es de solo lectura.
   const MUTATING_ACTIONS = new Set([
     'submit-ingreso','submit-gasto','submit-pago-tarjeta','submit-pf','submit-config',
-    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','confirmar-reasignar-boveda','guardar-editar-movimiento','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
+    'submit-usd-mov','delete-usd-mov','save-saldo-inicial-usd','ejecutar-distribucion','confirmar-distribucion-ingreso','registrar-ingreso-deuda','submit-financiamiento','submit-deuda','submit-pago-deuda','submit-contrato-devengado','guardar-cupo-sobregiro','confirmar-reasignar-boveda','guardar-editar-movimiento','submit-gasto-tarjeta-credito','delete-ingreso-pf','delete-contrato-devengado','delete-deuda','delete-pago-deuda','delete-giro-deuda',
     'save-dia-cero','submit-plantilla-gasto-fijo','toggle-plantilla-activa','delete-plantilla','submit-procesar-gasto','submit-cuenta-por-pagar','submit-pagar-saldo-ctapagar','delete-ctapagar','delete-pago-ctapagar','submit-cuota-atrasada','submit-socio-config','delete-socio','save-distribucion-config','submit-marcar-cuota-pagada','submit-editar-cuota-cronograma','submit-editar-historico','agregar-historico','submit-pago-impuesto','add-pasarela','remove-pasarela',
     'agregar-linea-lote','quitar-linea-lote','confirmar-lote-devengado','delete-lote-devengado','registrar-ingreso-unico',
     'add-cat-ingreso','add-cat-gasto','add-cat-costo-directo','add-cat-egreso-flujo','add-metodo','remove-cat-ingreso','remove-cat-gasto','remove-cat-costo-directo','remove-cat-egreso-flujo','remove-metodo',
@@ -3936,6 +4107,33 @@
     if(usdNota) usdNota.style.display = esUSD ? '' : 'none';
     window.faRecalcularDistribucionPF();
   };
+  // Línea de Crédito / Avance de Tarjeta: no hay Pasarela, Reserva ni reparto Profit First — el total entra a
+  // Operación. Esta función muestra/oculta lo que corresponde según la categoría elegida (y se llama también
+  // después de cada render, para el caso de editar).
+  window.faToggleCategoriaIngresoPF = function(){
+    const form = document.querySelector('[data-form="ingreso-pf"]');
+    const sel = form ? form.querySelector('[name="categoria"]') : null;
+    if(!sel) return;
+    const cat = sel.value;
+    const porDeuda = cat === CAT_INGRESO_LINEA_CREDITO || cat === CAT_INGRESO_AVANCE_TARJETA;
+    const mostrar = (id, v)=>{ const el = document.getElementById(id); if(el) el.style.display = v ? '' : 'none'; };
+    mostrar('fa-pf-linea-wrap', cat === CAT_INGRESO_LINEA_CREDITO);
+    mostrar('fa-pf-avance-wrap', cat === CAT_INGRESO_AVANCE_TARJETA);
+    mostrar('fa-pf-deuda-actions', porDeuda && !state.editingIngresoId);
+    if(porDeuda){
+      const mon = document.getElementById('fa-pf-moneda');
+      if(mon && mon.value !== 'CLP') mon.value = 'CLP';
+      ['fa-pf-pasarela-wrap','fa-pf-reserva-field-wrap','fa-pf-clp-nota','fa-pf-usd-nota','fa-pf-cards-wrap','fa-pf-usd-card-wrap','fa-pf-checklist-wrap','fa-pf-reserva-wrap']
+        .forEach(id=> mostrar(id, false));
+      const label = document.getElementById('fa-pf-monto-label');
+      if(label) label.textContent = 'Monto recibido (total)';
+      form.dataset.deudaOculto = '1';
+    } else if(form.dataset.deudaOculto === '1'){
+      // Venía de una categoría "prestada": se restablece lo que ocultamos según moneda/monto.
+      delete form.dataset.deudaOculto;
+      window.faToggleMonedaIngresoPF();
+    }
+  };
   window.faRecalcularDistribucionPF = function(){
     const monedaSel = document.getElementById('fa-pf-moneda');
     const esUSD = monedaSel && monedaSel.value === 'USD';
@@ -3949,6 +4147,8 @@
     const chkUsdWrap = document.getElementById('fa-pf-chk-usd-wrap');
     const chksClpOnly = document.querySelectorAll('.fa-pf-chk-clp-only');
     if(!montoInput || !cardsWrap || !checklistWrap) return;
+    const formPF = document.querySelector('[data-form="ingreso-pf"]');
+    if(formPF && formPF.dataset.deudaOculto === '1') return; // Línea de Crédito / Avance: sin reparto
     const monto = Number(montoInput.value) || 0;
     if(monto <= 0){
       cardsWrap.style.display = 'none';
@@ -4320,6 +4520,7 @@
     // El innerHTML de arriba creó un .fa-main NUEVO — ahí es donde se restaura la posición guardada.
     const mainScrollElDespues = root.querySelector('.fa-main');
     if(mainScrollElDespues) mainScrollElDespues.scrollTop = scrollTopGuardado;
+    if(state.activeTab === 'ingresosdist') window.faToggleCategoriaIngresoPF();
   }
 
   function renderLogin(){
@@ -5526,6 +5727,7 @@
                 <div style="font-weight:700; font-size:14px;">${escapeHtml(d.nombre)}</div>
                 ${i===0 ? `<span class="fa-badge" style="background:var(--income); color:#fff; white-space:nowrap;">🎯 Objetivo</span>` : ''}
               </div>
+              ${d.cronogramaProvisional ? `<div class="fa-hint" style="margin:0 0 8px 0; color:var(--expense); font-weight:700;">⚠️ Cuotas por confirmar — usa Editar para indicar cuántas cuotas son y el monto de cada una.</div>` : ''}
               <div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;">
                 <div style="background:${i===0?'var(--income)':'var(--ink-soft)'}; height:100%; width:${(d.progreso*100).toFixed(0)}%;"></div>
               </div>
@@ -5715,7 +5917,7 @@
           <div class="fa-hint" style="margin-top:0;">Tipo: ${editingD.tipoDeuda==='banco'?'Banco':editingD.tipoDeuda==='persona'?'Persona / Proveedor':'Genérica'} (no se puede cambiar después de creada).</div>
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" value="${escapeHtml(editingD.nombre)}"></div>
-            <div class="fa-field"><label>${editingD.esCargaInicial?'Saldo Insoluto al Día Cero':(editingD.tipoDeuda==='banco'?'Saldo Insoluto':'Monto Total')}</label><input type="number" name="montoOriginal" min="0" step="1" value="${editingD.montoOriginal}"></div>
+            <div class="fa-field"><label>${editingD.esCargaInicial?'Saldo Insoluto al Día Cero':(editingD.tipoDeuda==='banco'?'Saldo Insoluto':'Monto Total')}</label><input type="number" name="montoOriginal" min="0" step="1" value="${editingD.montoOriginal}" ${editingD.origenIngresoId?'readonly title="Viene del ingreso: para cambiarlo, edita el ingreso"':''}></div>
             ${editingD.tipoDeuda==='generica' ? `
             <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" value="${editingD.tasaInteres}"></div>
             <div class="fa-field"><label>Período de la tasa</label>
@@ -5730,6 +5932,21 @@
             <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento" value="${editingD.fechaVencimiento||''}"></div>
             <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" value="${escapeHtml(editingD.categoria||'')}"></div>
           </div>
+          ${(() => {
+            // Avance de Tarjeta: se pueden confirmar cuotas, monto de cada cuota y fecha de la 1ª — rehace el
+            // cronograma, por eso solo mientras no haya ningún pago ni cuota pagada.
+            if(!editingD.origenIngresoId) return '';
+            const conPagos = state.deudas.pagos.some(p=>p.deudaId===editingD.id) || (editingD.cronogramaCuotas||[]).some(c=>c.estado==='Pagada');
+            if(conPagos) return `<div class="fa-hint">Este avance ya tiene pagos, así que su cronograma no se rehace desde aquí. Puedes ajustar cada cuota pendiente con "Editar" en el cronograma.</div>`;
+            const cr = editingD.cronogramaCuotas || [];
+            return `
+          <div class="fa-section-note" style="margin-top:10px;">💳 <strong>Cuotas del avance${editingD.cronogramaProvisional?' (por confirmar)':''}:</strong> indica cuántas cuotas son y cuánto vale cada una (incluyendo interés), y desde qué fecha. Se rehace el cronograma completo.</div>
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>N° de cuotas</label><input type="number" name="avanceCuotas" min="1" step="1" value="${editingD.cronogramaProvisional?'':cr.length}"></div>
+            <div class="fa-field"><label>Monto de cada cuota</label><input type="number" name="avanceMontoCuota" min="1" step="1" value="${editingD.cronogramaProvisional?'':(cr[0]?cr[0].montoEsperado:'')}"></div>
+            <div class="fa-field"><label>Fecha de la 1ª cuota</label><input type="date" name="avanceFechaCuota1" value="${editingD.cronogramaProvisional?'':(cr[0]?cr[0].fechaEsperada:'')}"></div>
+          </div>`;
+          })()}
           <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:8px;">
             <input type="checkbox" name="esCargaInicial" ${editingD.esCargaInicial?'checked':''}>
             Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
@@ -6213,7 +6430,7 @@ ${lineasDeuda}
               </select>
             </div>
             <div class="fa-field"><label>Origen del Ingreso</label>
-              <select name="categoria">${state.config.categoriasIngresos.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+              <select name="categoria" onchange="window.faToggleCategoriaIngresoPF()" ${editing&&esIngresoPorDeuda(editing)?'disabled':''}>${state.config.categoriasIngresos.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Cliente / Detalle (opcional)</label><input type="text" name="cliente" placeholder="Nombre del cliente" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
             <div class="fa-field" id="fa-pf-pasarela-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Pasarela / Medio de Pago</label>
@@ -6222,6 +6439,30 @@ ${lineasDeuda}
             <div class="fa-field"><label id="fa-pf-monto-label">Monto Bruto Recibido${editing&&editing.moneda==='USD'?' (USD)':''}</label><input type="number" id="fa-pf-monto" name="monto" min="0" step="0.01" placeholder="0" value="${editing?editing.monto:''}" oninput="window.faRecalcularDistribucionPF()"></div>
             <div class="fa-field" id="fa-pf-reserva-field-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Reserva para Costos Directos (Eventos/Proyectos, opcional)</label><input type="number" id="fa-pf-reserva" name="reserva" min="0" step="1" placeholder="0" value="${editing&&editing.distribucion&&editing.distribucion.reserva?editing.distribucion.reserva:''}" oninput="window.faRecalcularDistribucionPF()"></div>
           </div>
+          ${(() => {
+            const lineas = state.deudas.inventario.filter(d=> d.categoria==='Línea de Crédito' && d.tipoDeuda!=='banco');
+            const dAv = editing ? state.deudas.inventario.find(d=>d.origenIngresoId===editing.id) : null;
+            const editDeuda = editing && esIngresoPorDeuda(editing);
+            return `
+          <div id="fa-pf-linea-wrap" style="display:none; margin-top:10px;">
+            <div class="fa-hint" style="margin-top:0;">💳 <strong>Línea de Crédito:</strong> el monto entra de una a Operación y cuenta en el Flujo de Caja, pero NO en el Estado de Resultados. Además sube la deuda de la línea en Gestión de Deudas.</div>
+            ${lineas.length>0 ? `<div class="fa-form-grid"><div class="fa-field"><label>¿De qué línea?</label>
+              <select name="lineaId" ${editDeuda?'disabled':''}>${lineas.map(d=>`<option value="${d.id}" ${((editing&&editing.lineaId)||SOBREGIRO_OPEX_ID)===d.id?'selected':''}>${escapeHtml(d.nombre)}</option>`).join('')}</select></div></div>`
+              : `<div class="fa-hint">Aún no tienes una línea creada: se creará "Sobregiro / Línea de Crédito Activa" (su cupo lo defines en Gestión de Deudas).</div>`}
+          </div>
+          <div id="fa-pf-avance-wrap" style="display:none; margin-top:10px;">
+            <div class="fa-hint" style="margin-top:0;">💳 <strong>Avance de Tarjeta de Crédito:</strong> el total entra de una a Operación y cuenta en el Flujo de Caja, pero NO en el Estado de Resultados. Queda como deuda en Gestión de Deudas. Las cuotas son opcionales ahora: si no las sabes, déjalas vacías y las confirmas después con el botón Editar de la deuda.</div>
+            <div class="fa-form-grid">
+              <div class="fa-field"><label>N° de cuotas (opcional)</label><input type="number" name="avanceCuotas" min="1" step="1" placeholder="Ej: 12" value="${editing&&editing.avanceCuotas?editing.avanceCuotas:''}" ${dAv?'disabled':''}></div>
+              <div class="fa-field"><label>Monto de cada cuota (opcional)</label><input type="number" name="avanceMontoCuota" min="0" step="1" placeholder="Incluye interés" value="${editing&&editing.avanceMontoCuota?editing.avanceMontoCuota:''}" ${dAv?'disabled':''}></div>
+              <div class="fa-field"><label>Fecha de la 1ª cuota (opcional)</label><input type="date" name="avanceFechaCuota1" value="${editing&&editing.avanceFechaCuota1?editing.avanceFechaCuota1:''}" ${dAv?'disabled':''}></div>
+            </div>
+            ${dAv ? `<div class="fa-hint">Para cambiar las cuotas de un avance ya registrado, usa <strong>Editar</strong> en su deuda (Gestión de Deudas).</div>` : ''}
+          </div>
+          <div id="fa-pf-deuda-actions" class="fa-form-actions" style="display:none; margin-top:10px;">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="registrar-ingreso-deuda">Registrar ingreso</button>
+          </div>`;
+          })()}
           <div class="fa-hint" style="margin-top:0;" id="fa-pf-clp-nota">El monto siempre se ingresa en CLP — el neto real que llegó a tu banco. La Pasarela es solo para dejar registrado por dónde entró la plata, no cambia ningún cálculo. La Reserva va 100% y de inmediato a Operación, antes de aplicar Profit First — los 4 porcentajes se calculan solo sobre lo que queda después de apartarla (el "Margen Neto Restante").</div>
           <div class="fa-hint" style="margin-top:0; display:${editing&&editing.moneda==='USD'?'':'none'};" id="fa-pf-usd-nota">100% va directo a la bóveda OPEX USD — aislada, no se reparte ni se mezcla con las otras bóvedas en CLP. No aplica Reserva ni distribución Profit First (eso es solo para CLP).</div>
 
@@ -8713,6 +8954,12 @@ ${lineasDeuda}
         render();
       }
       else if(cd.action === 'do-delete-ingreso-pf'){
+        // Línea de Crédito / Avance: también se deshace su deuda (un avance con pagos no se puede borrar de aquí).
+        if(esIngresoPorDeuda(state.ingresos.find(i=>i.id===cd.data))){
+          const bloqueo = quitarDeudaDeIngreso(cd.data);
+          if(bloqueo){ showToast(bloqueo); render(); return; }
+          await saveKey('deudas', state.deudas);
+        }
         state.ingresos = (await saveKeyMerged('ingresos', current => (current||[]).filter(i=>i.id!==cd.data))) ?? state.ingresos;
         // Limpia la entrada a Recepción Y toda la distribución asociada (las hasta 4 bóvedas destino), o el
         // movimiento en OPEX USD si era un ingreso en dólares.
@@ -8750,7 +8997,8 @@ ${lineasDeuda}
         await Promise.all([
           saveKey('deudas', state.deudas),
           saveKey('tesoreria', state.tesoreria, {silent:true}),
-          saveKey('gastos', state.gastos)
+          saveKey('gastos', state.gastos),
+          saveKey('ingresos', state.ingresos)
         ]);
         showToast('Deuda eliminada, junto con sus pagos y giros');
         render();
@@ -8773,7 +9021,8 @@ ${lineasDeuda}
           await Promise.all([
             saveKey('deudas', state.deudas),
             saveKey('tesoreria', state.tesoreria, {silent:true}),
-            saveKey('gastos', state.gastos)
+            saveKey('gastos', state.gastos),
+            saveKey('ingresos', state.ingresos)
           ]);
           showToast('Movimiento eliminado');
         }
@@ -9156,9 +9405,14 @@ ${lineasDeuda}
       showToast('Distribución realizada — Recepción quedó en $0');
       render();
     }
+    else if(action === 'registrar-ingreso-deuda'){
+      await guardarIngresoPorDeuda(btn.closest('[data-form="ingreso-pf"]'));
+    }
     else if(action === 'confirmar-distribucion-ingreso'){
       const form = btn.closest('[data-form="ingreso-pf"]');
       const data = readFields(form);
+      // Editar un ingreso de Línea de Crédito / Avance: no pasa por el reparto Profit First.
+      if(esIngresoPorDeuda({categoria: data.categoria})){ await guardarIngresoPorDeuda(form); return; }
       const monto = Number(data.monto) || 0;
       const esUSD = data.moneda === 'USD';
       const reserva = esUSD ? 0 : Math.min(Number(data.reserva) || 0, monto);
@@ -9695,6 +9949,22 @@ ${lineasDeuda}
             cupo: Number(data.cupo) || null
           } : {})
         };
+        // Avance de Tarjeta: el capital viene del ingreso (no se cambia acá) y las cuotas se pueden rehacer
+        // mientras no haya pagos.
+        if(deudaAnterior.origenIngresoId){
+          deuda.montoOriginal = deudaAnterior.montoOriginal;
+          const conPagos = state.deudas.pagos.some(p=>p.deudaId===editId) || (deudaAnterior.cronogramaCuotas||[]).some(c=>c.estado==='Pagada');
+          const nC = parseInt(data.avanceCuotas, 10) || 0;
+          const mC = Number(data.avanceMontoCuota) || 0;
+          const f1 = data.avanceFechaCuota1 || '';
+          if(!conPagos && (nC || mC || f1)){
+            if(!(nC > 0 && mC > 0 && f1)){ showToast('Para rehacer las cuotas completa: N° de cuotas, monto de cada cuota y fecha de la 1ª.'); return; }
+            if(nC * mC < deuda.montoOriginal){ showToast(`Las ${nC} cuotas de ${fmtMoney(mC)} suman menos que lo recibido (${fmtMoney(deuda.montoOriginal)}). Revisa los números.`); return; }
+            deuda.cronogramaCuotas = generarCronogramaCuotas(nC, f1, { montoPorCuota: mC });
+            deuda.cuotaMinima = mC;
+            deuda.cronogramaProvisional = false;
+          }
+        }
         const idx = state.deudas.inventario.findIndex(d=>d.id===editId);
         if(idx>-1) state.deudas.inventario[idx] = deuda;
         state.editingDeudaId = null;
