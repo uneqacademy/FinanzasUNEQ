@@ -591,15 +591,62 @@
     afiliacion: 'afiliacion',
     evento_presencial: 'sinergia_on_stage'
   };
-  // Eventos de UNEQ a los que se puede etiquetar un gasto (opcional). La etiqueta no cambia ningún cálculo del
-  // Estado de Resultados ni del flujo: solo sirve para ver cuánto costó cada evento. La lista se puede cambiar
-  // guardando state.config.eventos.
-  const EVENTOS_DEFAULT = ['Sinergia on Stage (Presencial)', 'Maratón Digital 111K (Online)', 'Emprende Consciente (Online)'];
-  function getEventos(){
-    return (state.config && Array.isArray(state.config.eventos) && state.config.eventos.length) ? state.config.eventos : EVENTOS_DEFAULT;
+  // Proyectos (Ej: Sinergia 2026, Maratón Digital 111K) a los que se pueden etiquetar Ingresos (líneas de venta)
+  // y Gastos/Costos Directos, sin importar el mes en que ocurrieron. La etiqueta no cambia el Estado de Resultados
+  // mensual ni el flujo: alimenta la vista "Rentabilidad de Proyecto", que junta todo y lo muestra como si hubiera
+  // ocurrido en la fecha de cierre. La lista (nombre + fecha de cierre) vive en state.config.proyectos.
+  const PROYECTOS_DEFAULT = [
+    { nombre:'Sinergia on Stage (Presencial)', fechaCierre:'' },
+    { nombre:'Maratón Digital 111K (Online)', fechaCierre:'' },
+    { nombre:'Emprende Consciente (Online)', fechaCierre:'' }
+  ];
+  function getProyectos(){
+    return (state.config && Array.isArray(state.config.proyectos)) ? state.config.proyectos : PROYECTOS_DEFAULT;
   }
-  function opcionesEvento(sel){
-    return '<option value="">— Sin evento —</option>' + getEventos().map(e=>`<option ${sel===e?'selected':''}>${escapeHtml(e)}</option>`).join('');
+  function nombresProyecto(){ return getProyectos().map(p=> p.nombre); }
+  // Los gastos etiquetados antes del cambio de nombre guardaban el campo "evento".
+  function proyectoDe(x){ return (x && (x.proyecto || x.evento)) || ''; }
+  // Un gasto generado por una línea de venta (comisión, anticipo) hereda el proyecto de esa línea.
+  function proyectoEfectivoGasto(g){
+    if(proyectoDe(g)) return proyectoDe(g);
+    if(g.origenContrato){
+      const c = state.contratosDevengados.find(x=> x.id === g.origenContrato);
+      if(c) return c.proyecto || '';
+    }
+    return '';
+  }
+  function opcionesProyecto(sel){
+    const nombres = nombresProyecto();
+    const extra = (sel && !nombres.includes(sel)) ? [sel] : [];
+    return '<option value="">— Sin proyecto —</option>' + nombres.concat(extra).map(e=>`<option ${sel===e?'selected':''}>${escapeHtml(e)}</option>`).join('');
+  }
+  // Junta TODO lo etiquetado con un proyecto: ingresos (líneas de venta, por su monto total) y gastos. Margen Bruto =
+  // Ingresos - Costos Directos (categorías de costo directo y lo generado por las líneas de venta). Los otros gastos
+  // etiquetados se muestran aparte (no entran al Margen Bruto). Todo se presenta en la fecha de cierre del proyecto.
+  function getRentabilidadProyecto(nombre){
+    const catDirectas = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    const egresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+    const ingresos = state.contratosDevengados.filter(c=> c.proyecto === nombre).map(c=>({
+      fecha: c.fechaInicio, nombre: c.nombre, detalle: (TIPOS_INGRESO_CATALOGO.find(t=>t.id===c.tipoIngreso)||{}).label || '', monto: Number(c.montoTotal)||0
+    })).sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    const costosDirectos = [], otrosGastos = [];
+    state.gastos.forEach(g=>{
+      if(proyectoEfectivoGasto(g) !== nombre) return;
+      if(egresoFlujo.includes(g.categoria)) return; // cortafuegos: lo que no es resultado nunca entra acá
+      const monto = montoNegocioGasto(g);
+      const fila = { fecha: g.fecha, nombre: g.proveedor || g.descripcion || '', detalle: g.categoria, monto };
+      (g.origenContrato || catDirectas.includes(g.categoria) ? costosDirectos : otrosGastos).push(fila);
+    });
+    const orden = (a,b)=> (a.fecha||'').localeCompare(b.fecha||'');
+    costosDirectos.sort(orden); otrosGastos.sort(orden);
+    const suma = arr=> arr.reduce((t,x)=> t + x.monto, 0);
+    const totalIngresos = suma(ingresos), totalCostos = suma(costosDirectos), totalOtros = suma(otrosGastos);
+    const margenBruto = totalIngresos - totalCostos;
+    return {
+      ingresos, costosDirectos, otrosGastos, totalIngresos, totalCostos, totalOtros, margenBruto,
+      margenBrutoPct: totalIngresos > 0 ? (margenBruto / totalIngresos) * 100 : null,
+      resultadoTrasOtros: margenBruto - totalOtros
+    };
   }
   // Costeo ABC para Gastos Operacionales compartidos (no ligados a una línea de venta): cada gasto recibe un
   // % exacto para CADA una de las 4 unidades (deben sumar 100 entre las 4 si se asigna algo) — si todos
@@ -1112,7 +1159,8 @@
       fechaInicio: fechaIngreso, fechaVentaLote: linea.fechaInicio, fechaCreacion: todayISO(),
       numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
       anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD,
-      esIngresoUnico: !!esIngresoUnico
+      esIngresoUnico: !!esIngresoUnico,
+      proyecto: linea.proyecto || ''
     };
 
     const numCuotas = Math.max(Number(linea.numeroCuotasPago)||1, 1);
@@ -1170,7 +1218,8 @@
       // en días distintos, así que ya no depende de un campo compartido que se leía solo al confirmar el lote.
       fechaInicio: data.fechaInicio,
       fechaEvento: ti.usaFechaEvento ? data.fechaEvento : null,
-      numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
+      numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD,
+      proyecto: data.proyecto || ''
     };
   }
 
@@ -1820,7 +1869,8 @@
     pendingGastoData: null, // gasto en espera de confirmación cuando su fecha es anterior al Día Cero (Firewall Histórico)
     filtroGastosMes: new Date().getMonth(), // -1 = todos los meses
     filtroGastosCategoria: '', // '' = todas las categorías
-    filtroGastosEvento: '', // '' = todos los eventos
+    filtroGastosProyecto: '', // '' = todos los proyectos
+    proyectoSel: '', // proyecto que se ve en Rentabilidad de Proyecto
     filtroLotesMes: new Date().getMonth(), // -1 = todos los meses
     deudaRecienLiquidada: null, // { nombre } — dispara el banner de celebración una vez, se limpia al cerrarlo
     detalleMes: new Date().getMonth(),
@@ -2025,7 +2075,8 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar'
+    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar',
+    'agregar-proyecto','borrar-proyecto'
   ]);
 
   function fmtMoneyShort(v){
@@ -3740,8 +3791,21 @@
     state.filtroGastosCategoria = valor;
     render();
   };
-  window.faFiltrarGastosEvento = function(valor){
-    state.filtroGastosEvento = valor;
+  window.faFiltrarGastosProyecto = function(valor){
+    state.filtroGastosProyecto = valor;
+    render();
+  };
+  window.faSeleccionarProyecto = function(valor){
+    state.proyectoSel = valor;
+    render();
+  };
+  window.faGuardarCierreProyecto = async function(idx, valor){
+    if(state.readOnly){ showToast('Estás en modo solo lectura — no puedes hacer cambios.'); return; }
+    const lista = getProyectos().map(p=> ({...p}));
+    if(!lista[idx]) return;
+    lista[idx].fechaCierre = valor || '';
+    state.config.proyectos = lista;
+    await saveKey('config', state.config);
     render();
   };
   // Filtro de mes en la vista de Lotes de Ingreso.
@@ -4641,6 +4705,7 @@
         <div data-form="contrato-devengado">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${escapeHtml(editingC.nombre)}"></div>
+            <div class="fa-field"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(editingC.proyecto||'')}</select></div>
             <div class="fa-field"><label>Forma de Pago</label>
               <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
                 ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}" ${editingC.formaPago===f.id?'selected':''}>${escapeHtml(f.label)}</option>`).join('')}
@@ -4692,6 +4757,7 @@
         <div data-form="linea-lote">
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${lineaEnEdicion?escapeHtml(lineaEnEdicion.nombre):''}"></div>
+            <div class="fa-field"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(lineaEnEdicion?lineaEnEdicion.proyecto:'')}</select></div>
             <div class="fa-field"><label>Fecha de Inicio (fecha de la venta / primera cuota)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${lineaEnEdicion?lineaEnEdicion.fechaInicio:todayISO()}"></div>
             <div class="fa-field"><label>Tipo de Ingreso</label>
               <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
@@ -4902,12 +4968,12 @@
             const d = new Date(g.fecha+'T00:00:00');
             if(state.filtroGastosMes !== -1 && d.getMonth() !== state.filtroGastosMes) return false;
             if(state.filtroGastosCategoria && g.categoria !== state.filtroGastosCategoria) return false;
-            if(state.filtroGastosEvento && g.evento !== state.filtroGastosEvento) return false;
+            if(state.filtroGastosProyecto && proyectoDe(g) !== state.filtroGastosProyecto) return false;
             return true;
           });
           const categoriasConGasto = [...new Set(gastosDelAnio.map(g=>g.categoria))].sort();
-          const gastoPorEvento = {};
-          gastosDelAnio.forEach(g=>{ if(g.evento) gastoPorEvento[g.evento] = (gastoPorEvento[g.evento]||0) + (Number(g.monto)||0); });
+          const gastoPorProyecto = {};
+          gastosDelAnio.forEach(g=>{ const pr = proyectoDe(g); if(pr) gastoPorProyecto[pr] = (gastoPorProyecto[pr]||0) + (Number(g.monto)||0); });
           return `
         <div data-form="gasto">
           <div class="fa-field" style="margin-bottom:10px;">
@@ -4929,7 +4995,7 @@
             </div>
             <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" placeholder="Nombre del proveedor" value="${editingG?escapeHtml(editingG.proveedor||''):''}"></div>
             <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" placeholder="Ej: Campaña Meta Ads enero" value="${editingG?escapeHtml(editingG.descripcion||''):''}"></div>
-            <div class="fa-field"><label>Evento (opcional)</label><select name="evento">${opcionesEvento(editingG?editingG.evento:'')}</select></div>
+            <div class="fa-field"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(editingG?proyectoDe(editingG):'')}</select></div>
             <div class="fa-field"><label>Categoría</label>
               <select name="categoria">
                 <optgroup label="Costos Directos">
@@ -4976,7 +5042,7 @@
             ${editingG?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-gasto">Cancelar</button>`:''}
           </div>
         </div>
-        ${Object.keys(gastoPorEvento).length>0 ? `<div class="fa-hint" style="margin-top:14px;"><strong>Gasto por evento (${state.config.anio}):</strong> ${Object.keys(gastoPorEvento).map(e=>`${escapeHtml(e)}: ${fmtMoneyC(gastoPorEvento[e])}`).join(' · ')}</div>` : ''}
+        ${Object.keys(gastoPorProyecto).length>0 ? `<div class="fa-hint" style="margin-top:14px;"><strong>Gasto por proyecto (${state.config.anio}):</strong> ${Object.keys(gastoPorProyecto).map(e=>`${escapeHtml(e)}: ${fmtMoneyC(gastoPorProyecto[e])}`).join(' · ')}</div>` : ''}
         ${gastosDelAnio.length>0 ? `
         <div class="fa-filter-bar" style="margin-top:14px;">
           <select onchange="window.faFiltrarGastosMes(this.value)">
@@ -4987,9 +5053,9 @@
             <option value="" ${!state.filtroGastosCategoria?'selected':''}>Todas las categorías</option>
             ${categoriasConGasto.map(c=>`<option value="${escapeHtml(c)}" ${state.filtroGastosCategoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
           </select>
-          <select onchange="window.faFiltrarGastosEvento(this.value)">
-            <option value="" ${!state.filtroGastosEvento?'selected':''}>Todos los eventos</option>
-            ${getEventos().map(e=>`<option value="${escapeHtml(e)}" ${state.filtroGastosEvento===e?'selected':''}>${escapeHtml(e)}</option>`).join('')}
+          <select onchange="window.faFiltrarGastosProyecto(this.value)">
+            <option value="" ${!state.filtroGastosProyecto?'selected':''}>Todos los proyectos</option>
+            ${nombresProyecto().map(e=>`<option value="${escapeHtml(e)}" ${state.filtroGastosProyecto===e?'selected':''}>${escapeHtml(e)}</option>`).join('')}
           </select>
         </div>
         <div class="fa-table-wrap" style="margin-top:10px;">
@@ -5000,7 +5066,7 @@
                 <tr>
                   <td>${fmtDate(g.fecha)}</td>
                   <td>${escapeHtml(g.categoria)}</td>
-                  <td>${escapeHtml(g.proveedor||g.descripcion||'')||'—'}${g.evento?` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(g.evento)}</span>`:''}</td>
+                  <td>${escapeHtml(g.proveedor||g.descripcion||'')||'—'}${proyectoDe(g)?` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(proyectoDe(g))}</span>`:''}</td>
                   <td class="num money">${fmtMoneyC(g.monto)}</td>
                   <td>${g.estado==='Pendiente'?`<span class="fa-badge pendiente">Pendiente</span>`:g.estado==='Pagado Parcial'?`<span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Parcial (${fmtMoneyC(g.montoPagado)} de ${fmtMoneyC(g.monto)})</span>`:''}</td>
                   <td>
@@ -5974,7 +6040,7 @@ ${lineasDeuda}
   }
   function cartolaReabrirMov(mov){
     cartolaQuitarEfectos(mov.id);
-    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.evento = '';
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = '';
   }
 
   // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
@@ -6002,11 +6068,11 @@ ${lineasDeuda}
     if(mov.estado !== 'clasificado') return;
     const nombre = cartolaNombreCorto(mov.desc);
     if(mov.tipo === 'gasto' && mov.cargo > 0){
-      cartolaCrearGasto(mov, mov.cargo, mov.categoria, mov.devengo || '', null, '', mov.evento);
+      cartolaCrearGasto(mov, mov.cargo, mov.categoria, mov.devengo || '', null, '', mov.proyecto);
     } else if(mov.tipo === 'dividido' && mov.cargo > 0){
       (mov.partes || []).forEach(p=>{
         if(p.tipo === 'gasto'){
-          cartolaCrearGasto(mov, p.monto, p.categoria, p.devengo, p.id, p.nota, p.evento);
+          cartolaCrearGasto(mov, p.monto, p.categoria, p.devengo, p.id, p.nota, p.proyecto);
         } else {
           // Pago de una deuda anterior: sale plata (flujo) pero no es un gasto de ningún mes (Estado de Resultados).
           state.tesoreria.movimientos.push({
@@ -6033,7 +6099,7 @@ ${lineasDeuda}
   }
   // Crea el gasto de una línea (o de una parte). Si el mes de devengo es distinto al mes en que se pagó, el gasto
   // queda en el mes de devengo (Estado de Resultados) y la salida de plata queda en el mes del pago (Flujo).
-  function cartolaCrearGasto(mov, monto, categoria, devengoYM, parteId, nota, evento){
+  function cartolaCrearGasto(mov, monto, categoria, devengoYM, parteId, nota, proyecto){
     cartolaAsegurarCategoria(state.config.categoriasGastos, categoria);
     const nombre = cartolaNombreCorto(mov.desc);
     const ymPago = mov.fecha.slice(0,7);
@@ -6042,7 +6108,7 @@ ${lineasDeuda}
     const gasto = {
       id: uid('gas'), fecha: mismoMes ? mov.fecha : `${ym}-01`, proveedor: nombre,
       descripcion: `Cartola ${mov.cuenta}: ${nombre}` + (nota ? ` — ${nota}` : '') + (mismoMes ? '' : ` (devengado en ${ym}, pagado el ${fmtDate(mov.fecha)})`),
-      categoria, monto, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id, origenParte: parteId || null, evento: evento || ''
+      categoria, monto, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id, origenParte: parteId || null, proyecto: proyecto || ''
     };
     if(mismoMes){
       state.gastos.push(gasto);
@@ -6127,7 +6193,7 @@ ${lineasDeuda}
     cartolaSetClasificacion(mov, tipo, categoria, regla ? regla.id : null);
     mov.devengo = (tipo === 'gasto' && form.devengo && form.devengo !== mov.fecha.slice(0,7)) ? form.devengo : '';
     mov.partes = null;
-    mov.evento = tipo === 'gasto' ? (form.evento || '') : '';
+    mov.proyecto = tipo === 'gasto' ? (form.proyecto || '') : '';
     if(regla){
       state.cartola.movimientos.forEach(m=>{
         if(m.id === mov.id || m.estado !== 'por_clasificar') return;
@@ -6171,7 +6237,7 @@ ${lineasDeuda}
     const g = fila.querySelector('[name="catGasto"]'), i = fila.querySelector('[name="catIngreso"]'), d = fila.querySelector('[name="detalleDeuda"]');
     const dv = fila.querySelector('[data-wrap="devengo"]');
     if(dv) dv.style.display = t === 'gasto' ? 'block' : 'none';
-    const ev = fila.querySelector('[name="evento"]');
+    const ev = fila.querySelector('[name="proyecto"]');
     if(ev) ev.style.display = t === 'gasto' ? '' : 'none';
     if(g) g.style.display = t === 'gasto' ? '' : 'none';
     if(i) i.style.display = t === 'ingreso' ? '' : 'none';
@@ -6222,7 +6288,7 @@ ${lineasDeuda}
               <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Categoría</label>
                 <select name="categoria"><option value="">Elige…</option>${state.config.categoriasGastos.map(c=>`<option ${p.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div>
               <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Mes al que pertenece</label><input type="month" name="devengo" value="${p.devengo||''}"></div>
-              <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Evento (opcional)</label><select name="evento">${opcionesEvento(p.evento)}</select></div>
+              <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(p.proyecto)}</select></div>
               <div class="fa-field" style="grid-column:1 / -1;"><label>Nota${p.tipo==='gasto'?' (opcional)':' (qué deuda es)'}</label><input type="text" name="nota" value="${escapeHtml(p.nota||'')}" placeholder="Ej: honorarios atrasados, plan de pago 2025"></div>
             </div>
             ${dv.partes.length>1 ? `<button type="button" class="fa-icon-btn danger" data-action="cartola-dividir-quitar" data-idx="${i}">Quitar esta parte</button>` : ''}
@@ -6243,7 +6309,7 @@ ${lineasDeuda}
     if(!dv || !cont) return;
     dv.partes = [...cont.querySelectorAll('[data-parte]')].map(row=>{
       const f = readFields(row);
-      return { monto: Number(f.monto)||0, tipo: f.tipo, categoria: f.categoria||'', devengo: f.devengo||'', nota: f.nota||'', evento: f.evento||'' };
+      return { monto: Number(f.monto)||0, tipo: f.tipo, categoria: f.categoria||'', devengo: f.devengo||'', nota: f.nota||'', proyecto: f.proyecto||'' };
     });
   }
   window.faCartolaDividirSuma = function(){
@@ -6383,7 +6449,7 @@ ${lineasDeuda}
             <tr>
               <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
               <td class="num">${m.abono ? fmtMoney(m.abono) : ''}</td><td class="num">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
-              <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}${m.devengo?` <span class="fa-badge" style="background:#EEF2FF;">devengo ${cartolaMesLabel(m.devengo)}</span>`:''}${m.evento?` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(m.evento)}</span>`:''}${(m.partes||[]).length?`<div style="font-size:11.5px; color:var(--ink-soft);">${m.partes.map(p=>`${fmtMoney(p.monto)} · ${p.tipo==='gasto'?`${escapeHtml(p.categoria)} (${cartolaMesLabel(p.devengo)})${p.evento?` · ${escapeHtml(p.evento)}`:''}`:`deuda anterior: ${escapeHtml(p.nota||'')}`}`).join('<br>')}</div>`:''}</td>
+              <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}${m.devengo?` <span class="fa-badge" style="background:#EEF2FF;">devengo ${cartolaMesLabel(m.devengo)}</span>`:''}${m.proyecto?` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(m.proyecto)}</span>`:''}${(m.partes||[]).length?`<div style="font-size:11.5px; color:var(--ink-soft);">${m.partes.map(p=>`${fmtMoney(p.monto)} · ${p.tipo==='gasto'?`${escapeHtml(p.categoria)} (${cartolaMesLabel(p.devengo)})${p.proyecto?` · ${escapeHtml(p.proyecto)}`:''}`:`deuda anterior: ${escapeHtml(p.nota||'')}`}`).join('<br>')}</div>`:''}</td>
               <td><button class="fa-icon-btn" data-action="reabrir-cartola" data-id="${m.id}">Reabrir</button></td>
             </tr>`).join('')}
           </tbody>
@@ -6425,7 +6491,7 @@ ${lineasDeuda}
                 <select name="catIngreso" style="display:${defTipo==='ingreso'?'':'none'}; margin-top:4px;"><option value="">Categoría de ingreso…</option>${catIng.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
                 <input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea" style="display:none; margin-top:4px;">
                 <label data-wrap="devengo" style="display:${defTipo==='gasto'?'block':'none'}; margin-top:4px; font-size:11.5px; color:var(--ink-soft);">Mes del gasto (si no es el del pago)<input type="month" name="devengo" style="display:block; width:100%;"></label>
-                <select name="evento" title="Evento al que pertenece este gasto (opcional)" style="display:${defTipo==='gasto'?'':'none'}; margin-top:4px;">${opcionesEvento('')}</select>
+                <select name="proyecto" title="Proyecto al que pertenece este gasto (opcional)" style="display:${defTipo==='gasto'?'':'none'}; margin-top:4px;">${opcionesProyecto('')}</select>
               </td>
               <td style="min-width:190px;">
                 <label style="font-size:11.5px; display:flex; gap:4px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las parecidas</label>
@@ -6440,6 +6506,71 @@ ${lineasDeuda}
     `;
   }
 
+  // ---------------- RENTABILIDAD DE PROYECTO (Módulo 3) ----------------
+  function renderRentabilidadProyecto(){
+    const proyectos = getProyectos();
+    if(!state.proyectoSel || !proyectos.some(p=> p.nombre === state.proyectoSel)) state.proyectoSel = proyectos.length ? proyectos[0].nombre : '';
+    const sel = proyectos.find(p=> p.nombre === state.proyectoSel) || null;
+    const r = sel ? getRentabilidadProyecto(sel.nombre) : null;
+    const tabla = (titulo, filas, total, nota)=> `
+      <div class="fa-card-title" style="margin-top:14px;">${titulo}</div>
+      ${nota ? `<div class="fa-hint" style="margin-top:0;">${nota}</div>` : ''}
+      ${filas.length === 0 ? `<div class="fa-empty">Nada etiquetado todavía.</div>` : `
+      <div class="fa-table-wrap"><table class="fa-table">
+        <thead><tr><th>Fecha real</th><th>Detalle</th><th>Tipo / Categoría</th><th class="num">Monto</th></tr></thead>
+        <tbody>${filas.map(f=>`<tr><td>${f.fecha?fmtDate(f.fecha):'—'}</td><td>${escapeHtml(f.nombre)||'—'}</td><td>${escapeHtml(f.detalle)}</td><td class="num money">${fmtMoneyC(f.monto)}</td></tr>`).join('')}
+        <tr><td colspan="3"><strong>Total</strong></td><td class="num money"><strong>${fmtMoneyC(total)}</strong></td></tr></tbody>
+      </table></div>`}`;
+    return `
+      <div class="fa-topbar">
+        <div><h1>Rentabilidad de Proyecto</h1><div class="fa-sub">Junta todos los ingresos y costos etiquetados con un proyecto, sin importar el mes en que ocurrieron, y muestra su Margen Bruto como una unidad aislada: como si todo hubiera ocurrido en la fecha de cierre. No cambia el Estado de Resultados mensual ni el flujo.</div></div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Proyectos</div>
+        <div class="fa-section-note">Cada proyecto tiene una fecha de cierre (la fecha del evento). Después etiqueta los ingresos (al registrar la venta) y los gastos o costos directos (al registrarlos, en Por clasificar o en Dividir pago) con el nombre del proyecto.</div>
+        ${proyectos.length === 0 ? `<div class="fa-empty">Aún no hay proyectos.</div>` : `
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Proyecto</th><th>Fecha de cierre</th><th></th></tr></thead>
+          <tbody>${proyectos.map((p,i)=>`
+            <tr>
+              <td>${escapeHtml(p.nombre)}</td>
+              <td><input type="date" value="${p.fechaCierre||''}" onchange="window.faGuardarCierreProyecto(${i}, this.value)"></td>
+              <td><button class="fa-icon-btn danger" data-action="borrar-proyecto" data-idx="${i}">Quitar</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>`}
+        <div data-form="proyecto-nuevo" class="fa-form-grid" style="margin-top:12px; max-width:640px; grid-template-columns:2fr 1fr auto; align-items:end;">
+          <div class="fa-field"><label>Nuevo proyecto</label><input type="text" name="nombre" placeholder="Ej: Sinergia 2026"></div>
+          <div class="fa-field"><label>Fecha de cierre</label><input type="date" name="fechaCierre"></div>
+          <div class="fa-field"><button type="button" class="fa-btn fa-btn-primary" data-action="agregar-proyecto">Agregar</button></div>
+        </div>
+      </div>
+
+      ${!sel ? '' : `
+      <div class="fa-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div class="fa-card-title" style="margin:0;">${escapeHtml(sel.nombre)}</div>
+          <select onchange="window.faSeleccionarProyecto(this.value)">
+            ${proyectos.map(p=>`<option value="${escapeHtml(p.nombre)}" ${p.nombre===sel.nombre?'selected':''}>${escapeHtml(p.nombre)}</option>`).join('')}
+          </select>
+        </div>
+        ${sel.fechaCierre
+          ? `<div class="fa-hint">Todos los movimientos se contabilizan en la fecha de cierre: <strong>${fmtDate(sel.fechaCierre)}</strong> (${MESES[Number(sel.fechaCierre.slice(5,7))-1]} ${sel.fechaCierre.slice(0,4)}).</div>`
+          : `<div class="fa-hint" style="color:var(--expense);">⚠ Este proyecto no tiene fecha de cierre — ponla arriba para saber en qué mes se contabiliza.</div>`}
+        <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr); max-width:1000px; margin-top:10px;">
+          <div class="fa-kpi"><div class="fa-kpi-label">Ingresos</div><div class="fa-kpi-value income money">${fmtMoneyC(r.totalIngresos)}</div></div>
+          <div class="fa-kpi"><div class="fa-kpi-label">Costos Directos</div><div class="fa-kpi-value expense money">${fmtMoneyC(r.totalCostos)}</div></div>
+          <div class="fa-kpi ${r.margenBruto>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto</div><div class="fa-kpi-value ${r.margenBruto>=0?'income':'expense'} money">${fmtMoneyC(r.margenBruto)}</div></div>
+          <div class="fa-kpi ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto %</div><div class="fa-kpi-value ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}">${r.margenBrutoPct!==null?r.margenBrutoPct.toFixed(1)+'%':'—'}</div></div>
+        </div>
+        ${tabla('Ingresos del proyecto', r.ingresos, r.totalIngresos, 'Se cuenta el monto total de cada venta, no su prorrateo mensual.')}
+        ${tabla('Costos Directos del proyecto', r.costosDirectos, r.totalCostos, 'Incluye las comisiones y anticipos que generan las ventas etiquetadas.')}
+        ${r.otrosGastos.length ? tabla('Otros gastos etiquetados (no entran al Margen Bruto)', r.otrosGastos, r.totalOtros, `Si los restas, el resultado del proyecto queda en <strong>${fmtMoneyC(r.resultadoTrasOtros)}</strong>.`) : ''}
+      </div>`}
+    `;
+  }
+
   function renderSidebar(){
     const pendientesHistoricos = (state.importacionHistorica||[]).filter(h=>!h.agregado).length;
     const nPorClasificar = (state.cartola.movimientos||[]).filter(m=> m.estado === 'por_clasificar').length;
@@ -6447,6 +6578,7 @@ ${lineasDeuda}
       {id:'dashboard', label:'Dashboard', icon:'&#9673;'},
       {id:'ingresosdist', label:'Ingresos y Distribución', icon:'&#8593;'},
       {id:'estadoresultados', label:'Estado de Resultados', icon:'&#9636;'},
+      {id:'rentproyecto', label:'Rentabilidad de Proyecto', icon:'&#127919;'},
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'deudas', label:'Gestión de Deudas', icon:'&#8987;'},
       {id:'cartolas', label:'Cartolas bancarias', icon:'&#128196;'},
@@ -6665,6 +6797,7 @@ ${lineasDeuda}
       case 'dashboard': return renderDashboard();
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderEstadoResultados();
+      case 'rentproyecto': return renderRentabilidadProyecto();
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : state.moduloFlujoVista === 'tarjeta' ? renderTarjeta() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'cartolas': return renderCartolas();
@@ -9057,6 +9190,29 @@ ${lineasDeuda}
       showToast('Regla quitada (no cambia lo que ya se clasificó).');
       render();
     }
+    else if(action === 'agregar-proyecto'){
+      const f = readFields(btn.closest('[data-form="proyecto-nuevo"]'));
+      const nombre = (f.nombre || '').trim();
+      if(!nombre){ showToast('Escribe el nombre del proyecto.'); return; }
+      if(nombresProyecto().some(n=> n.toLowerCase() === nombre.toLowerCase())){ showToast('Ya existe un proyecto con ese nombre.'); return; }
+      state.config.proyectos = getProyectos().map(p=> ({...p})).concat([{ nombre, fechaCierre: f.fechaCierre || '' }]);
+      state.proyectoSel = nombre;
+      await saveKey('config', state.config);
+      showToast('Proyecto agregado.');
+      render();
+    }
+    else if(action === 'borrar-proyecto'){
+      const lista = getProyectos().map(p=> ({...p}));
+      const p = lista[Number(btn.dataset.idx)];
+      if(!p) return;
+      const enUso = state.gastos.some(g=> proyectoEfectivoGasto(g) === p.nombre) || state.contratosDevengados.some(c=> c.proyecto === p.nombre);
+      if(enUso){ showToast('Ese proyecto tiene ingresos o gastos etiquetados — quítales la etiqueta antes de quitarlo.'); return; }
+      lista.splice(Number(btn.dataset.idx), 1);
+      state.config.proyectos = lista;
+      await saveKey('config', state.config);
+      showToast('Proyecto quitado.');
+      render();
+    }
     else if(action === 'logout'){
       try{ await firebase.auth().signOut(); } catch(err){ console.error('Logout error', err); }
       state.role = null;
@@ -9772,7 +9928,8 @@ ${lineasDeuda}
         montoTotalUSD: esUSD ? montoBruto : null,
         tipoCambio, formaPago, tipoIngreso, duracionMeses,
         fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
-        numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD
+        numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD,
+        proyecto: data.proyecto || ''
       };
       state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current =>
         (current||[]).map(c=> c.id===editId ? contratoActualizado : c)
