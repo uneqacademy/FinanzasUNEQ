@@ -1748,6 +1748,9 @@
     asesorCargando: false,
     asesorError: null,
     config: null,
+    cartola: { movimientos: [], archivos: [], reglas: [] }, // Cartolas bancarias (se completa al cargar, con las reglas iniciales)
+    cartolaFiltro: { mes:'', cuenta:'', estado:'' },
+    cartolaMensajes: [],
     ingresos: [],
     gastos: [],
     ingresosUSD: [],
@@ -2009,7 +2012,8 @@
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
-    'import-json-file','import-csv-ingresos-file','import-csv-gastos-file'
+    'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
+    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola'
   ]);
 
   function fmtMoneyShort(v){
@@ -2347,6 +2351,7 @@
       const plantillasGastosFijos = await loadKeySeeded('plantillasGastosFijos', []);
       const cuentasPorPagar = await loadKeySeeded('cuentasPorPagar', { items: [], pagos: [] });
       const importacionHistorica = await loadKeySeeded('importacionHistorica', SEED_IMPORTACION_HISTORICA);
+      const cartola = await loadKey('cartola', null);
       const pagosImpuestos = await loadKeySeeded('pagosImpuestos', []);
       const tesoreriaUSD = await loadKeySeeded('tesoreriaUSD', { movimientos: [] });
       state.config = config || {
@@ -2403,6 +2408,7 @@
       if(!state.cuentasPorPagar.items) state.cuentasPorPagar.items = [];
       if(!state.cuentasPorPagar.pagos) state.cuentasPorPagar.pagos = [];
       state.importacionHistorica = importacionHistorica || [];
+      state.cartola = cartolaNormalizar(cartola);
       state.pagosImpuestos = pagosImpuestos || [];
       state.tesoreriaUSD = (tesoreriaUSD && typeof tesoreriaUSD === 'object') ? tesoreriaUSD : { movimientos: [] };
       if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
@@ -5768,14 +5774,523 @@ ${lineasDeuda}
     `;
   }
 
+  // ---------------- Cartolas bancarias (Itaú, cuenta corriente) ----------------
+  // Se sube la cartola tal como la entrega el banco (Excel). Cada línea queda guardada en state.cartola y se
+  // clasifica sola con las reglas (texto de la descripción -> tipo/categoría); lo que no reconoce queda en
+  // "Por clasificar". Al clasificar una línea como Gasto o Ingreso se crea el gasto/ingreso real (con su
+  // movimiento de Tesorería en Operación) y se etiqueta con origenCartola para poder deshacerlo limpio.
+  // Las líneas de deuda (tarjeta, línea de crédito, créditos, sobregiro) se marcan "Deuda" y NO crean nada
+  // todavía: se procesan en la etapa de Gestión de Deudas.
+  const CARTOLA_TIPOS = [
+    { id:'gasto',    label:'Gasto' },
+    { id:'ingreso',  label:'Ingreso' },
+    { id:'traspaso', label:'Traspaso entre mis cuentas' },
+    { id:'deuda',    label:'Deuda (se procesa después)' },
+    { id:'ignorar',  label:'Ignorar' }
+  ];
+  const CARTOLA_ESTADO_LABEL = { por_clasificar:'Por clasificar', clasificado:'Clasificado', traspaso:'Traspaso', deuda:'Deuda', ignorado:'Ignorado' };
+  const REGLAS_CARTOLA_INICIALES = [
+    { patron:'pago bdp tgr', tipo:'gasto', categoria:'Pago Convenio TGR' },
+    { patron:'pago bdp sii', tipo:'gasto', categoria:'Pago F29' },
+    { patron:'comis opr', tipo:'gasto', categoria:CAT_GASTO_FINANCIERO },
+    { patron:'com mantencion', tipo:'gasto', categoria:CAT_GASTO_FINANCIERO },
+    { patron:'impuesto al valor agregado', tipo:'gasto', categoria:CAT_GASTO_FINANCIERO },
+    { patron:'agencia uneq', tipo:'traspaso' },
+    { patron:'77438998-9', tipo:'traspaso' }, // RUT de la propia empresa: transferencias entre tus cuentas
+    { patron:'abono compra/venta div', tipo:'ingreso', categoria:CAT_INGRESO_OTROS },
+    { patron:'chatgpt', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'chat gpt', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'contador', tipo:'gasto', categoria:'Servicios Profesionales (Contable/Legal)' },
+    { patron:'canva', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'capcut', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'zoom', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'instagram', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'verificacionig', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'dominio', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'telefono usa', tipo:'gasto', categoria:'Software/Suscripciones' },
+    { patron:'ads', tipo:'gasto', categoria:CAT_COSTO_ADS },
+    { patron:'sueldo', tipo:'gasto', categoria:'Nómina Equipo' },
+    { patron:'honorarios', tipo:'gasto', categoria:'Nómina Equipo' },
+    { patron:'retiro', tipo:'gasto', categoria:CAT_GASTO_RETIRO_SOCIOS },
+    { patron:'arriendo', tipo:'gasto', categoria:'Arriendo y Servicios Básicos' },
+    { patron:'rent', tipo:'gasto', categoria:'Arriendo y Servicios Básicos' },
+    // Deudas: se reconocen pero todavía no crean nada (etapa de Gestión de Deudas).
+    { patron:'pago tarjeta de credito', tipo:'deuda', categoria:'Tarjeta de crédito' },
+    { patron:'cuota credito', tipo:'deuda', categoria:'Crédito' },
+    { patron:'cuota bco chile', tipo:'deuda', categoria:'Crédito' },
+    { patron:'cuota prestamo', tipo:'deuda', categoria:'Crédito' },
+    { patron:'comision garantia fogape', tipo:'deuda', categoria:'Crédito' },
+    { patron:'saldo cuota tc', tipo:'deuda', categoria:'Tarjeta de crédito' },
+    { patron:'pago mora', tipo:'deuda', categoria:'Crédito' },
+    { patron:'abono desde linea de credito', tipo:'deuda', categoria:'Línea de crédito' },
+    { patron:'cargo ctacte por traspaso lc', tipo:'deuda', categoria:'Línea de crédito' },
+    { patron:'gtos notariales por alta de lc', tipo:'deuda', categoria:'Línea de crédito' },
+    { patron:'seguro degravamen', tipo:'deuda', categoria:'Línea de crédito' },
+    { patron:'liquid intereses', tipo:'deuda', categoria:'Sobregiro / intereses' },
+    { patron:'imp/sobreg', tipo:'deuda', categoria:'Sobregiro / intereses' },
+    { patron:'dif com fogape', tipo:'deuda', categoria:'Crédito' }
+  ];
+
+  function cartolaVacia(){
+    return { movimientos: [], archivos: [], reglas: REGLAS_CARTOLA_INICIALES.map((r,i)=> ({ id:'regla_base_'+i, ...r, base:true })) };
+  }
+  function cartolaNormalizar(c){
+    const base = (c && typeof c === 'object') ? c : {};
+    return {
+      movimientos: Array.isArray(base.movimientos) ? base.movimientos : [],
+      archivos: Array.isArray(base.archivos) ? base.archivos : [],
+      reglas: Array.isArray(base.reglas) ? base.reglas : cartolaVacia().reglas
+    };
+  }
+
+  // Texto comparable: minúsculas, sin tildes, espacios simples.
+  function cartolaNorm(s){
+    return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+  }
+  function cartolaEscRe(s){ return s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); }
+  // La regla calza si su patrón aparece como palabra(s) completa(s) dentro de la descripción.
+  function cartolaCalza(descNorm, patronNorm){
+    if(!patronNorm) return false;
+    return new RegExp('(^|[^a-z0-9])' + cartolaEscRe(patronNorm) + '([^a-z0-9]|$)').test(descNorm);
+  }
+  // Hash de 53 bits (cyrb53) para identificar cada línea de forma estable y evitar duplicados al re-subir.
+  function cartolaHash(str){
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for(let i=0; i<str.length; i++){ const ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+    h1 = Math.imul(h1 ^ (h1>>>16), 2246822507) ^ Math.imul(h2 ^ (h2>>>13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2>>>16), 2246822507) ^ Math.imul(h1 ^ (h1>>>13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1>>>0)).toString(36);
+  }
+
+  // Lee una cartola de cuenta corriente de Itaú (Excel). Devuelve { ok, error } o el detalle completo.
+  function parseCartolaItau(buffer){
+    if(typeof XLSX === 'undefined') return { ok:false, error:'No se pudo cargar el lector de Excel. Revisa tu conexión y recarga la página.' };
+    let rows;
+    try{
+      const wb = XLSX.read(new Uint8Array(buffer), { type:'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, raw:true, defval:null });
+    } catch(e){ return { ok:false, error:'No se pudo abrir el archivo como Excel.' }; }
+    const rCuenta = rows.slice(0, 8).find(r=> r && r[0] && /^(Cuenta Corriente|L[ií]nea de Cr[eé]dito)/i.test(String(r[0]).trim()));
+    if(!rCuenta) return { ok:false, error:'No parece una cartola de cuenta corriente de Itaú (¿es una tarjeta de crédito? esas se cargan en otra etapa).' };
+    if(!/^Cuenta Corriente/i.test(String(rCuenta[0]).trim())) return { ok:false, error:'Es una cartola de línea de crédito — se carga en otra etapa.' };
+    const numero = (String(rCuenta[0]).match(/(\d{6,})/)||[])[1];
+    if(!numero) return { ok:false, error:'No se encontró el número de cuenta.' };
+    const cuenta = numero.slice(-4);
+
+    let desde = null, hasta = null;
+    for(const r of rows.slice(0, 25)){
+      for(const c of (r||[])){
+        const m = String(c||'').match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/);
+        if(m){ desde = { d:+m[1], m:+m[2], a:+m[3] }; hasta = { d:+m[4], m:+m[5], a:+m[6] }; break; }
+      }
+      if(desde) break;
+    }
+    if(!desde) return { ok:false, error:'No se encontró el período de la cartola.' };
+
+    const iSaldo = rows.findIndex(r=> r && r[0] === 'Monto disponible');
+    const saldoAnterior = (iSaldo > -1 && rows[iSaldo+1]) ? Number(rows[iSaldo+1][2]) : NaN;
+    if(isNaN(saldoAnterior)) return { ok:false, error:'No se encontró el saldo anterior.' };
+
+    const iHead = rows.findIndex(r=> r && r[0] === 'Fecha' && /descrip/i.test(String(r[3]||'')));
+    if(iHead === -1) return { ok:false, error:'No se encontró la tabla de movimientos.' };
+    const pad = n=> String(n).padStart(2,'0');
+    const movs = [];
+    for(let i=iHead+1; i<rows.length; i++){
+      const r = rows[i];
+      if(!r || !r[0] || !/^\d{2}\/\d{2}$/.test(String(r[0]))) continue;
+      const [dd, mm] = String(r[0]).split('/').map(Number);
+      const anio = desde.a + (mm < desde.m ? 1 : 0);
+      const abono = Number(r[4]) || 0, cargo = Number(r[5]) || 0;
+      const oper = String(r[1]==null ? '' : r[1]), desc = String(r[3]==null ? '' : r[3]).replace(/\s+/g,' ').trim();
+      const fecha = `${anio}-${pad(mm)}-${pad(dd)}`;
+      const saldo = Number(r[6]);
+      movs.push({
+        id: 'cl_' + cartolaHash([cuenta, fecha, oper, desc, abono, cargo, saldo].join('|')),
+        cuenta, fecha, oper, desc, abono, cargo, saldo
+      });
+    }
+
+    const avisos = [];
+    let corrido = saldoAnterior, desfases = 0;
+    movs.forEach(m=>{ corrido += m.abono - m.cargo; if(Math.round(corrido) !== Math.round(m.saldo)){ desfases++; corrido = m.saldo; } });
+    if(desfases > 0) avisos.push(`El saldo corrido no calza en ${desfases} línea${desfases===1?'':'s'}.`);
+    const iRes = rows.findIndex(r=> r && r[0] === 'Resumen de Saldos');
+    const resumen = (iRes > -1 && rows[iRes+2]) ? { cargos:Number(rows[iRes+2][0]), abonos:Number(rows[iRes+2][1]) } : null;
+    const sumAb = movs.reduce((s,m)=>s+m.abono,0), sumCa = movs.reduce((s,m)=>s+m.cargo,0);
+    if(resumen && (sumAb !== resumen.abonos || sumCa !== resumen.cargos)){
+      avisos.push(`Los totales no coinciden con el resumen del banco (abonos ${fmtMoney(sumAb)} vs ${fmtMoney(resumen.abonos)}, cargos ${fmtMoney(sumCa)} vs ${fmtMoney(resumen.cargos)}).`);
+    }
+    const saldoFinal = movs.length ? movs[movs.length-1].saldo : saldoAnterior;
+    return {
+      ok:true, cuenta, numero, desde:`${desde.a}-${pad(desde.m)}-${pad(desde.d)}`, hasta:`${hasta.a}-${pad(hasta.m)}-${pad(hasta.d)}`,
+      saldoAnterior, saldoFinal, movs, avisos
+    };
+  }
+
+  function cartolaBuscarRegla(mov){
+    const dn = cartolaNorm(mov.desc);
+    let mejor = null;
+    state.cartola.reglas.forEach(r=>{
+      const pn = cartolaNorm(r.patron);
+      if(!cartolaCalza(dn, pn)) return;
+      // Una regla de gasto solo sirve para cargos, y una de ingreso solo para abonos.
+      if(r.tipo === 'gasto' && !(mov.cargo > 0)) return;
+      if(r.tipo === 'ingreso' && !(mov.abono > 0)) return;
+      if(!mejor || pn.length > cartolaNorm(mejor.patron).length) mejor = r;
+    });
+    return mejor;
+  }
+  function cartolaSetClasificacion(mov, tipo, categoria, reglaId){
+    mov.tipo = tipo;
+    mov.categoria = categoria || '';
+    mov.regla = reglaId || null;
+    mov.estado = tipo === 'traspaso' ? 'traspaso' : tipo === 'deuda' ? 'deuda' : tipo === 'ignorar' ? 'ignorado' : 'clasificado';
+  }
+  function cartolaReabrirMov(mov){
+    cartolaQuitarEfectos(mov.id);
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null;
+  }
+
+  // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
+  function cartolaNombreCorto(desc){
+    return String(desc||'').replace(/\b\d{6,}\b/g,'').replace(/\s+/g,' ').trim();
+  }
+  function cartolaAsegurarCategoria(lista, cat){
+    if(cat && !lista.includes(cat)){ lista.push(cat); return true; }
+    return false;
+  }
+  // Quita el gasto/ingreso (y su movimiento de Tesorería) que esta línea había creado.
+  function cartolaQuitarEfectos(movId){
+    state.gastos.filter(g=> g.origenCartola === movId).forEach(g=> removeTesoreriaGasto(g.id));
+    state.gastos = state.gastos.filter(g=> g.origenCartola !== movId);
+    state.ingresos.filter(i=> i.origenCartola === movId).forEach(i=> removeTesoreriaIngreso(i.id));
+    state.ingresos = state.ingresos.filter(i=> i.origenCartola !== movId);
+  }
+  // Crea el gasto/ingreso que corresponde a una línea ya clasificada (y quita lo anterior, si había).
+  function cartolaAplicarEfectos(mov){
+    cartolaQuitarEfectos(mov.id);
+    if(mov.estado !== 'clasificado') return;
+    const nombre = cartolaNombreCorto(mov.desc);
+    if(mov.tipo === 'gasto' && mov.cargo > 0){
+      cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
+      const gasto = {
+        id: uid('gas'), fecha: mov.fecha, proveedor: nombre, descripcion: `Cartola ${mov.cuenta}: ${nombre}`,
+        categoria: mov.categoria, monto: mov.cargo, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id
+      };
+      state.gastos.push(gasto);
+      syncTesoreriaGasto(gasto);
+    } else if(mov.tipo === 'ingreso' && mov.abono > 0){
+      cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
+      const ingreso = {
+        id: uid('ing'), fecha: mov.fecha, categoria: mov.categoria, cliente: nombre, pasarela: '',
+        monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id
+      };
+      state.ingresos.push(ingreso);
+      // Entra directo a Operación (no pasa por el reparto Profit First) si cuenta para el flujo.
+      if(esIngresoFlujo(ingreso)){
+        state.tesoreria.movimientos.push({
+          id: uid('tes'), fecha: mov.fecha, boveda: 'operacion', tipo: 'entrada', monto: mov.abono,
+          descripcion: `${mov.categoria} — ${nombre}`, origen: `ingreso:${ingreso.id}`
+        });
+      }
+    }
+  }
+  async function cartolaGuardarTodo(){
+    await saveKey('cartola', state.cartola);
+    await saveKey('gastos', state.gastos);
+    await saveKey('ingresos', state.ingresos);
+    await saveKey('tesoreria', state.tesoreria, {silent:true});
+    await saveKey('config', state.config, {silent:true});
+  }
+
+  async function importarCartolas(files){
+    const mensajes = [];
+    let nuevasTotal = 0, autoTotal = 0, repetidasTotal = 0;
+    for(const file of files){
+      let buffer;
+      try{ buffer = await file.arrayBuffer(); } catch(e){ mensajes.push({ nivel:'error', texto:`${file.name}: no se pudo leer el archivo.` }); continue; }
+      const r = parseCartolaItau(buffer);
+      if(!r.ok){ mensajes.push({ nivel:'error', texto:`${file.name}: ${r.error}` }); continue; }
+      const existentes = new Set(state.cartola.movimientos.map(m=>m.id));
+      let nuevas = 0, repetidas = 0, auto = 0;
+      r.movs.forEach(m=>{
+        if(existentes.has(m.id)){ repetidas++; return; }
+        const mov = { ...m, estado:'por_clasificar', tipo:null, categoria:'', regla:null };
+        const regla = cartolaBuscarRegla(mov);
+        if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); auto++; }
+        state.cartola.movimientos.push(mov);
+        if(mov.estado === 'clasificado') cartolaAplicarEfectos(mov);
+        nuevas++;
+      });
+      state.cartola.archivos = state.cartola.archivos.filter(a=> !(a.cuenta === r.cuenta && a.desde === r.desde));
+      state.cartola.archivos.push({
+        nombre: file.name, cuenta: r.cuenta, desde: r.desde, hasta: r.hasta, saldoAnterior: r.saldoAnterior,
+        saldoFinal: r.saldoFinal, n: r.movs.length, avisos: r.avisos, cargadoEl: todayISO()
+      });
+      nuevasTotal += nuevas; autoTotal += auto; repetidasTotal += repetidas;
+      mensajes.push({ nivel: r.avisos.length ? 'aviso' : 'ok', texto:`${file.name} — cuenta ${r.cuenta}, ${r.movs.length} movimientos (${nuevas} nuevos${repetidas?`, ${repetidas} ya estaban`:''}, ${auto} clasificados solos).` + (r.avisos.length ? ' ⚠ ' + r.avisos.join(' ') : '') });
+    }
+    state.cartolaMensajes = mensajes;
+    if(nuevasTotal > 0 || mensajes.length) await cartolaGuardarTodo();
+    showToast(nuevasTotal > 0 ? `Cartolas cargadas: ${nuevasTotal} movimientos nuevos (${autoTotal} clasificados solos).` : (repetidasTotal > 0 ? 'Esas cartolas ya estaban cargadas — no se duplicó nada.' : 'No se cargó ninguna cartola — revisa los mensajes.'));
+    render();
+  }
+
+  // Clasifica una línea (y, si se pide, crea la regla y la aplica a las demás líneas pendientes parecidas).
+  async function cartolaAsignar(movId, form){
+    const mov = state.cartola.movimientos.find(m=>m.id === movId);
+    if(!mov){ showToast('No se encontró la línea.'); return; }
+    const tipo = form.tipo;
+    let categoria = '';
+    if(tipo === 'gasto'){
+      if(!(mov.cargo > 0)){ showToast('Un Gasto tiene que ser un cargo (salida de plata). Esta línea es un abono.'); return; }
+      categoria = form.catGasto;
+      if(!categoria){ showToast('Elige la categoría del gasto.'); return; }
+    } else if(tipo === 'ingreso'){
+      if(!(mov.abono > 0)){ showToast('Un Ingreso tiene que ser un abono (entrada de plata). Esta línea es un cargo.'); return; }
+      categoria = form.catIngreso;
+      if(!categoria){ showToast('Elige la categoría del ingreso.'); return; }
+    } else if(tipo === 'deuda'){
+      categoria = (form.detalleDeuda || '').trim() || 'Deuda';
+    } else if(!CARTOLA_TIPOS.some(t=>t.id === tipo)){
+      showToast('Elige qué tipo de movimiento es.'); return;
+    }
+    let regla = null;
+    const patron = cartolaNorm(form.patron);
+    if(form.crearRegla && patron){
+      state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
+      regla = { id: uid('regla'), patron, tipo, categoria };
+      state.cartola.reglas.push(regla);
+    }
+    const afectadas = [mov];
+    cartolaSetClasificacion(mov, tipo, categoria, regla ? regla.id : null);
+    if(regla){
+      state.cartola.movimientos.forEach(m=>{
+        if(m.id === mov.id || m.estado !== 'por_clasificar') return;
+        if(!cartolaCalza(cartolaNorm(m.desc), patron)) return;
+        if(tipo === 'gasto' && !(m.cargo > 0)) return;
+        if(tipo === 'ingreso' && !(m.abono > 0)) return;
+        cartolaSetClasificacion(m, tipo, categoria, regla.id);
+        afectadas.push(m);
+      });
+    }
+    afectadas.forEach(m=> cartolaAplicarEfectos(m));
+    await cartolaGuardarTodo();
+    showToast(afectadas.length > 1 ? `Listo: se clasificaron ${afectadas.length} líneas parecidas.` : 'Línea clasificada.');
+    render();
+  }
+  async function cartolaReabrir(movId){
+    const mov = state.cartola.movimientos.find(m=>m.id === movId);
+    if(!mov) return;
+    cartolaReabrirMov(mov);
+    await cartolaGuardarTodo();
+    showToast('La línea volvió a "Por clasificar".');
+    render();
+  }
+
+  function cartolaMesLabel(ym){
+    const [a, m] = ym.split('-');
+    return `${MESES[Number(m)-1]} ${a}`;
+  }
+  function cartolaPatronSugerido(desc){
+    const n0 = cartolaNorm(desc);
+    // Transferencias: se conserva el RUT + nombre (identifica a la persona o empresa).
+    if(/^transf\. (a|de) /.test(n0)) return n0.replace(/^transf\. (a|de) /, '');
+    // Resto: se quitan los códigos largos (números de operación) y se dejan las primeras palabras.
+    return n0.replace(/\b\d{6,}\b/g,'').replace(/\s+/g,' ').trim().split(' ').slice(0, 4).join(' ').trim();
+  }
+  // Muestra la categoría que corresponde al tipo elegido (Gasto / Ingreso / detalle de deuda).
+  window.faCartolaTipo = function(sel){
+    const fila = sel.closest('tr');
+    if(!fila) return;
+    const t = sel.value;
+    const g = fila.querySelector('[name="catGasto"]'), i = fila.querySelector('[name="catIngreso"]'), d = fila.querySelector('[name="detalleDeuda"]');
+    if(g) g.style.display = t === 'gasto' ? '' : 'none';
+    if(i) i.style.display = t === 'ingreso' ? '' : 'none';
+    if(d) d.style.display = t === 'deuda' ? '' : 'none';
+  };
+
+  // Saldos y continuidad por cuenta, a partir de los archivos cargados.
+  function cartolaResumenArchivos(){
+    const porCuenta = {};
+    state.cartola.archivos.forEach(a=> (porCuenta[a.cuenta] = porCuenta[a.cuenta] || []).push(a));
+    const filas = [];
+    Object.keys(porCuenta).sort().forEach(cuenta=>{
+      const lista = porCuenta[cuenta].slice().sort((a,b)=> a.desde.localeCompare(b.desde));
+      lista.forEach((a, i)=>{
+        const avisos = (a.avisos||[]).slice();
+        if(i > 0 && Math.round(lista[i-1].saldoFinal) !== Math.round(a.saldoAnterior)){
+          avisos.push(`No empalma con la cartola anterior (terminó en ${fmtMoney(lista[i-1].saldoFinal)} y esta parte de ${fmtMoney(a.saldoAnterior)}) — puede faltar un mes.`);
+        }
+        filas.push({ ...a, avisos });
+      });
+    });
+    return filas;
+  }
+
+  function renderCartolas(){
+    const c = state.cartola;
+    const archivos = cartolaResumenArchivos();
+    const cuentan = e=> c.movimientos.filter(m=> m.estado === e).length;
+    const porClasificar = cuentan('por_clasificar');
+    const f = state.cartolaFiltro;
+    let lista = c.movimientos.filter(m=> m.estado !== 'por_clasificar');
+    if(f.mes) lista = lista.filter(m=> m.fecha.slice(0,7) === f.mes);
+    if(f.cuenta) lista = lista.filter(m=> m.cuenta === f.cuenta);
+    if(f.estado) lista = lista.filter(m=> m.estado === f.estado);
+    lista = lista.slice().sort((a,b)=> a.fecha.localeCompare(b.fecha) || 0);
+    const meses = [...new Set(c.movimientos.map(m=> m.fecha.slice(0,7)))].sort();
+    const cuentas = [...new Set(c.movimientos.map(m=> m.cuenta))].sort();
+    // Sugerencia de Día Cero: el saldo anterior de la primera cartola de cada cuenta.
+    const primeras = {};
+    archivos.forEach(a=>{ if(!primeras[a.cuenta] || a.desde < primeras[a.cuenta].desde) primeras[a.cuenta] = a; });
+    const fechaMin = Object.values(primeras).map(a=>a.desde).sort()[0];
+    const saldoInicialSugerido = Object.values(primeras).filter(a=> a.desde === fechaMin).reduce((s,a)=> s + a.saldoAnterior, 0);
+    const diaCero = state.config.fechaDiaCero || '';
+    const mostrarAvisoDiaCero = fechaMin && diaCero && diaCero > fechaMin;
+    return `
+      <div class="fa-topbar">
+        <div><h1>Cartolas bancarias</h1><div class="fa-sub">Sube la cartola de Itaú tal como la entrega el banco (Excel). Lo que no se reconoce queda en "Por clasificar".</div></div>
+      </div>
+
+      ${mostrarAvisoDiaCero ? `
+      <div class="fa-card" style="border:1.5px solid var(--expense); background:#FFF5F5;">
+        <div class="fa-card-title" style="color:var(--expense);">⚠️ Tu Día Cero (${fmtDate(diaCero)}) es posterior a tus cartolas</div>
+        <div class="fa-hint">Los movimientos anteriores al Día Cero no cuentan en el Flujo de Caja. Para cargar desde ${fmtDate(fechaMin)}, ve a <strong>Configuración → Día Cero</strong>, pon la fecha <strong>${fechaMin}</strong> y, en Operación, el saldo inicial <strong>${fmtMoney(saldoInicialSugerido)}</strong> (suma de los saldos anteriores de la primera cartola de cada cuenta).</div>
+      </div>` : ''}
+
+      <div class="fa-card">
+        <div class="fa-card-title">Subir cartolas</div>
+        <div class="fa-section-note">Puedes elegir varios archivos de una vez (de cualquier mes y de las dos cuentas). Si subes un mes que ya estaba, la app no duplica nada. La app lee el número de cuenta y el período desde el propio archivo.</div>
+        <div class="fa-form-actions">
+          <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-cartola-file">Elegir cartolas (.xls)</button>
+        </div>
+        <input type="file" id="fa-import-cartola" data-action="import-cartola-file" accept=".xls,.xlsx" multiple style="display:none;">
+        ${state.cartolaMensajes.length ? `<div style="margin-top:12px;">${state.cartolaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':(m.nivel==='aviso'?'#B7791F':'var(--ink-soft)')};">${m.nivel==='error'?'✖':(m.nivel==='aviso'?'⚠':'✓')} ${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
+      </div>
+
+      <div class="fa-kpi-grid" style="grid-template-columns:repeat(5,1fr); max-width:1000px;">
+        <div class="fa-kpi"><div class="fa-kpi-label">Movimientos cargados</div><div class="fa-kpi-value">${c.movimientos.length}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Clasificados</div><div class="fa-kpi-value">${cuentan('clasificado')}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Por clasificar</div><div class="fa-kpi-value" style="${porClasificar?'color:var(--expense);':''}">${porClasificar}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Deuda (después)</div><div class="fa-kpi-value">${cuentan('deuda')}</div></div>
+        <div class="fa-kpi"><div class="fa-kpi-label">Traspasos / ignorados</div><div class="fa-kpi-value">${cuentan('traspaso') + cuentan('ignorado')}</div></div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Cartolas cargadas y cuadre con el banco</div>
+        ${archivos.length === 0 ? `<div class="fa-empty">Aún no cargas ninguna cartola.</div>` : `
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Cuenta</th><th>Período</th><th class="num">Movimientos</th><th class="num">Saldo anterior</th><th class="num">Saldo final</th><th>Cuadre</th></tr></thead>
+          <tbody>${archivos.map(a=>`
+            <tr>
+              <td>${escapeHtml(a.cuenta)}</td>
+              <td>${fmtDate(a.desde)} – ${fmtDate(a.hasta)}</td>
+              <td class="num">${a.n}</td>
+              <td class="num">${fmtMoney(a.saldoAnterior)}</td>
+              <td class="num">${fmtMoney(a.saldoFinal)}</td>
+              <td>${a.avisos.length ? `<span style="color:var(--expense);">⚠ ${escapeHtml(a.avisos.join(' '))}</span>` : `<span style="color:var(--income);">✓ Cuadra con el banco</span>`}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>`}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Reglas de reconocimiento (${c.reglas.length})</div>
+        <div class="fa-section-note">Si la descripción de una línea contiene el texto de la regla, la app la clasifica sola. Se crean al clasificar en "Por clasificar". Gana la regla con el texto más largo.</div>
+        <details>
+          <summary style="cursor:pointer; font-weight:600; font-size:13px;">Ver reglas</summary>
+          <div class="fa-table-wrap" style="margin-top:8px;"><table class="fa-table">
+            <thead><tr><th>Si dice…</th><th>Tipo</th><th>Categoría</th><th></th></tr></thead>
+            <tbody>${c.reglas.slice().sort((a,b)=> a.patron.localeCompare(b.patron)).map(r=>`
+              <tr><td>${escapeHtml(r.patron)}</td><td>${escapeHtml((CARTOLA_TIPOS.find(t=>t.id===r.tipo)||{}).label||r.tipo)}</td><td>${escapeHtml(r.categoria||'')}</td>
+              <td><button class="fa-icon-btn danger" data-action="borrar-regla-cartola" data-id="${r.id}">Quitar</button></td></tr>`).join('')}
+            </tbody>
+          </table></div>
+        </details>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Movimientos ya clasificados</div>
+        <div class="fa-form-grid" style="max-width:640px; grid-template-columns:repeat(3,1fr);">
+          <div class="fa-field"><label>Mes</label><select data-action="cartola-filtro" data-campo="mes"><option value="">Todos</option>${meses.map(m=>`<option value="${m}" ${f.mes===m?'selected':''}>${cartolaMesLabel(m)}</option>`).join('')}</select></div>
+          <div class="fa-field"><label>Cuenta</label><select data-action="cartola-filtro" data-campo="cuenta"><option value="">Todas</option>${cuentas.map(x=>`<option value="${x}" ${f.cuenta===x?'selected':''}>${x}</option>`).join('')}</select></div>
+          <div class="fa-field"><label>Tipo</label><select data-action="cartola-filtro" data-campo="estado"><option value="">Todos</option>${['clasificado','traspaso','deuda','ignorado'].map(x=>`<option value="${x}" ${f.estado===x?'selected':''}>${CARTOLA_ESTADO_LABEL[x]}</option>`).join('')}</select></div>
+        </div>
+        ${lista.length === 0 ? `<div class="fa-empty">No hay movimientos con esos filtros.</div>` : `
+        <div class="fa-hint">Mostrando ${Math.min(lista.length, 300)} de ${lista.length}.</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Fecha</th><th>Cuenta</th><th>Descripción</th><th class="num">Abono</th><th class="num">Cargo</th><th>Clasificación</th><th></th></tr></thead>
+          <tbody>${lista.slice(0,300).map(m=>`
+            <tr>
+              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
+              <td class="num">${m.abono ? fmtMoney(m.abono) : ''}</td><td class="num">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
+              <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}</td>
+              <td><button class="fa-icon-btn" data-action="reabrir-cartola" data-id="${m.id}">Reabrir</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>`}
+      </div>
+    `;
+  }
+
+  function renderPorClasificar(){
+    const c = state.cartola;
+    const pend = c.movimientos.filter(m=> m.estado === 'por_clasificar').sort((a,b)=> a.fecha.localeCompare(b.fecha));
+    const porMes = {};
+    pend.forEach(m=> (porMes[m.fecha.slice(0,7)] = porMes[m.fecha.slice(0,7)] || []).push(m));
+    const meses = Object.keys(porMes).sort();
+    const catGasto = state.config.categoriasGastos, catIng = state.config.categoriasIngresos;
+    return `
+      <div class="fa-topbar">
+        <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Al clasificar una, se crea el gasto o ingreso y se actualizan Estado de Resultados, ingresos y flujo.</div></div>
+      </div>
+      ${pend.length === 0 ? `<div class="fa-card"><div class="fa-empty">No hay nada por clasificar. 🎉 (Carga más cartolas en "Cartolas bancarias".)</div></div>` : ''}
+      ${meses.map(ym=>{
+        const l = porMes[ym];
+        const tAb = l.reduce((s,m)=>s+m.abono,0), tCa = l.reduce((s,m)=>s+m.cargo,0);
+        return `
+      <div class="fa-card">
+        <div class="fa-card-title">${cartolaMesLabel(ym)} — ${l.length} línea${l.length===1?'':'s'} <span style="font-weight:400; font-size:12px; color:var(--ink-soft);">(abonos ${fmtMoney(tAb)} · cargos ${fmtMoney(tCa)})</span></div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Fecha</th><th>Cta</th><th>Descripción</th><th class="num">Abono</th><th class="num">Cargo</th><th>¿Qué es?</th><th>Recordar</th><th></th></tr></thead>
+          <tbody>${l.map(m=>{
+            const defTipo = m.abono > 0 ? 'ingreso' : 'gasto';
+            return `
+            <tr data-form="cl-${m.id}">
+              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
+              <td class="num" style="color:var(--income);">${m.abono ? fmtMoney(m.abono) : ''}</td>
+              <td class="num" style="color:var(--expense);">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
+              <td style="min-width:230px;">
+                <select name="tipo" onchange="window.faCartolaTipo(this)">${CARTOLA_TIPOS.map(t=>`<option value="${t.id}" ${t.id===defTipo?'selected':''}>${t.label}</option>`).join('')}</select>
+                <select name="catGasto" style="display:${defTipo==='gasto'?'':'none'}; margin-top:4px;"><option value="">Categoría de gasto…</option>${catGasto.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
+                <select name="catIngreso" style="display:${defTipo==='ingreso'?'':'none'}; margin-top:4px;"><option value="">Categoría de ingreso…</option>${catIng.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
+                <input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea" style="display:none; margin-top:4px;">
+              </td>
+              <td style="min-width:190px;">
+                <label style="font-size:11.5px; display:flex; gap:4px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las parecidas</label>
+                <input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(m.desc))}" title="Texto que se buscará en las próximas cartolas" style="margin-top:3px; width:100%;">
+              </td>
+              <td><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="asignar-cartola" data-id="${m.id}">Asignar</button></td>
+            </tr>`;}).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+      }).join('')}
+    `;
+  }
+
   function renderSidebar(){
     const pendientesHistoricos = (state.importacionHistorica||[]).filter(h=>!h.agregado).length;
+    const nPorClasificar = (state.cartola.movimientos||[]).filter(m=> m.estado === 'por_clasificar').length;
     const tabs = [
       {id:'dashboard', label:'Dashboard', icon:'&#9673;'},
       {id:'ingresosdist', label:'Ingresos y Distribución', icon:'&#8593;'},
       {id:'estadoresultados', label:'Estado de Resultados', icon:'&#9636;'},
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'deudas', label:'Gestión de Deudas', icon:'&#8987;'},
+      {id:'cartolas', label:'Cartolas bancarias', icon:'&#128196;'},
+      {id:'porclasificar', label:`Por clasificar${nPorClasificar?` (${nPorClasificar})`:''}`, icon:'&#9888;'},
       ...(pendientesHistoricos>0 ? [{id:'importarhistoricos', label:`Importar Históricos (${pendientesHistoricos})`, icon:'&#128229;'}] : []),
       {id:'asesorIA', label:'Asesor IA', icon:'&#128172;'},
       {id:'config', label:'Configuración', icon:'&#9881;'}
@@ -5992,6 +6507,8 @@ ${lineasDeuda}
       case 'estadoresultados': return renderEstadoResultados();
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : state.moduloFlujoVista === 'tarjeta' ? renderTarjeta() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
+      case 'cartolas': return renderCartolas();
+      case 'porclasificar': return renderPorClasificar();
       case 'importarhistoricos': return renderImportarHistoricos();
       case 'asesorIA': return renderAsesorIA();
       case 'config': return renderConfig();
@@ -8170,7 +8687,8 @@ ${lineasDeuda}
         cuentasPorPagar: state.cuentasPorPagar,
         importacionHistorica: state.importacionHistorica,
         pagosImpuestos: state.pagosImpuestos,
-        tesoreriaUSD: state.tesoreriaUSD
+        tesoreriaUSD: state.tesoreriaUSD,
+        cartola: state.cartola
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
       const url = URL.createObjectURL(blob);
@@ -8337,6 +8855,22 @@ ${lineasDeuda}
         state.loginError = msgs[err.code] || 'No se pudo iniciar sesión. Intenta de nuevo.';
         render();
       }
+    }
+    else if(action === 'abrir-cartola-file'){
+      const fi = document.getElementById('fa-import-cartola');
+      if(fi) fi.click();
+    }
+    else if(action === 'asignar-cartola'){
+      await cartolaAsignar(btn.dataset.id, readFields(btn.closest('tr[data-form]')));
+    }
+    else if(action === 'reabrir-cartola'){
+      await cartolaReabrir(btn.dataset.id);
+    }
+    else if(action === 'borrar-regla-cartola'){
+      state.cartola.reglas = state.cartola.reglas.filter(r=> r.id !== btn.dataset.id);
+      await saveKey('cartola', state.cartola);
+      showToast('Regla quitada (no cambia lo que ya se clasificó).');
+      render();
     }
     else if(action === 'logout'){
       try{ await firebase.auth().signOut(); } catch(err){ console.error('Logout error', err); }
@@ -8712,6 +9246,7 @@ ${lineasDeuda}
           state.importacionHistorica = Array.isArray(data.importacionHistorica) ? data.importacionHistorica : [];
           state.pagosImpuestos = Array.isArray(data.pagosImpuestos) ? data.pagosImpuestos : [];
           state.tesoreriaUSD = (data.tesoreriaUSD && typeof data.tesoreriaUSD === 'object') ? data.tesoreriaUSD : { movimientos: [] };
+          state.cartola = cartolaNormalizar(data.cartola);
           if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
 
           // El respaldo importado puede venir del formato antiguo (sin abonos parciales) — si no trae
@@ -8745,6 +9280,7 @@ ${lineasDeuda}
           await saveKey('importacionHistorica', state.importacionHistorica);
           await saveKey('pagosImpuestos', state.pagosImpuestos);
           await saveKey('tesoreriaUSD', state.tesoreriaUSD);
+          await saveKey('cartola', state.cartola);
 
           showToast(`Importado: ${newIngresos.length} ingresos, ${newGastos.length} gastos, ${newPFCatalogo.length} pagos fijos, ${state.contratosDevengados.length} lotes de venta`);
           render();
@@ -10747,6 +11283,16 @@ ${lineasDeuda}
         console.error('Import error', err);
         showToast('No se pudo importar el archivo. Verifica que sea un respaldo válido exportado desde esta misma app.');
       }
+    }
+    else if(action === 'import-cartola-file'){
+      const files = el.files ? Array.from(el.files) : [];
+      el.value = '';
+      if(files.length === 0) return;
+      await importarCartolas(files);
+    }
+    else if(action === 'cartola-filtro'){
+      state.cartolaFiltro[el.dataset.campo] = el.value;
+      render();
     }
     else if(action === 'import-csv-ingresos-file'){
       const file = el.files && el.files[0];
