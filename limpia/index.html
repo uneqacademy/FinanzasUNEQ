@@ -1751,6 +1751,7 @@
     cartola: { movimientos: [], archivos: [], reglas: [] }, // Cartolas bancarias (se completa al cargar, con las reglas iniciales)
     cartolaFiltro: { mes:'', cuenta:'', estado:'' },
     cartolaMensajes: [],
+    cartolaDividir: null, // { id, partes } — línea de cartola que se está dividiendo
     ingresos: [],
     gastos: [],
     ingresosUSD: [],
@@ -2013,7 +2014,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola'
+    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar'
   ]);
 
   function fmtMoneyShort(v){
@@ -2614,7 +2615,7 @@
     // entre bóvedas (distribución del Profit First, reserva, saldo de Día Cero) — esas no son plata nueva
     // entrando o saliendo del negocio, solo se mueve de un cofre a otro.
     const PREFIJOS_ENTRADA_FLUJO = ['ingreso:', 'giro:', 'sobregiro:'];
-    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:'];
+    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:', 'cartola:'];
     state.tesoreria.movimientos.forEach(mov=>{
       if(!mov.fecha || !esMovimientoVigente(mov)) return;
       const d = new Date(mov.fecha+'T00:00:00');
@@ -2665,7 +2666,7 @@
   // (recién aparece el mes en que de verdad se "Procesa" su pago).
   function getDetalleFlujoMes(anio, mesIdx){
     const PREFIJOS_ENTRADA_FLUJO = ['ingreso:', 'giro:', 'sobregiro:'];
-    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:'];
+    const PREFIJOS_SALIDA_FLUJO = ['gasto:', 'gastoprocesado:', 'pagodeuda:', 'pagoctapagar:', 'pagoimpuesto:', 'cartola:'];
     const ingresos = [];
     const gastos = [];
     state.tesoreria.movimientos.forEach(mov=>{
@@ -3927,6 +3928,7 @@
         <div class="fa-main">${renderTab()}</div>
       </div>
       ${renderConfirmModal()}
+      ${renderCartolaDividirModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
       ${renderMarcarCuotaPagadaModal()}
@@ -5948,7 +5950,7 @@ ${lineasDeuda}
   }
   function cartolaReabrirMov(mov){
     cartolaQuitarEfectos(mov.id);
-    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null;
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null;
   }
 
   // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
@@ -5961,8 +5963,12 @@ ${lineasDeuda}
   }
   // Quita el gasto/ingreso (y su movimiento de Tesorería) que esta línea había creado.
   function cartolaQuitarEfectos(movId){
-    state.gastos.filter(g=> g.origenCartola === movId).forEach(g=> removeTesoreriaGasto(g.id));
+    state.gastos.filter(g=> g.origenCartola === movId).forEach(g=>{
+      removeTesoreriaGasto(g.id);
+      state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${g.id}`);
+    });
     state.gastos = state.gastos.filter(g=> g.origenCartola !== movId);
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> !String(m.origen||'').startsWith(`cartola:${movId}:`));
     state.ingresos.filter(i=> i.origenCartola === movId).forEach(i=> removeTesoreriaIngreso(i.id));
     state.ingresos = state.ingresos.filter(i=> i.origenCartola !== movId);
   }
@@ -5972,13 +5978,19 @@ ${lineasDeuda}
     if(mov.estado !== 'clasificado') return;
     const nombre = cartolaNombreCorto(mov.desc);
     if(mov.tipo === 'gasto' && mov.cargo > 0){
-      cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
-      const gasto = {
-        id: uid('gas'), fecha: mov.fecha, proveedor: nombre, descripcion: `Cartola ${mov.cuenta}: ${nombre}`,
-        categoria: mov.categoria, monto: mov.cargo, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id
-      };
-      state.gastos.push(gasto);
-      syncTesoreriaGasto(gasto);
+      cartolaCrearGasto(mov, mov.cargo, mov.categoria, mov.devengo || '', null, '');
+    } else if(mov.tipo === 'dividido' && mov.cargo > 0){
+      (mov.partes || []).forEach(p=>{
+        if(p.tipo === 'gasto'){
+          cartolaCrearGasto(mov, p.monto, p.categoria, p.devengo, p.id, p.nota);
+        } else {
+          // Pago de una deuda anterior: sale plata (flujo) pero no es un gasto de ningún mes (Estado de Resultados).
+          state.tesoreria.movimientos.push({
+            id: uid('tes'), fecha: mov.fecha, boveda: 'operacion', tipo: 'salida', monto: p.monto,
+            descripcion: `Pago deuda anterior — ${p.nota || nombre}`, origen: `cartola:${mov.id}:${p.id}`
+          });
+        }
+      });
     } else if(mov.tipo === 'ingreso' && mov.abono > 0){
       cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
       const ingreso = {
@@ -5993,6 +6005,31 @@ ${lineasDeuda}
           descripcion: `${mov.categoria} — ${nombre}`, origen: `ingreso:${ingreso.id}`
         });
       }
+    }
+  }
+  // Crea el gasto de una línea (o de una parte). Si el mes de devengo es distinto al mes en que se pagó, el gasto
+  // queda en el mes de devengo (Estado de Resultados) y la salida de plata queda en el mes del pago (Flujo).
+  function cartolaCrearGasto(mov, monto, categoria, devengoYM, parteId, nota){
+    cartolaAsegurarCategoria(state.config.categoriasGastos, categoria);
+    const nombre = cartolaNombreCorto(mov.desc);
+    const ymPago = mov.fecha.slice(0,7);
+    const ym = devengoYM || ymPago;
+    const mismoMes = ym === ymPago;
+    const gasto = {
+      id: uid('gas'), fecha: mismoMes ? mov.fecha : `${ym}-01`, proveedor: nombre,
+      descripcion: `Cartola ${mov.cuenta}: ${nombre}` + (nota ? ` — ${nota}` : '') + (mismoMes ? '' : ` (devengado en ${ym}, pagado el ${fmtDate(mov.fecha)})`),
+      categoria, monto, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id, origenParte: parteId || null
+    };
+    if(mismoMes){
+      state.gastos.push(gasto);
+      syncTesoreriaGasto(gasto);
+    } else {
+      gasto.estado = 'Pagado'; gasto.montoPagado = monto; gasto.fechaPago = mov.fecha;
+      state.gastos.push(gasto);
+      state.tesoreria.movimientos.push({
+        id: uid('tes'), fecha: mov.fecha, boveda: 'operacion', tipo: 'salida', monto,
+        descripcion: `Pago de "${nombre}" (${ym})`, origen: `gastoprocesado:${gasto.id}`
+      });
     }
   }
   async function cartolaGuardarTodo(){
@@ -6064,6 +6101,8 @@ ${lineasDeuda}
     }
     const afectadas = [mov];
     cartolaSetClasificacion(mov, tipo, categoria, regla ? regla.id : null);
+    mov.devengo = (tipo === 'gasto' && form.devengo && form.devengo !== mov.fecha.slice(0,7)) ? form.devengo : '';
+    mov.partes = null;
     if(regla){
       state.cartola.movimientos.forEach(m=>{
         if(m.id === mov.id || m.estado !== 'por_clasificar') return;
@@ -6105,6 +6144,8 @@ ${lineasDeuda}
     if(!fila) return;
     const t = sel.value;
     const g = fila.querySelector('[name="catGasto"]'), i = fila.querySelector('[name="catIngreso"]'), d = fila.querySelector('[name="detalleDeuda"]');
+    const dv = fila.querySelector('[data-wrap="devengo"]');
+    if(dv) dv.style.display = t === 'gasto' ? 'block' : 'none';
     if(g) g.style.display = t === 'gasto' ? '' : 'none';
     if(i) i.style.display = t === 'ingreso' ? '' : 'none';
     if(d) d.style.display = t === 'deuda' ? '' : 'none';
@@ -6126,6 +6167,95 @@ ${lineasDeuda}
       });
     });
     return filas;
+  }
+
+  // ---- Dividir una línea en partes (ej. un pago que incluye meses atrasados o una deuda anterior) ----
+  function renderCartolaDividirModal(){
+    const dv = state.cartolaDividir;
+    if(!dv) return '';
+    const mov = state.cartola.movimientos.find(m=> m.id === dv.id);
+    if(!mov) return '';
+    const suma = dv.partes.reduce((s,p)=> s + (Number(p.monto)||0), 0);
+    const falta = mov.cargo - suma;
+    return `
+      <div class="fa-modal-overlay" data-action="cartola-dividir-cerrar">
+        <div class="fa-modal fa-modal-wide" data-action="confirm-noop" id="fa-cartola-dividir">
+          <div class="fa-modal-title">Dividir pago — ${fmtMoney(mov.cargo)}</div>
+          <div class="fa-hint" style="margin-top:0;">${fmtDate(mov.fecha)} · cuenta ${mov.cuenta} · ${escapeHtml(mov.desc)}</div>
+          <div class="fa-section-note">Reparte este pago en partes. Cada <strong>Gasto</strong> cuenta en el Estado de Resultados en el mes que indiques (el mes al que pertenece), y la salida de plata queda en el mes del pago. Un <strong>Pago de deuda anterior</strong> solo mueve el flujo: no es gasto de ningún mes (por ejemplo, deuda de un año anterior).</div>
+          ${dv.partes.map((p,i)=>`
+          <div data-parte="${i}" style="border:1px solid var(--border); border-radius:10px; padding:10px; margin-bottom:8px;">
+            <div class="fa-form-grid" style="grid-template-columns:repeat(2,1fr);">
+              <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" value="${p.monto||''}" oninput="window.faCartolaDividirSuma()"></div>
+              <div class="fa-field"><label>Tipo</label>
+                <select name="tipo" onchange="window.faCartolaDividirTipo(this)">
+                  <option value="gasto" ${p.tipo==='gasto'?'selected':''}>Gasto (Estado de Resultados + flujo)</option>
+                  <option value="pago_anterior" ${p.tipo==='pago_anterior'?'selected':''}>Pago de deuda anterior (solo flujo)</option>
+                </select></div>
+              <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Categoría</label>
+                <select name="categoria"><option value="">Elige…</option>${state.config.categoriasGastos.map(c=>`<option ${p.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div>
+              <div class="fa-field" data-solo="gasto" style="display:${p.tipo==='gasto'?'':'none'};"><label>Mes al que pertenece</label><input type="month" name="devengo" value="${p.devengo||''}"></div>
+              <div class="fa-field" style="grid-column:1 / -1;"><label>Nota${p.tipo==='gasto'?' (opcional)':' (qué deuda es)'}</label><input type="text" name="nota" value="${escapeHtml(p.nota||'')}" placeholder="Ej: honorarios atrasados, plan de pago 2025"></div>
+            </div>
+            ${dv.partes.length>1 ? `<button type="button" class="fa-icon-btn danger" data-action="cartola-dividir-quitar" data-idx="${i}">Quitar esta parte</button>` : ''}
+          </div>`).join('')}
+          <div class="fa-hint" id="fa-cartola-dividir-falta" style="font-weight:700; color:${falta===0?'var(--income)':'var(--expense)'};">${falta===0?'✓ Está todo repartido.':(falta>0?`Falta repartir ${fmtMoney(falta)}`:`Te pasaste por ${fmtMoney(-falta)}`)}</div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cartola-dividir-mas">+ Agregar parte</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cartola-dividir-cerrar">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="cartola-dividir-guardar">Guardar división</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  // Lee lo que hay escrito en el modal antes de volver a dibujarlo (agregar/quitar partes no pierde nada).
+  function cartolaDividirLeer(){
+    const dv = state.cartolaDividir;
+    const cont = document.getElementById('fa-cartola-dividir');
+    if(!dv || !cont) return;
+    dv.partes = [...cont.querySelectorAll('[data-parte]')].map(row=>{
+      const f = readFields(row);
+      return { monto: Number(f.monto)||0, tipo: f.tipo, categoria: f.categoria||'', devengo: f.devengo||'', nota: f.nota||'' };
+    });
+  }
+  window.faCartolaDividirSuma = function(){
+    const dv = state.cartolaDividir; const cont = document.getElementById('fa-cartola-dividir');
+    if(!dv || !cont) return;
+    const mov = state.cartola.movimientos.find(m=> m.id === dv.id); if(!mov) return;
+    const suma = [...cont.querySelectorAll('[data-parte] [name="monto"]')].reduce((s,el)=> s + (Number(el.value)||0), 0);
+    const falta = mov.cargo - suma;
+    const el = document.getElementById('fa-cartola-dividir-falta');
+    if(el){
+      el.textContent = falta===0 ? '✓ Está todo repartido.' : (falta>0 ? `Falta repartir ${fmtMoney(falta)}` : `Te pasaste por ${fmtMoney(-falta)}`);
+      el.style.color = falta===0 ? 'var(--income)' : 'var(--expense)';
+    }
+  };
+  window.faCartolaDividirTipo = function(sel){
+    const row = sel.closest('[data-parte]'); if(!row) return;
+    row.querySelectorAll('[data-solo="gasto"]').forEach(el=> el.style.display = sel.value === 'gasto' ? '' : 'none');
+  };
+  async function cartolaDividirGuardar(){
+    cartolaDividirLeer();
+    const dv = state.cartolaDividir;
+    const mov = dv && state.cartola.movimientos.find(m=> m.id === dv.id);
+    if(!mov) return;
+    const suma = dv.partes.reduce((s,p)=> s + p.monto, 0);
+    if(suma !== mov.cargo){ showToast(`Las partes suman ${fmtMoney(suma)} y el pago es de ${fmtMoney(mov.cargo)}. Tienen que coincidir exacto.`); return; }
+    for(const [i,p] of dv.partes.entries()){
+      if(!(p.monto > 0)){ showToast(`La parte ${i+1} no tiene monto.`); return; }
+      if(p.tipo === 'gasto' && !p.categoria){ showToast(`Elige la categoría de la parte ${i+1}.`); return; }
+      if(p.tipo === 'gasto' && !/^\d{4}-\d{2}$/.test(p.devengo)){ showToast(`Elige el mes al que pertenece la parte ${i+1}.`); return; }
+      if(p.tipo === 'pago_anterior' && !p.nota.trim()){ showToast(`Escribe en la nota qué deuda es la parte ${i+1}.`); return; }
+    }
+    cartolaQuitarEfectos(mov.id);
+    mov.partes = dv.partes.map(p=> ({ id: uid('parte'), ...p, nota: p.nota.trim() }));
+    mov.devengo = '';
+    cartolaSetClasificacion(mov, 'dividido', `Dividida en ${mov.partes.length} partes`, null);
+    cartolaAplicarEfectos(mov);
+    state.cartolaDividir = null;
+    await cartolaGuardarTodo();
+    showToast('División guardada: cada parte quedó en su mes.');
+    render();
   }
 
   function renderCartolas(){
@@ -6225,7 +6355,7 @@ ${lineasDeuda}
             <tr>
               <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
               <td class="num">${m.abono ? fmtMoney(m.abono) : ''}</td><td class="num">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
-              <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}</td>
+              <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}${m.devengo?` <span class="fa-badge" style="background:#EEF2FF;">devengo ${cartolaMesLabel(m.devengo)}</span>`:''}${(m.partes||[]).length?`<div style="font-size:11.5px; color:var(--ink-soft);">${m.partes.map(p=>`${fmtMoney(p.monto)} · ${p.tipo==='gasto'?`${escapeHtml(p.categoria)} (${cartolaMesLabel(p.devengo)})`:`deuda anterior: ${escapeHtml(p.nota||'')}`}`).join('<br>')}</div>`:''}</td>
               <td><button class="fa-icon-btn" data-action="reabrir-cartola" data-id="${m.id}">Reabrir</button></td>
             </tr>`).join('')}
           </tbody>
@@ -6266,12 +6396,13 @@ ${lineasDeuda}
                 <select name="catGasto" style="display:${defTipo==='gasto'?'':'none'}; margin-top:4px;"><option value="">Categoría de gasto…</option>${catGasto.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
                 <select name="catIngreso" style="display:${defTipo==='ingreso'?'':'none'}; margin-top:4px;"><option value="">Categoría de ingreso…</option>${catIng.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
                 <input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea" style="display:none; margin-top:4px;">
+                <label data-wrap="devengo" style="display:${defTipo==='gasto'?'block':'none'}; margin-top:4px; font-size:11.5px; color:var(--ink-soft);">Mes del gasto (si no es el del pago)<input type="month" name="devengo" style="display:block; width:100%;"></label>
               </td>
               <td style="min-width:190px;">
                 <label style="font-size:11.5px; display:flex; gap:4px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las parecidas</label>
                 <input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(m.desc))}" title="Texto que se buscará en las próximas cartolas" style="margin-top:3px; width:100%;">
               </td>
-              <td><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="asignar-cartola" data-id="${m.id}">Asignar</button></td>
+              <td style="white-space:nowrap;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="asignar-cartola" data-id="${m.id}">Asignar</button>${m.cargo > 0 ? ` <button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="cartola-dividir-abrir" data-id="${m.id}">Dividir…</button>` : ''}</td>
             </tr>`;}).join('')}
           </tbody>
         </table></div>
@@ -8865,6 +8996,31 @@ ${lineasDeuda}
     }
     else if(action === 'reabrir-cartola'){
       await cartolaReabrir(btn.dataset.id);
+    }
+    else if(action === 'cartola-dividir-abrir'){
+      const mov = state.cartola.movimientos.find(m=> m.id === btn.dataset.id);
+      if(!mov || !(mov.cargo > 0)) return;
+      const ym = mov.fecha.slice(0,7);
+      state.cartolaDividir = { id: mov.id, partes: [
+        { monto: mov.cargo, tipo:'gasto', categoria:'', devengo: ym, nota:'' },
+        { monto: 0, tipo:'gasto', categoria:'', devengo: ym, nota:'' }
+      ] };
+      render();
+    }
+    else if(action === 'cartola-dividir-mas'){
+      cartolaDividirLeer();
+      if(state.cartolaDividir){ state.cartolaDividir.partes.push({ monto:0, tipo:'gasto', categoria:'', devengo:'', nota:'' }); render(); }
+    }
+    else if(action === 'cartola-dividir-quitar'){
+      cartolaDividirLeer();
+      if(state.cartolaDividir){ state.cartolaDividir.partes.splice(Number(btn.dataset.idx), 1); render(); }
+    }
+    else if(action === 'cartola-dividir-cerrar'){
+      state.cartolaDividir = null;
+      render();
+    }
+    else if(action === 'cartola-dividir-guardar'){
+      await cartolaDividirGuardar();
     }
     else if(action === 'borrar-regla-cartola'){
       state.cartola.reglas = state.cartola.reglas.filter(r=> r.id !== btn.dataset.id);
