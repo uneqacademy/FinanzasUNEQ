@@ -6153,7 +6153,7 @@ ${lineasDeuda}
   }
   function cartolaReabrirMov(mov){
     cartolaQuitarEfectos(mov.id);
-    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = ''; mov.detalle = null; mov.deudaInfo = null;
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = ''; mov.detalle = null; mov.deudaInfo = null; mov.enlace = null;
   }
 
   // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
@@ -6164,8 +6164,84 @@ ${lineasDeuda}
     if(cat && !lista.includes(cat)){ lista.push(cat); return true; }
     return false;
   }
+  // ---- Enlace con registros manuales: una línea de la cartola puede corresponder a algo que ya anotaste a mano ----
+  // En vez de crear otro gasto/ingreso (que se contaría dos veces), la línea se "enlaza" al registro manual. El enlace
+  // se propone solo, buscando registros del mismo monto y de fechas cercanas.
+  function cartolaCandidatosEnlace(mov){
+    const esCargo = mov.cargo > 0;
+    const monto = esCargo ? mov.cargo : mov.abono;
+    const dias = f=> Math.abs((new Date(f + 'T00:00:00') - new Date(mov.fecha + 'T00:00:00')) / 86400000);
+    const lista = [];
+    if(esCargo){
+      state.gastos.forEach(g=>{
+        if(g.origenCartola || g.enlaceCartola || g.origenPagoDeuda || g.boveda !== 'operacion' || g.monedaOriginal === 'USD') return;
+        if(Math.round(Number(g.monto)||0) === monto && dias(g.fecha) <= 10) lista.push({ tipo:'gasto', id:g.id, dias:dias(g.fecha), etiqueta:`${fmtDate(g.fecha)} · ${g.proveedor || g.categoria} · ${fmtMoney(g.monto)} (gasto)` });
+      });
+      state.deudas.pagos.forEach(p=>{
+        if(p.origenCartola || p.enlaceCartola || (p.cuentaOrigen || 'operacion') !== 'operacion') return;
+        const total = Math.round(Number(p.montoTotalPagado != null ? p.montoTotalPagado : p.montoTotal)||0);
+        const deuda = state.deudas.inventario.find(d=> d.id === p.deudaId);
+        if(total === monto && dias(p.fecha) <= 10) lista.push({ tipo:'pago', id:p.id, dias:dias(p.fecha), etiqueta:`${fmtDate(p.fecha)} · pago de deuda ${deuda ? deuda.nombre : ''} · ${fmtMoney(total)}` });
+      });
+    } else {
+      state.ingresos.forEach(i=>{
+        if(i.origenCartola || i.enlaceCartola || i.moneda === 'USD') return;
+        if(Math.round(Number(i.monto)||0) === monto && dias(i.fecha) <= 10) lista.push({ tipo:'ingreso', id:i.id, dias:dias(i.fecha), etiqueta:`${fmtDate(i.fecha)} · ${i.cliente || i.categoria} · ${fmtMoney(i.monto)} (ingreso)` });
+      });
+    }
+    return lista.sort((a,b)=> a.dias - b.dias);
+  }
+  function cartolaRegistroEnlazable(tipo, id){
+    return tipo === 'gasto' ? state.gastos.find(g=> g.id === id) : tipo === 'ingreso' ? state.ingresos.find(i=> i.id === id) : state.deudas.pagos.find(p=> p.id === id);
+  }
+  function cartolaOrigenTesoreria(tipo, id){
+    return tipo === 'gasto' ? `gasto:${id}` : tipo === 'pago' ? `pagodeuda:${id}` : null;
+  }
+  // Marca el registro manual como enlazado y, si hace falta, lleva su salida de flujo a la fecha real del banco.
+  function cartolaAplicarEnlace(mov){
+    const en = mov.enlace;
+    const rec = cartolaRegistroEnlazable(en.tipo, en.id);
+    if(!rec) return;
+    rec.enlaceCartola = mov.id;
+    const origen = cartolaOrigenTesoreria(en.tipo, en.id);
+    const tm = origen && state.tesoreria.movimientos.find(m=> m.origen === origen);
+    if(tm && tm.fecha !== mov.fecha){ en.fechaFlujoAntes = tm.fecha; tm.fecha = mov.fecha; }
+  }
+  function cartolaQuitarEnlace(movId){
+    const mov = state.cartola.movimientos.find(m=> m.id === movId);
+    [['gasto', state.gastos], ['ingreso', state.ingresos], ['pago', state.deudas.pagos]].forEach(([tipo, lista])=>{
+      lista.filter(r=> r.enlaceCartola === movId).forEach(r=>{
+        delete r.enlaceCartola;
+        const origen = cartolaOrigenTesoreria(tipo, r.id);
+        const tm = origen && state.tesoreria.movimientos.find(m=> m.origen === origen);
+        if(tm && mov && mov.enlace && mov.enlace.fechaFlujoAntes) tm.fecha = mov.enlace.fechaFlujoAntes;
+      });
+    });
+  }
+  async function cartolaEnlazar(mov, valor){
+    const [tipo, id] = String(valor).split(':');
+    const rec = cartolaRegistroEnlazable(tipo, id);
+    if(!rec || (rec.enlaceCartola && rec.enlaceCartola !== mov.id)){ showToast('Ese registro ya no está disponible para enlazar.'); return false; }
+    const cand = cartolaCandidatosEnlace(mov).find(c=> c.tipo === tipo && c.id === id);
+    cartolaQuitarEfectos(mov.id);
+    cartolaSetClasificacion(mov, 'enlazado', 'Enlazado con un registro manual' + (cand ? ': ' + cand.etiqueta : ''), null);
+    mov.enlace = { tipo, id }; mov.detalle = null; mov.deudaInfo = null; mov.devengo = ''; mov.partes = null; mov.proyecto = '';
+    cartolaAplicarEfectos(mov);
+    await cartolaGuardarTodo();
+    showToast('Enlazado: no se creó nada nuevo, así que no se cuenta dos veces.');
+    render();
+    return true;
+  }
+  // Si borras un registro manual que estaba enlazado, la línea de la cartola vuelve a Por clasificar.
+  async function liberarEnlaceCartola(recId){
+    const mov = state.cartola.movimientos.find(m=> m.enlace && m.enlace.id === recId);
+    if(!mov) return;
+    cartolaReabrirMov(mov);
+    await cartolaGuardarTodo();
+  }
   // Quita el gasto/ingreso (y su movimiento de Tesorería) que esta línea había creado.
   function cartolaQuitarEfectos(movId){
+    cartolaQuitarEnlace(movId);
     state.deudas.pagos.filter(p=> p.origenCartola === movId).forEach(p=> revertirPagoDeudaAuto(p.id));
     (state.deudas.giros || []).filter(g=> g.origenCartola === movId).forEach(g=> deleteGiroDeuda(g.id));
     state.gastos.filter(g=> g.origenCartola === movId).forEach(g=>{
@@ -6196,6 +6272,8 @@ ${lineasDeuda}
           });
         }
       });
+    } else if(mov.tipo === 'enlazado' && mov.enlace){
+      cartolaAplicarEnlace(mov);
     } else if(mov.tipo === 'pago_deuda' && mov.cargo > 0 && mov.deudaInfo){
       const di = mov.deudaInfo;
       registrarPagoDeudaAuto(di.deudaId, { fecha: mov.fecha, capital: di.capital, interes: di.interes, mora: di.mora, origenCartola: mov.id });
@@ -6271,6 +6349,15 @@ ${lineasDeuda}
         <div class="fa-modal fa-modal-wide" data-action="confirm-noop" id="fa-cartola-clasificar" style="max-width:640px;">
           <div class="fa-modal-title">Clasificar movimiento — ${fmtMoney(monto)}</div>
           <div class="fa-hint" style="margin-top:0;">Cuenta ${mov.cuenta} · ${escapeHtml(mov.desc)}</div>
+          ${(() => {
+            const cands = cartolaCandidatosEnlace(mov);
+            if(!cands.length) return '';
+            return `<div class="fa-field" style="background:#F0F7FF; border:1px solid #BBD7F5; border-radius:8px; padding:10px; margin:8px 0;">
+              <label>¿Ya lo registraste a mano?</label>
+              <select name="enlazar"><option value="">No, es un movimiento nuevo</option>${cands.map(c=>`<option value="${c.tipo}:${c.id}">${escapeHtml(c.etiqueta)}</option>`).join('')}</select>
+              <div class="fa-hint" style="margin:4px 0 0 0;">Encontré registros manuales del mismo monto y de fechas cercanas. Si eliges uno, queda enlazado y no se crea otro (así no se cuenta dos veces).</div>
+            </div>`;
+          })()}
           <div class="fa-form-grid" style="grid-template-columns:repeat(3,1fr);">
             <div class="fa-field"><label>Fecha</label><input type="text" value="${fmtDate(mov.fecha)}" disabled></div>
             <div class="fa-field"><label>Moneda</label><input type="text" value="CLP" disabled></div>
@@ -6390,6 +6477,7 @@ ${lineasDeuda}
   async function cartolaAsignar(movId, form){
     const mov = state.cartola.movimientos.find(m=>m.id === movId);
     if(!mov){ showToast('No se encontró la línea.'); return; }
+    if(form.enlazar) return await cartolaEnlazar(mov, form.enlazar);
     const tipo = form.tipo;
     let categoria = '';
     let deudaInfo = null;
@@ -6735,7 +6823,7 @@ ${lineasDeuda}
             const defTipo = m.abono > 0 ? 'ingreso' : 'gasto';
             return `
             <tr data-form="cl-${m.id}">
-              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}${m.estado === 'deuda' ? ' <span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Deuda por procesar</span>' : ''}</td>
+              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}${m.estado === 'deuda' ? ' <span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Deuda por procesar</span>' : ''}${cartolaCandidatosEnlace(m).length ? ' <span class="fa-badge" style="background:#E3F1FF; color:#1F5F9E;">Posible enlace</span>' : ''}</td>
               <td class="num" style="color:var(--income);">${m.abono ? fmtMoney(m.abono) : ''}</td>
               <td class="num" style="color:var(--expense);">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
               <td style="white-space:nowrap;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="cartola-clasificar-abrir" data-id="${m.id}">Clasificar…</button>${m.cargo > 0 ? ` <button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="cartola-dividir-abrir" data-id="${m.id}">Dividir…</button>` : ''}</td>
@@ -9644,6 +9732,7 @@ ${lineasDeuda}
         render();
       }
       else if(cd.action === 'do-delete-ingreso-pf'){
+        { const ingAEliminar = state.ingresos.find(i=>i.id===cd.data); if(ingAEliminar && ingAEliminar.enlaceCartola) await liberarEnlaceCartola(cd.data); }
         // Línea de Crédito / Avance: también se deshace su deuda (un avance con pagos no se puede borrar de aquí).
         if(esIngresoPorDeuda(state.ingresos.find(i=>i.id===cd.data))){
           const bloqueo = quitarDeudaDeIngreso(cd.data);
@@ -9734,6 +9823,7 @@ ${lineasDeuda}
       }
       else if(cd.action === 'do-delete-gasto'){
         const gastoAEliminar = state.gastos.find(g=>g.id===cd.data);
+        if(gastoAEliminar && gastoAEliminar.enlaceCartola) await liberarEnlaceCartola(cd.data);
         state.gastos = (await saveKeyMerged('gastos', current => (current||[]).filter(g=>g.id!==cd.data))) ?? state.gastos;
         // V2 — Tesorería: si ese gasto tenía una salida de bóveda CLP u OPEX USD asociada, se quita también
         // (ya sea el camino normal, o el de "Procesar pago" de la Plantilla de Gastos Fijos).
