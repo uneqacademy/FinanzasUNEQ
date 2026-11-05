@@ -526,6 +526,7 @@
   // disparador automático siempre encuentra la MISMA deuda para hacerla crecer o bajar, en vez de crear una
   // nueva cada vez. Nunca se crea a mano desde "Agregar deuda al inventario".
   const SOBREGIRO_OPEX_ID = 'deuda_sobregiro_opex';
+  const SOBREGIRO_CC_ID = 'deuda_sobregiro_cc'; // sobregiro no pactado de la cuenta corriente (lo que excede la línea de crédito)
   // Costo de anticipo de fondos (ej. 0.97% de Hotmart por liquidar antes): también es un gasto financiero,
   // pero en categoría propia para distinguirlo del interés de deudas — ambos cuentan igual en la zona de
   // Gastos Financieros del Estado de Resultados.
@@ -846,6 +847,66 @@
     await saveKey('tesoreria', state.tesoreria, {silent:true});
   }
 
+
+  // ---------------- Cobertura automática: Línea de Crédito y Sobregiro no pactado ----------------
+  // Cada vez que Operación queda en negativo (por una cartola o por un movimiento manual), la app cubre el déficit
+  // sola: primero con la Línea de Crédito (hasta su cupo disponible) y lo que sobre va al Sobregiro no pactado de la
+  // cuenta corriente. Se recalcula completo cada vez desde el libro de Tesorería, así que al corregir o borrar
+  // un movimiento la cobertura se ajusta sola y nunca queda duplicada. Los giros automáticos llevan auto:true.
+  function planCoberturasAuto(){
+    const mov = state.tesoreria.movimientos.filter(m=> m.boveda === 'operacion' && esMovimientoVigente(m) && !(String(m.origen||'').startsWith('giro:') && (state.deudas.giros||[]).some(g=> g.auto && m.origen === 'giro:' + g.id)));
+    const saldoIni = Number((state.tesoreria.saldosIniciales||{}).operacion) || 0;
+    const porFecha = {};
+    mov.forEach(m=>{ (porFecha[m.fecha] = porFecha[m.fecha] || []).push(m); });
+    const lineaDef = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
+    const cupo = lineaDef ? (Number(lineaDef.cupo)||0) : 0;
+    const eventosLinea = [];
+    (state.deudas.giros||[]).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && !g.auto).forEach(g=> eventosLinea.push({ fecha:g.fecha, monto:Number(g.monto)||0 }));
+    state.deudas.pagos.filter(x=> x.deudaId === SOBREGIRO_OPEX_ID).forEach(x=> eventosLinea.push({ fecha:x.fecha, monto:-(Number(x.capital)||0) }));
+    const lineaSaldoEn = f=> Math.max((lineaDef ? Number(lineaDef.montoOriginal)||0 : 0) + eventosLinea.filter(e=> e.fecha <= f).reduce((t,e)=> t + e.monto, 0), 0);
+    const plan = [];
+    let saldo = saldoIni;
+    Object.keys(porFecha).sort().forEach(f=>{
+      porFecha[f].forEach(m=> saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0));
+      if(saldo >= 0) return;
+      const deficit = Math.round(-saldo);
+      const disponible = Math.max(cupo - lineaSaldoEn(f), 0);
+      const aLinea = Math.min(deficit, disponible), aSobregiro = deficit - aLinea;
+      if(aLinea > 0){ plan.push({ fecha:f, deudaId:SOBREGIRO_OPEX_ID, monto:aLinea }); eventosLinea.push({ fecha:f, monto:aLinea }); }
+      if(aSobregiro > 0) plan.push({ fecha:f, deudaId:SOBREGIRO_CC_ID, monto:aSobregiro });
+      saldo = 0;
+    });
+    return plan;
+  }
+  function firmaCoberturas(lista){ return JSON.stringify(lista.map(x=> [x.fecha, x.deudaId, x.monto])); }
+  // Devuelve true si cambió algo (y lo guarda).
+  async function recalcCoberturasAuto(){
+    if(!state.tesoreria || !state.deudas || !state.deudas.inventario || !state.config) return false;
+    if(!state.deudas.giros) state.deudas.giros = [];
+    const actuales = state.deudas.giros.filter(g=> g.auto).sort((a,b)=> a.fecha.localeCompare(b.fecha) || a.deudaId.localeCompare(b.deudaId));
+    const plan = planCoberturasAuto().sort((a,b)=> a.fecha.localeCompare(b.fecha) || a.deudaId.localeCompare(b.deudaId));
+    if(firmaCoberturas(actuales.map(g=> ({fecha:g.fecha, deudaId:g.deudaId, monto:g.monto}))) === firmaCoberturas(plan)) return false;
+    const idsViejos = new Set(actuales.map(g=> 'giro:' + g.id));
+    state.deudas.giros = state.deudas.giros.filter(g=> !g.auto);
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> !idsViejos.has(m.origen));
+    plan.forEach(x=>{
+      let d = state.deudas.inventario.find(y=> y.id === x.deudaId);
+      if(!d){
+        d = { id:SOBREGIRO_CC_ID, nombre:'Sobregiro Cuenta Corriente (no pactado)', categoria:'Sobregiro no pactado', tipoDeuda:'generica', montoOriginal:0, tasaInteres:0, tasaInteresPeriodo:'mensual', cuotaMinima:0, cupo:0, fija:true, fechaVencimiento:'', cronogramaCuotas:null, fechaCreacion: todayISO() };
+        state.deudas.inventario.push(d);
+      }
+      d.activa = true;
+      const giro = { id: uid('giro'), deudaId:x.deudaId, fecha:x.fecha, monto:x.monto, auto:true, origen:'autocobertura',
+        descripcion: x.deudaId === SOBREGIRO_OPEX_ID ? 'Uso automático de la línea de crédito (Operación en negativo)' : 'Sobregiro no pactado (Operación en negativo)' };
+      state.deudas.giros.push(giro);
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha:x.fecha, boveda:'operacion', tipo:'entrada', monto:x.monto,
+        descripcion: (x.deudaId === SOBREGIRO_OPEX_ID ? 'Cobertura automática — Línea de Crédito' : 'Cobertura automática — Sobregiro no pactado'), origen:'giro:' + giro.id });
+    });
+    await saveKey('deudas', state.deudas, {silent:true});
+    await saveKey('tesoreria', state.tesoreria, {silent:true});
+    return true;
+  }
+
   // ---------------- Gasto Retroactivo Impago — de un mes ya cerrado que nunca se pagó ----------------
   // Nunca toca Tesorería (nunca hay bóveda) — en cambio, crea automáticamente una Cuenta por Pagar por el
   // monto completo, usando el mismo mecanismo (origenGasto) que ya usa "Procesar Pago" parcial de Plantilla
@@ -881,7 +942,7 @@
     { id:'sueldos', label:'Sueldos' }, { id:'proveedores', label:'Proveedores' }
   ];
   function esDeudaFija(d){
-    return !!d && (d.id === SOBREGIRO_OPEX_ID || d.id === DEUDA_TC_NACIONAL_ID || d.id === DEUDA_TC_INTERNACIONAL_ID);
+    return !!d && (d.id === SOBREGIRO_OPEX_ID || d.id === SOBREGIRO_CC_ID || d.id === DEUDA_TC_NACIONAL_ID || d.id === DEUDA_TC_INTERNACIONAL_ID);
   }
   // La línea de crédito y las dos tarjetas viven en Deudas desde que defines su cupo en Configuración. Se crean solas
   // y su deuda sube con cada uso y baja con cada pago. El cupo de la tarjeta internacional está en USD; las
@@ -5449,7 +5510,7 @@
         return `
       <div class="fa-card">
         <div class="fa-card-title">💳 Línea de Crédito y Tarjetas</div>
-        <div class="fa-section-note">Se crean solas con los cupos que defines en Configuración. Su deuda sube cuando las usas y baja cuando las pagas.</div>
+        <div class="fa-section-note">Se crean solas con los cupos que defines en Configuración. Su deuda sube cuando las usas y baja cuando las pagas. Si Operación queda en negativo, la app usa sola la línea de crédito y, si no alcanza, registra el Sobregiro no pactado de la cuenta corriente.</div>
         ${fijas.length === 0 ? `<div class="fa-empty">Aún no defines cupos. Ponlos en Configuración > Cupos de Línea de Crédito y Tarjetas.</div>` : `
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:14px;">
           ${fijas.map(d=>{
@@ -5462,7 +5523,7 @@
             <div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':'var(--ink-soft)'};">${fmtMoneyC(usado)}</div>
             <div class="fa-hint" style="margin:0 0 8px 0;">Deuda actual</div>
             ${d.cupoEnUSD ? '' : `<div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;"><div style="background:${pct>=80?'var(--expense)':'var(--ink-soft)'}; height:100%; width:${pct.toFixed(0)}%;"></div></div>`}
-            <div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(Math.max(cupo-usado,0))}</strong>`}</div>
+            ${d.id===SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Sobregiro no pactado: sin cupo. Se genera solo cuando Operación queda en negativo y la línea de crédito no alcanza.</div>' : ''}<div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(Math.max(cupo-usado,0))}</strong>`}</div>
             <div class="fa-form-actions" style="margin-top:10px;">
               <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
             </div>
@@ -12136,6 +12197,7 @@ ${lineasDeuda}
         render();
       }
     }
+    if(!state.readOnly && await recalcCoberturasAuto()) render();
     } catch(err){
       console.error('Error en click', action, err);
       showToast('Ocurrió un error inesperado. Si persiste, avísale a Claude con este detalle: ' + (err && err.message ? err.message : String(err)));
@@ -12299,6 +12361,7 @@ ${lineasDeuda}
       else ids.forEach(id=>state.selected.gastos.delete(id));
       render();
     }
+    if(!state.readOnly && await recalcCoberturasAuto()) render();
     } catch(err){
       console.error('Error en change', action, err);
       showToast('Ocurrió un error inesperado. Si persiste, avísale a Claude con este detalle: ' + (err && err.message ? err.message : String(err)));
