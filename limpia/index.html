@@ -865,9 +865,106 @@
   // Deudas activas ordenadas para la estrategia Bola de Nieve: de MENOR a MAYOR saldo actual (no por tasa de
   // interés — a propósito, así funciona la Bola de Nieve). La primera de la lista es el "Objetivo Principal".
   // Cada deuda viene con su saldo, % de progreso y proyección ya calculados, listos para pintar.
+  // ---------------- Deudas: línea de crédito y tarjetas con cupo, y pagos que se aplican solos ----------------
+  const DEUDA_TC_NACIONAL_ID = 'deuda_tc_nacional';
+  const DEUDA_TC_INTERNACIONAL_ID = 'deuda_tc_internacional';
+  const TIPOS_ACREEDOR = [
+    { id:'banco', label:'Banco' }, { id:'persona', label:'Persona' }, { id:'inversionista', label:'Inversionista' },
+    { id:'sueldos', label:'Sueldos' }, { id:'proveedores', label:'Proveedores' }
+  ];
+  function esDeudaFija(d){
+    return !!d && (d.id === SOBREGIRO_OPEX_ID || d.id === DEUDA_TC_NACIONAL_ID || d.id === DEUDA_TC_INTERNACIONAL_ID);
+  }
+  // La línea de crédito y las dos tarjetas viven en Deudas desde que defines su cupo en Configuración. Se crean solas
+  // y su deuda sube con cada uso y baja con cada pago. El cupo de la tarjeta internacional está en USD; las
+  // deudas se llevan siempre en CLP.
+  function asegurarDeudasFijas(){
+    if(!state.deudas || !state.deudas.inventario) return;
+    const cupos = (state.config && state.config.cupos) || {};
+    [
+      { id:SOBREGIRO_OPEX_ID, nombre:'Línea de Crédito', categoria:'Línea de Crédito', tipoDeuda:'sobregiro', cupo:Number(cupos.lineaCredito)||0 },
+      { id:DEUDA_TC_NACIONAL_ID, nombre:'Tarjeta de Crédito Nacional', categoria:'Tarjeta de Crédito', tipoDeuda:'generica', cupo:Number(cupos.tcNacional)||0 },
+      { id:DEUDA_TC_INTERNACIONAL_ID, nombre:'Tarjeta de Crédito Internacional', categoria:'Tarjeta de Crédito', tipoDeuda:'generica', cupo:Number(cupos.tcInternacionalUSD)||0, cupoEnUSD:true }
+    ].forEach(def=>{
+      let d = state.deudas.inventario.find(x=> x.id === def.id);
+      if(!d){
+        if(!(def.cupo > 0)) return;
+        d = { ...def, montoOriginal:0, tasaInteres:0, tasaInteresPeriodo:'mensual', cuotaMinima:0, fechaVencimiento:'', cronogramaCuotas:null, fechaCreacion: todayISO() };
+        state.deudas.inventario.push(d);
+      } else {
+        d.cupo = def.cupo; d.nombre = def.nombre; d.categoria = def.categoria;
+        if(def.cupoEnUSD) d.cupoEnUSD = true;
+      }
+      d.fija = true; d.activa = true;
+    });
+  }
+  // Paga una deuda. Capital + interés (la cuota) se aplica primero a la cuota más atrasada y sigue hacia las siguientes;
+  // el interés y la mora van a Gastos Financieros (Estado de Resultados) y el total sale del flujo.
+  function registrarPagoDeudaAuto(deudaId, o){
+    const deuda = state.deudas.inventario.find(d=> d.id === deudaId);
+    if(!deuda) return null;
+    const capital = Number(o.capital)||0, interes = Number(o.interes)||0, mora = Number(o.mora)||0;
+    const total = capital + interes + mora;
+    const cuentaOrigen = o.cuentaOrigen || 'operacion';
+    const pago = { id: uid('pagodeuda'), deudaId, fecha: o.fecha, montoTotal: capital + interes, montoTotalPagado: total, capital, interes, interesMora: mora, cuentaOrigen, origenCartola: o.origenCartola || null, aplicaciones: [] };
+    let porAplicar = capital + interes;
+    (deuda.cronogramaCuotas || []).filter(c=> c.estado === 'Pendiente')
+      .sort((a,b)=> (a.fechaEsperada||'').localeCompare(b.fechaEsperada||'') || a.numero - b.numero)
+      .forEach(c=>{
+        if(porAplicar <= 0) return;
+        const restante = Number(c.montoEsperado)||0;
+        if(porAplicar >= restante){
+          pago.aplicaciones.push({ cuotaId: c.id, monto: restante, completa: true });
+          porAplicar -= restante; c.estado = 'Pagada'; c.pagoId = pago.id;
+        } else {
+          pago.aplicaciones.push({ cuotaId: c.id, monto: porAplicar, completa: false });
+          c.montoEsperado = restante - porAplicar; porAplicar = 0;
+        }
+      });
+    state.deudas.pagos.push(pago);
+    if(!esDeudaFija(deuda) && getSaldoDeuda(deudaId) <= 0) deuda.activa = false;
+    state.tesoreria.movimientos.push({
+      id: uid('tes'), fecha: o.fecha, boveda: cuentaOrigen, tipo:'salida', monto: total,
+      descripcion: `Pago de deuda — ${deuda.nombre}`, origen:`pagodeuda:${pago.id}`
+    });
+    [['Interés', interes], ['Interés por mora', mora]].forEach(([etiqueta, monto])=>{
+      if(monto > 0) state.gastos.push({
+        id: uid('gas'), fecha: o.fecha, categoria: CAT_GASTO_FINANCIERO, proveedor: deuda.nombre,
+        descripcion: `${etiqueta} — ${deuda.nombre}`, monto, metodo: 'Cargo Automático Cuenta Corriente', origenPagoDeuda: pago.id
+      });
+    });
+    return pago;
+  }
+  // Deshace un pago hecho con registrarPagoDeudaAuto: devuelve las cuotas a como estaban y quita todo lo que generó.
+  function revertirPagoDeudaAuto(pagoId){
+    const pago = state.deudas.pagos.find(p=> p.id === pagoId);
+    if(!pago) return;
+    const deuda = state.deudas.inventario.find(d=> d.id === pago.deudaId);
+    (pago.aplicaciones || []).forEach(a=>{
+      const c = deuda && (deuda.cronogramaCuotas || []).find(x=> x.id === a.cuotaId);
+      if(!c) return;
+      if(a.completa){ c.estado = 'Pendiente'; c.pagoId = null; } else { c.montoEsperado = (Number(c.montoEsperado)||0) + a.monto; }
+    });
+    deletePagoDeuda(pagoId);
+    if(deuda && !deuda.activa && getSaldoDeuda(deuda.id) > 0) deuda.activa = true;
+  }
+  // Uso de la línea de crédito: la deuda sube y la plata entra a Operación (flujo).
+  function registrarGiroDeudaAuto(deudaId, o){
+    const deuda = state.deudas.inventario.find(d=> d.id === deudaId);
+    if(!deuda) return null;
+    const giro = { id: uid('giro'), deudaId, fecha: o.fecha, monto: Number(o.monto)||0, descripcion: 'Uso de línea de crédito', origen: 'linea_credito', origenCartola: o.origenCartola || null };
+    state.deudas.giros.push(giro);
+    state.tesoreria.movimientos.push({
+      id: uid('tes'), fecha: o.fecha, boveda: 'operacion', tipo:'entrada', monto: giro.monto,
+      descripcion: `Uso de ${deuda.nombre}`, origen:`giro:${giro.id}`
+    });
+    deuda.activa = true;
+    return giro;
+  }
+
   function getDeudasBolaDeNieve(){
     return state.deudas.inventario
-      .filter(d=>d.activa)
+      .filter(d=>d.activa && !esDeudaFija(d))
       .map(d=>{
         const saldo = getSaldoDeuda(d.id);
         const montoOriginal = Number(d.montoOriginal)||0;
@@ -2476,6 +2573,7 @@
       if(!state.deudas.inventario) state.deudas.inventario = [];
       if(!state.deudas.pagos) state.deudas.pagos = [];
       if(!state.deudas.giros) state.deudas.giros = [];
+      asegurarDeudasFijas();
       state.contratosDevengados = contratosDevengados || [];
       state.plantillasGastosFijos = plantillasGastosFijos || [];
       state.cuentasPorPagar = cuentasPorPagar || { items: [], pagos: [] };
@@ -3753,6 +3851,17 @@
   // - Si comisionBloqueada ("Dinero Limpio"), deshabilita y fuerza en 0 la Comisión por Cuota.
   // Muestra el bloque de campos correcto según el Tipo de Deuda elegido al crearla: Genérica (como siempre
   // fue), Persona/Proveedor, o Banco — cada uno con su propio conjunto de campos.
+  // Formulario de deuda: muestra los campos que corresponden al tipo de acreedor y, si es banco, a qué es.
+  window.faToggleAcreedor = function(){
+    const tipo = (document.getElementById('fa-deuda-acreedor')||{}).value;
+    const sub = (document.getElementById('fa-deuda-subtipo')||{}).value;
+    const esBanco = tipo === 'banco';
+    const mostrar = (id, v)=>{ const el = document.getElementById(id); if(el) el.style.display = v ? '' : 'none'; };
+    mostrar('fa-deuda-subtipo-wrap', esBanco);
+    mostrar('fa-deuda-cc-wrap', esBanco && sub === 'credito_comercial');
+    mostrar('fa-deuda-fija-wrap', esBanco && sub !== 'credito_comercial');
+    mostrar('fa-deuda-otra-wrap', !esBanco);
+  };
   window.faToggleTipoDeuda = function(){
     const tipo = document.getElementById('fa-deuda-tipo');
     const genericaWrap = document.getElementById('fa-deuda-generica-wrap');
@@ -5121,7 +5230,8 @@
   function renderGestionDeudas(){
     const deudas = getDeudasBolaDeNieve(); // ya ordenadas de menor a mayor saldo
     const deudasLiquidadas = state.deudas.inventario.filter(d=> !d.activa);
-    const deudaTotalPendiente = deudas.reduce((s,d)=>s+d.saldo,0);
+    asegurarDeudasFijas();
+    const deudaTotalPendiente = deudas.reduce((s,d)=>s+d.saldo,0) + state.deudas.inventario.filter(esDeudaFija).reduce((t,d)=> t + getSaldoDeuda(d.id), 0);
     const objetivoPrincipal = deudas[0];
     const saldoGanancia = getSaldoBoveda('ganancia');
 
@@ -5147,25 +5257,30 @@
       </div>
 
       ${(() => {
-        const saldoTarjeta = getSaldoTarjeta();
-        if(saldoTarjeta <= 0) return '';
-        // La Tarjeta de Crédito se calcula sola (compras con ese método, menos pagos) — no vive en el
-        // inventario de deudas como las demás, así que se muestra aparte, con un enlace directo a su
-        // pantalla propia (dentro de Flujo de Caja) para ver el detalle y registrar el pago.
+        const fijas = state.deudas.inventario.filter(esDeudaFija);
         return `
-        <div class="fa-card" style="border:1.5px solid var(--expense); background:#FFF5F5;">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-            <div>
-              <div style="font-weight:700; font-size:14px;">💳 Tarjeta de Crédito</div>
-              <div class="fa-hint" style="margin:2px 0 0 0;">Se va sumando sola con cada compra que pagues con este método, y baja con cada pago que registres.</div>
+      <div class="fa-card">
+        <div class="fa-card-title">💳 Línea de Crédito y Tarjetas</div>
+        <div class="fa-section-note">Se crean solas con los cupos que defines en Configuración. Su deuda sube cuando las usas y baja cuando las pagas.</div>
+        ${fijas.length === 0 ? `<div class="fa-empty">Aún no defines cupos. Ponlos en Configuración > Cupos de Línea de Crédito y Tarjetas.</div>` : `
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:14px;">
+          ${fijas.map(d=>{
+            const usado = getSaldoDeuda(d.id);
+            const cupo = Number(d.cupo)||0;
+            const pct = (!d.cupoEnUSD && cupo > 0) ? Math.min(usado/cupo*100, 100) : 0;
+            return `
+          <div style="border:1.5px solid var(--border); border-radius:12px; padding:16px;">
+            <div style="font-weight:700; font-size:14px; margin-bottom:8px;">${escapeHtml(d.nombre)}</div>
+            <div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':'var(--ink-soft)'};">${fmtMoneyC(usado)}</div>
+            <div class="fa-hint" style="margin:0 0 8px 0;">Deuda actual</div>
+            ${d.cupoEnUSD ? '' : `<div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;"><div style="background:${pct>=80?'var(--expense)':'var(--ink-soft)'}; height:100%; width:${pct.toFixed(0)}%;"></div></div>`}
+            <div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(Math.max(cupo-usado,0))}</strong>`}</div>
+            <div class="fa-form-actions" style="margin-top:10px;">
+              <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
             </div>
-            <div style="text-align:right;">
-              <div class="fa-kpi-value expense money" style="font-size:20px;">${fmtMoneyC(saldoTarjeta)}</div>
-              <button type="button" class="fa-btn fa-btn-primary" style="margin-top:6px;" data-action="ir-a-tarjeta">Ver detalle y pagar</button>
-            </div>
-          </div>
-        </div>
-        `;
+          </div>`;}).join('')}
+        </div>`}
+      </div>`;
       })()}
 
       ${deudas.length===0 ? `<div class="fa-card"><div class="fa-empty">Aún no registras deudas activas. Agrega la primera abajo.</div></div>` : `
@@ -5313,56 +5428,8 @@
         })()}
       </div>
 
-      ${(() => {
-        const tarjetasCredito = state.deudas.inventario.filter(d=> d.activa && d.categoria==='Tarjeta de Crédito');
-        const categoriasGasto = (state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).concat(
-          state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT
-        ).concat(
-          state.config.categoriasGastos.filter(c=> !(state.config.categoriasCostoDirecto||CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(c) && !(state.config.categoriasEgresoFlujo||CATEGORIAS_EGRESO_FLUJO_DEFAULT).includes(c) && c!==CAT_GASTO_FINANCIERO)
-        );
-        const sobregiro = state.deudas.inventario.find(d=>d.id===SOBREGIRO_OPEX_ID);
-        const saldoSobregiro = sobregiro ? getSaldoDeuda(SOBREGIRO_OPEX_ID) : 0;
-        const cupo = sobregiro ? (Number(sobregiro.cupo)||0) : 0;
-        const pctUsado = cupo>0 ? Math.min(saldoSobregiro/cupo*100, 100) : 0;
-        return `
       <div class="fa-card">
-        <div class="fa-card-title">🚨 Sobregiro / Línea de Crédito Activa — OPEX</div>
-        <div class="fa-section-note">El sobregiro automático está desactivado: si un Gasto pagado desde OPEX deja esa bóveda en negativo, el saldo queda en negativo y la línea NO se usa sola. Cuando uses la línea de verdad, regístralo en Ingresos y Distribución como ingreso "Línea de Crédito" (sube esta deuda y entra a Operación). Para pagarla (abono parcial o total), usa el formulario de pago más abajo, en su tarjeta.</div>
-        <div class="fa-form-grid" style="max-width:500px;">
-          <div class="fa-field"><label>Cupo de la línea (tope máximo permitido)</label><input type="number" id="fa-cupo-sobregiro" min="0" step="1" placeholder="Ej: 1000000" value="${cupo||''}"></div>
-        </div>
-        <div class="fa-form-actions">
-          <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-cupo-sobregiro">Guardar cupo</button>
-        </div>
-        ${sobregiro && sobregiro.activa ? `
-        <div class="fa-hint" style="margin-top:10px;">Saldo actual: <strong>${fmtMoneyC(saldoSobregiro)}</strong> de un cupo de <strong>${fmtMoney(cupo)}</strong> (${pctUsado.toFixed(0)}% usado)</div>
-        ` : `<div class="fa-hint" style="margin-top:10px;">Sin uso por ahora — el saldo está en $0.</div>`}
-      </div>
-
-      <div class="fa-card">
-        <div class="fa-card-title">💳 Gasto con Tarjeta de Crédito (sin salida de caja inmediata)</div>
-        <div class="fa-section-note">Se registra YA como Gasto en Estado de Resultados y aumenta la deuda de la tarjeta — pero NO descuenta nada de Tesorería todavía. Eso ocurre solo cuando pagues la facturación (botón "Registrar pago" en la tarjeta correspondiente, más abajo).</div>
-        ${tarjetasCredito.length===0 ? `<div class="fa-hint">No tienes ninguna deuda activa categorizada "Tarjeta de Crédito" todavía — créala primero abajo en "Agregar deuda al inventario".</div>` : `
-        <div data-form="gasto-tarjeta-credito">
-          <div class="fa-form-grid">
-            <div class="fa-field"><label>Tarjeta</label>
-              <select name="deudaId">${tarjetasCredito.map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)}</option>`).join('')}</select>
-            </div>
-            <div class="fa-field"><label>Fecha</label><input type="date" name="fecha" value="${todayISO()}"></div>
-            <div class="fa-field"><label>Categoría del gasto</label>
-              <select name="categoria">${categoriasGasto.map(c=>`<option>${escapeHtml(c)}</option>`).join('')}</select>
-            </div>
-            <div class="fa-field"><label>Monto</label><input type="number" name="monto" min="0" step="1" placeholder="0"></div>
-            <div class="fa-field"><label>Proveedor / Detalle</label><input type="text" name="proveedor" placeholder="Ej: Meta Ads"></div>
-          </div>
-          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-gasto-tarjeta-credito">Registrar gasto con tarjeta</button></div>
-        </div>`}
-      </div>
-        `;
-      })()}
-
-      <div class="fa-card">
-        <div class="fa-card-title">${state.editingDeudaId ? 'Editar deuda' : 'Agregar deuda al inventario'}</div>
+        <div class="fa-card-title">${state.editingDeudaId ? 'Editar deuda' : 'Agregar deuda'}</div>
         ${(() => {
           const editingD = state.editingDeudaId ? state.deudas.inventario.find(d=>d.id===state.editingDeudaId) : null;
           if(editingD){
@@ -5415,76 +5482,44 @@
           return `
         <div data-form="deuda">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre de la Deuda</label><input type="text" name="nombre" placeholder="Ej: Tarjeta Banco Estado"></div>
-            <div class="fa-field"><label>Tipo de Deuda</label>
-              <select name="tipoDeuda" id="fa-deuda-tipo" onchange="window.faToggleTipoDeuda()">
-                <option value="generica">Genérica (Tarjeta/Línea de Crédito, etc.)</option>
-                <option value="persona">Persona / Proveedor</option>
-                <option value="banco">Banco</option>
+            <div class="fa-field"><label>Nombre del acreedor</label><input type="text" name="nombre" placeholder="Ej: Banco Itaú, Juan Pérez"></div>
+            <div class="fa-field"><label>Tipo de deuda</label>
+              <select name="tipoAcreedor" id="fa-deuda-acreedor" onchange="window.faToggleAcreedor()">
+                ${TIPOS_ACREEDOR.map(t=>`<option value="${t.id}">${t.label}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field" id="fa-deuda-subtipo-wrap"><label>¿Qué es?</label>
+              <select name="subtipoBanco" id="fa-deuda-subtipo" onchange="window.faToggleAcreedor()">
+                <option value="credito_comercial">Crédito Comercial</option>
+                <option value="linea">Línea de Crédito</option>
+                <option value="tarjeta">Tarjeta de Crédito</option>
               </select>
             </div>
           </div>
 
-          <div id="fa-deuda-generica-wrap">
-            <div class="fa-form-grid">
-              <div class="fa-field"><label>Monto Total Adeudado</label><input type="number" name="montoOriginal" min="0" step="1" placeholder="0"></div>
-              <div class="fa-field"><label>Tasa de Interés</label><input type="number" name="tasaInteres" min="0" step="0.01" placeholder="Ej: 2.5"></div>
-              <div class="fa-field"><label>Período de la tasa</label>
-                <select name="tasaInteresPeriodo">
-                  <option value="mensual">Mensual</option>
-                  <option value="anual">Anual</option>
-                </select>
-              </div>
-              <div class="fa-field"><label>Cuota Mínima Mensual</label><input type="number" name="cuotaMinima" min="0" step="1" placeholder="0"></div>
-              <div class="fa-field"><label>Fecha de Vencimiento</label><input type="date" name="fechaVencimiento"></div>
-              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Tarjeta de Crédito, Línea de Crédito"></div>
-              <div class="fa-field"><label>Cupo total (opcional, solo tarjetas/líneas de crédito)</label><input type="number" name="cupo" min="0" step="1" placeholder="Déjalo vacío si no aplica"></div>
-            </div>
-          </div>
-
-          <div id="fa-deuda-persona-wrap" style="display:none;">
-            <div class="fa-form-grid">
-              <div class="fa-field"><label>Monto Total Deuda</label><input type="number" name="montoTotalPersona" min="0" step="1" placeholder="0"></div>
-              <div class="fa-field"><label>Fecha de Vencimiento (opcional)</label><input type="date" name="fechaVencimiento"></div>
-              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Deuda con proveedor"></div>
-            </div>
-            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:6px;">
-              <input type="checkbox" name="personaConCuotas" id="fa-persona-con-cuotas" onchange="window.faTogglePersonaCuotas()">
-              ¿Se paga en cuotas?
-            </label>
-            <div id="fa-persona-con-cuotas-wrap" style="display:none; margin-top:8px;">
-              <div class="fa-form-grid">
-                <div class="fa-field"><label>Monto por Cuota (aprox.)</label><input type="number" name="montoPorCuotaPersona" min="0" step="1" placeholder="Ej: 300000"></div>
-                <div class="fa-field"><label>Fecha de la Cuota 1</label><input type="date" name="fechaCuota1Persona" value="${todayISO()}"></div>
-              </div>
-              <div class="fa-hint">El sistema calcula cuántas cuotas hacen falta (redondeando hacia arriba) y reparte el Monto Total exacto entre ellas — el monto real de cada cuota puede quedar un poco distinto al que escribiste aquí. Editable después, cuota por cuota, si no calzan como esperabas.</div>
-            </div>
-            <div id="fa-persona-sin-cuotas-wrap" style="display:none; margin-top:8px;">
-              <div class="fa-form-grid">
-                <div class="fa-field"><label>Fecha de Pago Comprometida</label><input type="date" name="fechaCompromisoPersona" value="${todayISO()}"></div>
-                <div class="fa-field"><label>Interés a Pagar (opcional)</label><input type="number" name="interesComprometidoPersona" min="0" step="1" placeholder="0"></div>
-              </div>
-              <div class="fa-hint">Solo informativo — al pagarla de verdad, usas "Registrar pago" e ingresas el capital/interés real de ese momento.</div>
-            </div>
-          </div>
-
-          <div id="fa-deuda-banco-wrap" style="display:none;">
+          <div id="fa-deuda-cc-wrap">
             <div class="fa-form-grid">
               <div class="fa-field"><label>Saldo Insoluto</label><input type="number" name="saldoInsolutoBanco" min="0" step="1" placeholder="0"></div>
-              <div class="fa-field"><label>Cuotas por Pagar</label><input type="number" name="cuotasPorPagarBanco" min="1" step="1" placeholder="Ej: 12"></div>
-              <div class="fa-field"><label>Monto Total Cuota (fijo, se repite en todas)</label><input type="number" name="montoCuotaBanco" min="0" step="1" placeholder="0"></div>
-              <div class="fa-field"><label>Fecha de la Cuota 1</label><input type="date" name="fechaCuota1Banco" value="${todayISO()}"></div>
-              <div class="fa-field"><label>Fecha de Vencimiento final (opcional)</label><input type="date" name="fechaVencimiento"></div>
-              <div class="fa-field"><label>Categoría</label><input type="text" name="categoria" placeholder="Ej: Crédito Consumo Banco Estado"></div>
+              <div class="fa-field"><label>Cuotas restantes por pagar</label><input type="number" name="cuotasPorPagarBanco" min="1" step="1" placeholder="Ej: 12"></div>
+              <div class="fa-field"><label>Monto completo de cada cuota</label><input type="number" name="montoCuotaBanco" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Fecha de la primera cuota</label><input type="date" name="fechaCuota1Banco" value="${todayISO()}"></div>
             </div>
-            <div class="fa-hint">El Monto Total de la Cuota nunca cambia — al pagar cada una, desglosas Capital / Interés / Interés por Mora (editable si el desglose cambia).</div>
+            <div class="fa-hint">Al pagar cada cuota, desglosas capital, interés e interés por mora. Solo el interés llega al Estado de Resultados; el total sale del flujo.</div>
           </div>
 
-          <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:10px;">
-            <input type="checkbox" name="esCargaInicial">
-            Es una <strong>Carga Inicial de Pasivos</strong> (deuda de arrastre, con saldo ya vigente al Día Cero)
-          </label>
-          <div class="fa-hint">Sus pagos SIEMPRE saldrán de Operación (sin poder elegir otra bóveda) y nunca generarán un nuevo Gasto Financiero en Estado de Resultados — su costo ya es histórico, anterior al Día Cero.</div>
+          <div id="fa-deuda-fija-wrap" style="display:none;">
+            <div class="fa-hint" style="margin-top:0;">La línea de crédito y las tarjetas se actualizan solas: la tarjeta sube con cada gasto hecho con ella y la línea cuando se usa. Solo define sus cupos en Configuración > Cupos de Línea de Crédito y Tarjetas.</div>
+          </div>
+
+          <div id="fa-deuda-otra-wrap" style="display:none;">
+            <div class="fa-form-grid">
+              <div class="fa-field"><label>Monto adeudado</label><input type="number" name="montoAdeudado" min="0" step="1" placeholder="0"></div>
+              <div class="fa-field"><label>Número de cuotas</label><input type="number" name="numeroCuotas" min="1" step="1" value="1"></div>
+              <div class="fa-field"><label>Fecha de la primera cuota</label><input type="date" name="fechaCuota1" value="${todayISO()}"></div>
+            </div>
+            <div class="fa-hint">El monto se reparte en partes iguales entre las cuotas; cada una se puede editar después.</div>
+          </div>
+
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-deuda">Agregar deuda</button>
           </div>
@@ -5822,6 +5857,8 @@ ${lineasDeuda}
     { id:'gasto',    label:'Gasto' },
     { id:'ingreso',  label:'Ingreso' },
     { id:'traspaso', label:'Traspaso entre mis cuentas' },
+    { id:'pago_deuda', label:'Pago de deuda (la reduce)' },
+    { id:'giro_linea', label:'Uso de la línea de crédito (la sube)' },
     { id:'deuda',    label:'Deuda (se procesa después)' },
     { id:'ignorar',  label:'Ignorar' }
   ];
@@ -5985,7 +6022,7 @@ ${lineasDeuda}
   }
   function cartolaReabrirMov(mov){
     cartolaQuitarEfectos(mov.id);
-    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = ''; mov.detalle = null;
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = ''; mov.detalle = null; mov.deudaInfo = null;
   }
 
   // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
@@ -5998,6 +6035,8 @@ ${lineasDeuda}
   }
   // Quita el gasto/ingreso (y su movimiento de Tesorería) que esta línea había creado.
   function cartolaQuitarEfectos(movId){
+    state.deudas.pagos.filter(p=> p.origenCartola === movId).forEach(p=> revertirPagoDeudaAuto(p.id));
+    (state.deudas.giros || []).filter(g=> g.origenCartola === movId).forEach(g=> deleteGiroDeuda(g.id));
     state.gastos.filter(g=> g.origenCartola === movId).forEach(g=>{
       removeTesoreriaGasto(g.id);
       state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${g.id}`);
@@ -6026,6 +6065,11 @@ ${lineasDeuda}
           });
         }
       });
+    } else if(mov.tipo === 'pago_deuda' && mov.cargo > 0 && mov.deudaInfo){
+      const di = mov.deudaInfo;
+      registrarPagoDeudaAuto(di.deudaId, { fecha: mov.fecha, capital: di.capital, interes: di.interes, mora: di.mora, origenCartola: mov.id });
+    } else if(mov.tipo === 'giro_linea' && mov.abono > 0 && mov.deudaInfo){
+      registrarGiroDeudaAuto(mov.deudaInfo.deudaId, { fecha: mov.fecha, monto: mov.abono, origenCartola: mov.id });
     } else if(mov.tipo === 'ingreso' && mov.abono > 0){
       cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
       const ingreso = {
@@ -6074,7 +6118,8 @@ ${lineasDeuda}
   function cartolaAbrirClasificar(movId){
     const mov = state.cartola.movimientos.find(m=> m.id === movId);
     if(!mov) return;
-    state.cartolaClasificar = { id: mov.id, tipo: mov.cargo > 0 ? 'gasto' : 'ingreso' };
+    const tipo = mov.estado === 'deuda' ? (mov.cargo > 0 ? 'pago_deuda' : 'giro_linea') : (mov.cargo > 0 ? 'gasto' : 'ingreso');
+    state.cartolaClasificar = { id: mov.id, tipo };
     render();
   }
   function renderCartolaClasificarModal(){
@@ -6128,8 +6173,15 @@ ${lineasDeuda}
             <div class="fa-field" ${ver('gasto','ingreso')}><label>Proyecto / Evento (opcional)</label>
               <select name="proyecto">${opcionesProyecto('')}</select>
             </div>
+            <div class="fa-field" ${ver('pago_deuda','giro_linea')}><label>¿Qué deuda?</label>
+              <select name="deudaId"><option value="">Elige la deuda…</option>${state.deudas.inventario.filter(d=> d.activa || esDeudaFija(d)).map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)} (saldo ${fmtMoney(getSaldoDeuda(d.id))})</option>`).join('')}</select>
+            </div>
+            <div class="fa-field" ${ver('pago_deuda')}><label>Capital</label><input type="number" name="capital" min="0" step="1" value="${esCargo ? monto : ''}"></div>
+            <div class="fa-field" ${ver('pago_deuda')}><label>Interés (va a Estado de Resultados)</label><input type="number" name="interes" min="0" step="1" value="0"></div>
+            <div class="fa-field" ${ver('pago_deuda')}><label>Interés por mora (va a Estado de Resultados)</label><input type="number" name="mora" min="0" step="1" value="0"></div>
             <div class="fa-field" ${ver('deuda')}><label>Detalle de la deuda</label><input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea"></div>
           </div>
+          <div class="fa-hint" ${ver('pago_deuda')}>Capital + interés + mora tienen que sumar exactamente el cargo del banco. El pago se aplica a la cuota más atrasada primero. Solo el interés y la mora llegan al Estado de Resultados.</div>
           <div ${ver('gasto')}>
             <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%):</div>
             <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
@@ -6167,6 +6219,7 @@ ${lineasDeuda}
     await saveKey('ingresos', state.ingresos);
     await saveKey('tesoreria', state.tesoreria, {silent:true});
     await saveKey('config', state.config, {silent:true});
+    await saveKey('deudas', state.deudas, {silent:true});
   }
 
   async function importarCartolas(files){
@@ -6208,6 +6261,7 @@ ${lineasDeuda}
     if(!mov){ showToast('No se encontró la línea.'); return; }
     const tipo = form.tipo;
     let categoria = '';
+    let deudaInfo = null;
     if(tipo === 'gasto'){
       if(!(mov.cargo > 0)){ showToast('Un Gasto tiene que ser un cargo (salida de plata). Esta línea es un abono.'); return; }
       categoria = form.catGasto;
@@ -6216,6 +6270,19 @@ ${lineasDeuda}
       if(!(mov.abono > 0)){ showToast('Un Ingreso tiene que ser un abono (entrada de plata). Esta línea es un cargo.'); return; }
       categoria = form.catIngreso;
       if(!categoria){ showToast('Elige la categoría del ingreso.'); return; }
+    } else if(tipo === 'pago_deuda' || tipo === 'giro_linea'){
+      const deudaSel = state.deudas.inventario.find(d=> d.id === form.deudaId);
+      if(!deudaSel){ showToast('Elige la deuda.'); return; }
+      if(tipo === 'pago_deuda'){
+        if(!(mov.cargo > 0)){ showToast('Un pago de deuda tiene que ser un cargo (salida de plata). Esta línea es un abono.'); return; }
+        const capital = Number(form.capital)||0, interes = Number(form.interes)||0, mora = Number(form.mora)||0;
+        if(capital + interes + mora !== mov.cargo){ showToast(`Capital + interés + mora tienen que sumar ${fmtMoney(mov.cargo)} — hoy suman ${fmtMoney(capital + interes + mora)}.`); return; }
+        deudaInfo = { deudaId: deudaSel.id, capital, interes, mora };
+      } else {
+        if(!(mov.abono > 0)){ showToast('Un uso de la línea tiene que ser un abono (entrada de plata). Esta línea es un cargo.'); return; }
+        deudaInfo = { deudaId: deudaSel.id, monto: mov.abono };
+      }
+      categoria = deudaSel.nombre;
     } else if(tipo === 'deuda'){
       categoria = (form.detalleDeuda || '').trim() || 'Deuda';
     } else if(!CARTOLA_TIPOS.some(t=>t.id === tipo)){
@@ -6235,7 +6302,7 @@ ${lineasDeuda}
     }
     let regla = null;
     const patron = cartolaNorm(form.patron);
-    if(form.crearRegla && patron){
+    if(form.crearRegla && patron && !deudaInfo){
       state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
       regla = { id: uid('regla'), patron, tipo, categoria, detalle: detalleRegla };
       state.cartola.reglas.push(regla);
@@ -6243,6 +6310,7 @@ ${lineasDeuda}
     const afectadas = [mov];
     cartolaSetClasificacion(mov, tipo, categoria, regla ? regla.id : null);
     mov.detalle = detalle;
+    mov.deudaInfo = deudaInfo;
     mov.devengo = (tipo === 'gasto' && form.devengo && form.devengo !== mov.fecha.slice(0,7)) ? form.devengo : '';
     mov.partes = null;
     mov.proyecto = (tipo === 'gasto' || tipo === 'ingreso') ? (form.proyecto || '') : '';
@@ -6514,14 +6582,14 @@ ${lineasDeuda}
 
   function renderPorClasificar(){
     const c = state.cartola;
-    const pend = c.movimientos.filter(m=> m.estado === 'por_clasificar').sort((a,b)=> a.fecha.localeCompare(b.fecha));
+    const pend = c.movimientos.filter(m=> m.estado === 'por_clasificar' || m.estado === 'deuda').sort((a,b)=> a.fecha.localeCompare(b.fecha));
     const porMes = {};
     pend.forEach(m=> (porMes[m.fecha.slice(0,7)] = porMes[m.fecha.slice(0,7)] || []).push(m));
     const meses = Object.keys(porMes).sort();
     const catGasto = state.config.categoriasGastos, catIng = state.config.categoriasIngresos;
     return `
       <div class="fa-topbar">
-        <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Al pulsar Clasificar… se abre el mismo formulario que usas al registrar un gasto o ingreso a mano, con la fecha, el monto y la descripción del banco ya puestos. Al guardar, se actualizan Estado de Resultados, ingresos y flujo.</div></div>
+        <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Aquí también están las líneas de Deuda (créditos, línea de crédito, tarjetas): clasifícalas como Pago de deuda o Uso de la línea. Al pulsar Clasificar… se abre el mismo formulario que usas al registrar un gasto o ingreso a mano, con la fecha, el monto y la descripción del banco ya puestos. Al guardar, se actualizan Estado de Resultados, ingresos y flujo.</div></div>
       </div>
       ${pend.length === 0 ? `<div class="fa-card"><div class="fa-empty">No hay nada por clasificar. 🎉 (Carga más cartolas en "Cartolas bancarias".)</div></div>` : ''}
       ${meses.map(ym=>{
@@ -6536,7 +6604,7 @@ ${lineasDeuda}
             const defTipo = m.abono > 0 ? 'ingreso' : 'gasto';
             return `
             <tr data-form="cl-${m.id}">
-              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
+              <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}${m.estado === 'deuda' ? ' <span class="fa-badge" style="background:#FFF3CD; color:#8A6D3B;">Deuda por procesar</span>' : ''}</td>
               <td class="num" style="color:var(--income);">${m.abono ? fmtMoney(m.abono) : ''}</td>
               <td class="num" style="color:var(--expense);">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
               <td style="white-space:nowrap;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="cartola-clasificar-abrir" data-id="${m.id}">Clasificar…</button>${m.cargo > 0 ? ` <button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="cartola-dividir-abrir" data-id="${m.id}">Dividir…</button>` : ''}</td>
@@ -9385,11 +9453,10 @@ ${lineasDeuda}
         tcInternacionalUSD: Math.max(Number(f.tcInternacionalUSD)||0, 0)
       };
       state.config.cupos = cupos;
-      // El cupo de la línea también es el de la deuda "Sobregiro / Línea de Crédito" de Gestión de Deudas.
-      const sobregiro = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
-      if(sobregiro) sobregiro.cupo = cupos.lineaCredito;
+      // La línea y las tarjetas aparecen (o se actualizan) en Gestión de Deudas con su cupo.
+      asegurarDeudasFijas();
       await saveKey('config', state.config);
-      if(sobregiro) await saveKey('deudas', state.deudas);
+      await saveKey('deudas', state.deudas);
       showToast('Cupos guardados');
       render();
     }
@@ -9698,6 +9765,7 @@ ${lineasDeuda}
         state.cartolaDividir = null;
         state.cartolaClasificar = null;
         state.proyectoSel = '';
+        asegurarDeudasFijas();
         state.loteEnConstruccion = { lineas: [] };
         state.editingContratoId = null;
         state.editingDeudaId = null;
@@ -10456,67 +10524,44 @@ ${lineasDeuda}
         return;
       }
 
-      // Crear nueva — el Tipo de Deuda decide qué campos importan y cómo se arma el cronograma de cuotas.
-      const tipoDeuda = data.tipoDeuda || 'generica';
+      // Crear nueva: según el tipo de acreedor. Crédito Comercial arma su cronograma con cuotas fijas; la línea y las
+      // tarjetas se crean con sus cupos (Configuración); el resto reparte el monto adeudado en cuotas iguales.
+      const tipoAcreedor = data.tipoAcreedor || 'banco';
       let deuda = null;
-
-      if(tipoDeuda === 'generica'){
-        const montoOriginal = Number(data.montoOriginal) || 0;
-        if(montoOriginal <= 0){ showToast('Ingresa el monto total adeudado.'); return; }
-        deuda = {
-          id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal,
-          tasaInteres: Number(data.tasaInteres) || 0,
-          tasaInteresPeriodo: data.tasaInteresPeriodo || 'mensual',
-          cuotaMinima: Number(data.cuotaMinima) || 0,
-          fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '',
-          cupo: Number(data.cupo) || null,
-          cronogramaCuotas: null
-        };
-      } else if(tipoDeuda === 'persona'){
-        const montoTotalPersona = Number(data.montoTotalPersona) || 0;
-        if(montoTotalPersona <= 0){ showToast('Ingresa el Monto Total de la Deuda.'); return; }
-        if(data.personaConCuotas){
-          const montoPorCuotaDeseado = Number(data.montoPorCuotaPersona) || 0;
-          if(montoPorCuotaDeseado <= 0){ showToast('Ingresa el Monto por Cuota.'); return; }
-          if(!data.fechaCuota1Persona){ showToast('Elige la Fecha de la Cuota 1.'); return; }
-          // El monto por cuota es aproximado: define cuántas cuotas hacen falta (redondeando hacia arriba),
-          // y el Monto Total se reparte EXACTO entre esa cantidad — cada cuota queda editable después.
-          const numCuotas = Math.ceil(montoTotalPersona / montoPorCuotaDeseado);
-          const cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaCuota1Persona, { montoTotal: montoTotalPersona });
-          deuda = {
-            id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: montoTotalPersona,
-            tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: 0,
-            fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '', cupo: null,
-            cronogramaCuotas
-          };
-        } else {
-          if(!data.fechaCompromisoPersona){ showToast('Elige la Fecha de Pago Comprometida.'); return; }
-          deuda = {
-            id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: montoTotalPersona,
-            tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: 0,
-            fechaVencimiento: data.fechaCompromisoPersona, categoria: data.categoria || '', cupo: null,
-            interesComprometido: Number(data.interesComprometidoPersona) || 0,
-            cronogramaCuotas: null
-          };
+      if(tipoAcreedor === 'banco'){
+        if((data.subtipoBanco || 'credito_comercial') !== 'credito_comercial'){
+          showToast('La línea de crédito y las tarjetas se crean solas con sus cupos, en Configuración.'); return;
         }
-      } else if(tipoDeuda === 'banco'){
         const saldoInsolutoBanco = Number(data.saldoInsolutoBanco) || 0;
         const numCuotas = Math.max(Number(data.cuotasPorPagarBanco)||0, 0);
         const montoCuotaBanco = Number(data.montoCuotaBanco) || 0;
         if(saldoInsolutoBanco <= 0){ showToast('Ingresa el Saldo Insoluto.'); return; }
-        if(numCuotas <= 0){ showToast('Ingresa las Cuotas por Pagar.'); return; }
-        if(montoCuotaBanco <= 0){ showToast('Ingresa el Monto Total de la Cuota.'); return; }
-        if(!data.fechaCuota1Banco){ showToast('Elige la Fecha de la Cuota 1.'); return; }
-        const cronogramaCuotas = generarCronogramaCuotas(numCuotas, data.fechaCuota1Banco, { montoPorCuota: montoCuotaBanco });
+        if(numCuotas <= 0){ showToast('Ingresa las cuotas restantes por pagar.'); return; }
+        if(montoCuotaBanco <= 0){ showToast('Ingresa el monto completo de cada cuota.'); return; }
+        if(!data.fechaCuota1Banco){ showToast('Elige la fecha de la primera cuota.'); return; }
         deuda = {
-          id: uid('deuda'), tipoDeuda, nombre: data.nombre, montoOriginal: saldoInsolutoBanco,
+          id: uid('deuda'), tipoDeuda: 'banco', nombre: data.nombre, montoOriginal: saldoInsolutoBanco,
           tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: montoCuotaBanco,
-          fechaVencimiento: data.fechaVencimiento || '', categoria: data.categoria || '', cupo: null,
-          cronogramaCuotas
+          fechaVencimiento: '', categoria: 'Crédito Comercial', cupo: null,
+          cronogramaCuotas: generarCronogramaCuotas(numCuotas, data.fechaCuota1Banco, { montoPorCuota: montoCuotaBanco })
+        };
+      } else {
+        const monto = Number(data.montoAdeudado) || 0;
+        const numCuotas = Math.max(Math.floor(Number(data.numeroCuotas)||0), 0);
+        if(monto <= 0){ showToast('Ingresa el monto adeudado.'); return; }
+        if(numCuotas <= 0){ showToast('Ingresa el número de cuotas (1 si se paga de una vez).'); return; }
+        if(!data.fechaCuota1){ showToast('Elige la fecha de la primera cuota.'); return; }
+        const etiqueta = (TIPOS_ACREEDOR.find(t=> t.id === tipoAcreedor) || {}).label || 'Persona';
+        deuda = {
+          id: uid('deuda'), tipoDeuda: 'persona', nombre: data.nombre, montoOriginal: monto,
+          tasaInteres: 0, tasaInteresPeriodo: 'mensual', cuotaMinima: 0,
+          fechaVencimiento: '', categoria: etiqueta, cupo: null,
+          cronogramaCuotas: generarCronogramaCuotas(numCuotas, data.fechaCuota1, { montoTotal: monto })
         };
       }
       if(!deuda) return;
-      deuda.esCargaInicial = !!data.esCargaInicial;
+      deuda.esCargaInicial = false;
+      deuda.acreedorTipo = tipoAcreedor;
       deuda.fechaCreacion = todayISO();
       deuda.activa = true;
       state.deudas.inventario.push(deuda);
