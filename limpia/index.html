@@ -6444,7 +6444,8 @@ ${lineasDeuda}
   }
   // ---- Clasificar una línea de cartola con el mismo formulario que se usa al agregar un gasto/ingreso a mano ----
   // Fecha, moneda y monto vienen del banco (no se editan). El resto se completa como en el registro manual.
-  const METODOS_PAGO_BANCO = ['Cargo Automático Cuenta Corriente', 'Tarjeta de Débito', 'Cheque'];
+  // Los mismos métodos que el formulario manual de gastos (el primero es el normal para una línea de cartola).
+  const METODOS_PAGO_BANCO = ['Cargo Automático Cuenta Corriente', ...METODOS_PAGO_GASTO.filter(x=> x !== 'Cargo Automático Cuenta Corriente')];
   function cartolaAbrirClasificar(movId, editar){
     const mov = state.cartola.movimientos.find(m=> m.id === movId);
     if(!mov) return;
@@ -6505,6 +6506,7 @@ ${lineasDeuda}
             </div>
             <div class="fa-field" ${ver('gasto')}><label>Método de pago</label>
               <select name="metodo">${METODOS_PAGO_BANCO.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
+              <div class="fa-hint" style="margin:4px 0 0 0;">El banco ya descontó este monto de tu cuenta, así que el método es solo informativo: no cambia el flujo.</div>
             </div>
             <div class="fa-field" ${ver('gasto')}><label>Proveedor</label><input type="text" name="proveedor" value="${escapeHtml(nombre)}"></div>
             <div class="fa-field" ${ver('gasto')}><label>Descripción</label><input type="text" name="descripcion" value="${escapeHtml(mov.desc)}"></div>
