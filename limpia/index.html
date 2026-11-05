@@ -595,13 +595,16 @@
   // y Gastos/Costos Directos, sin importar el mes en que ocurrieron. La etiqueta no cambia el Estado de Resultados
   // mensual ni el flujo: alimenta la vista "Rentabilidad de Proyecto", que junta todo y lo muestra como si hubiera
   // ocurrido en la fecha de cierre. La lista (nombre + fecha de cierre) vive en state.config.proyectos.
-  const PROYECTOS_DEFAULT = [
-    { nombre:'Sinergia on Stage (Presencial)', fechaCierre:'' },
-    { nombre:'Maratón Digital 111K (Online)', fechaCierre:'' },
-    { nombre:'Emprende Consciente (Online)', fechaCierre:'' }
+  const TIPOS_EVENTO = [
+    { id:'sinergia_on_stage', label:'Sinergia on Stage', modalidad:'presencial' },
+    { id:'maraton_digital', label:'Maratón Digital', modalidad:'online' },
+    { id:'emprende_consciente', label:'Emprende Consciente', modalidad:'online' }
   ];
+  function nombreEventoAuto(tipo, fechaISO){
+    return `${tipo.label} ${Number(fechaISO.slice(8,10))} ${MESES[Number(fechaISO.slice(5,7))-1]}`;
+  }
   function getProyectos(){
-    return (state.config && Array.isArray(state.config.proyectos)) ? state.config.proyectos : PROYECTOS_DEFAULT;
+    return (state.config && Array.isArray(state.config.proyectos)) ? state.config.proyectos : [];
   }
   function nombresProyecto(){ return getProyectos().map(p=> p.nombre); }
   // Los gastos etiquetados antes del cambio de nombre guardaban el campo "evento".
@@ -1513,6 +1516,8 @@
     (state.config.socios||[]).forEach(socio=>{
       const sueldoFijo = Number(socio.sueldoMensual) || 0;
       if(sueldoFijo <= 0) return;
+      // No genera sueldo para meses anteriores al que empieza a regir (para no crear deuda hacia atrás).
+      if(socio.sueldoDesde && `${anio}-${String(mes+1).padStart(2,'0')}` < socio.sueldoDesde) return;
       const yaExisteSueldo = state.gastos.some(g=>{
         if(g.socioId !== socio.id || !g.origenSueldoDuenos || !g.fecha) return false;
         const d = new Date(g.fecha+'T00:00:00');
@@ -2081,7 +2086,7 @@
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
     'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar',
-    'agregar-proyecto','borrar-proyecto'
+    'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
   function fmtMoneyShort(v){
@@ -4570,25 +4575,6 @@
         ${yearSelect('estadoresultados')}
       </div>
 
-      <div class="fa-kpi-grid" style="grid-template-columns:repeat(4,1fr); max-width:1000px;">
-        <div class="fa-kpi ${mesActual.utilidadOperativa>=0?'income':'expense'}">
-          <div class="fa-kpi-label">${mesActual.utilidadOperativa>=0?'🟢':'🔴'} Utilidad Operativa (${MESES[mesActualIdx]})</div>
-          <div class="fa-kpi-value ${mesActual.utilidadOperativa>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadOperativa)}</div>
-        </div>
-        <div class="fa-kpi"><div class="fa-kpi-label">Punto de Equilibrio (${MESES[mesActualIdx]})</div><div class="fa-kpi-value money">${mesActual.puntoEquilibrio!==null ? fmtMoneyC(mesActual.puntoEquilibrio) : '—'}</div></div>
-        <div class="fa-kpi ${mesActual.utilidadNeta>=0?'income':'expense'}"><div class="fa-kpi-label">Utilidad Neta (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.utilidadNeta>=0?'income':'expense'} money">${fmtMoneyC(mesActual.utilidadNeta)}</div></div>
-        <div class="fa-kpi ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}"><div class="fa-kpi-label">Margen de Rentabilidad (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.margenRentabilidad!==null&&mesActual.margenRentabilidad>=0?'income':'expense'}">${mesActual.margenRentabilidad!==null?mesActual.margenRentabilidad.toFixed(1)+'%':'—'}</div></div>
-      </div>
-      <div class="fa-kpi-grid" style="grid-template-columns:repeat(2,1fr); max-width:520px; margin-top:12px;">
-        <div class="fa-kpi ${mesActual.margenBrutoPct!==null&&mesActual.margenBrutoPct>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto % (${MESES[mesActualIdx]})</div><div class="fa-kpi-value ${mesActual.margenBrutoPct!==null&&mesActual.margenBrutoPct>=0?'income':'expense'}">${mesActual.margenBrutoPct!==null?mesActual.margenBrutoPct.toFixed(1)+'%':'—'}</div></div>
-        <div class="fa-kpi ${ler.ratio===null?'':(ler.ratio<2.5?'expense':'income')}">
-          <div class="fa-kpi-label">Multiplicador de Nómina (LER)</div>
-          <div class="fa-kpi-value ${ler.ratio===null?'':(ler.ratio<2.5?'expense':'income')}">${ler.ratio!==null?ler.ratio.toFixed(1)+'x':'—'}</div>
-          ${ler.ratio!==null && ler.ratio<2.5 ? `<div class="fa-hint" style="color:var(--expense); margin-top:2px;">⚠️ Bajo 2.5x — alerta de ineficiencia operativa</div>` : ''}
-        </div>
-      </div>
-      ${mesActual.puntoEquilibrio!==null ? `<div class="fa-hint">Este mes necesitas facturar (devengado) al menos ${fmtMoneyC(mesActual.puntoEquilibrio)} para cubrir tus Gastos Operacionales — llevas ${fmtMoneyC(mesActual.ingresosDevengados)}.</div>` : `<div class="fa-hint">Sin ingresos devengados este mes todavía, no se puede estimar el punto de equilibrio con costo variable.</div>`}
-
       <div class="fa-card">
         <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — Acumulada ${anio}</div>
         <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Afiliación y Sinergia on Stage (Evento Presencial) tienen su propia unidad. Los gastos operacionales sin % asignado (o sin dedicación en su Plantilla) no cuentan aquí todavía.</div>
@@ -4653,11 +4639,6 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">Ingresos Devengados vs. Gastos Totales — ${anio}</div>
-        ${svgBarChart(MESES_CORTO, meses.map(m=>m.ingresosDevengados), gastosTotalesPorMes, 'Ingresos Devengados', 'Gastos Totales')}
-      </div>
-
-      <div class="fa-card">
         <div class="fa-card-title">Detalle mensual — ${anio}</div>
         <div class="fa-table-wrap">
           <table class="fa-table">
@@ -4701,7 +4682,12 @@
       </div>
 
       <div class="fa-card">
-        <div class="fa-card-title">${state.editingContratoId ? 'Editar línea del lote' : 'Registrar Lote de Ventas'}</div>
+        <div class="fa-card-title">Ingresos Devengados vs. Gastos Totales — ${anio}</div>
+        ${svgBarChart(MESES_CORTO, meses.map(m=>m.ingresosDevengados), gastosTotalesPorMes, 'Ingresos Devengados', 'Gastos Totales')}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">${state.editingContratoId ? 'Editar venta' : 'Registro de Ventas'}</div>
         <div class="fa-section-note">Un lote puede tener varias líneas de venta adentro — cada una con su propia duración y prorrateo. Comisión y Anticipo se cargan por línea, según cómo paga ESE cliente.</div>
         ${state.editingContratoId ? (() => {
           const editingC = state.contratosDevengados.find(c=>c.id===state.editingContratoId);
@@ -4909,56 +4895,6 @@
           `;}).join('')}
         </div>
         <div class="fa-hint">El USD y el tipo de cambio quedan solo como referencia — todo el cálculo contable (Margen Bruto, Utilidad Operativa, etc.) usa exclusivamente el monto en CLP.</div>
-          `;
-        })()}
-      </div>
-
-      <div class="fa-card">
-        <div class="fa-card-title">Plantilla de Gastos Fijos</div>
-        <div class="fa-section-note">Precarga tus gastos operacionales fijos (Nómina, Software, etc.) — cada vez que abras la app, si no existe todavía el gasto de este mes para una plantilla activa, se genera solo en estado "Pendiente".</div>
-        ${(() => {
-          const editingP = state.editingPlantillaId ? state.plantillasGastosFijos.find(p=>p.id===state.editingPlantillaId) : null;
-          return `
-        <div data-form="plantilla-gasto-fijo">
-          <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre</label><input type="text" name="nombre" placeholder="Ej: Nómina, Software CRM" value="${editingP?escapeHtml(editingP.nombre):''}"></div>
-            <div class="fa-field"><label>Categoría</label>
-              <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
-            </div>
-            <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
-            ${UNIDADES_NEGOCIO.map(u=>`
-            <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctPlantilla()"></div>
-            `).join('')}
-          </div>
-          <div class="fa-hint">Los 4 porcentajes deben sumar 100% entre todos (o dejarlos todos vacíos si no aplica) — así se reparte el costo de esta persona entre las 4 Líneas de Negocio cada mes, para el comparativo de Rentabilidad por Unidad. <strong id="fa-plantilla-suma-pct"></strong></div>
-          <div class="fa-form-actions">
-            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
-            ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
-          </div>
-        </div>
-        ${state.plantillasGastosFijos.length>0 ? `
-        <div class="fa-table-wrap" style="margin-top:14px;">
-          <table class="fa-table">
-            <thead><tr><th>Nombre</th><th>Categoría</th><th class="num">Monto Mensual</th><th>Estado</th><th></th></tr></thead>
-            <tbody>
-              ${state.plantillasGastosFijos.map(p=>`
-                <tr>
-                  <td>${escapeHtml(p.nombre)}</td>
-                  <td>${escapeHtml(p.categoria)}</td>
-                  <td class="num money">${fmtMoneyC(p.montoMensual)}</td>
-                  <td>${p.activa?`<span class="fa-badge pagado">Activa</span>`:`<span class="fa-badge pendiente">Pausada</span>`}</td>
-                  <td>
-                    <div class="fa-row-actions">
-                      <button class="fa-icon-btn" data-action="toggle-plantilla-activa" data-id="${p.id}">${p.activa?'Pausar':'Reactivar'}</button>
-                      <button class="fa-icon-btn" data-action="edit-plantilla" data-id="${p.id}">Editar</button>
-                      <button class="fa-icon-btn danger" data-action="delete-plantilla" data-id="${p.id}">Eliminar</button>
-                    </div>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
           `;
         })()}
       </div>
@@ -6530,29 +6466,10 @@ ${lineasDeuda}
       </table></div>`}`;
     return `
       <div class="fa-topbar">
-        <div><h1>Rentabilidad de Proyecto</h1><div class="fa-sub">Junta todos los ingresos y costos etiquetados con un proyecto, sin importar el mes en que ocurrieron, y muestra su Margen Bruto como una unidad aislada: como si todo hubiera ocurrido en la fecha de cierre. No cambia el Estado de Resultados mensual ni el flujo.</div></div>
+        <div><h1>Rentabilidad de Proyecto</h1><div class="fa-sub">Junta todos los ingresos y costos etiquetados con un evento o proyecto, sin importar el mes en que ocurrieron, y muestra su Margen Bruto como una unidad aislada: como si todo hubiera ocurrido en la fecha de cierre. No cambia el Estado de Resultados mensual ni el flujo.</div></div>
       </div>
 
-      <div class="fa-card">
-        <div class="fa-card-title">Proyectos</div>
-        <div class="fa-section-note">Cada proyecto tiene una fecha de cierre (la fecha del evento). Después etiqueta los ingresos (al registrar la venta o el depósito) y los gastos o costos directos (al registrarlos, en Por clasificar o en Dividir pago) con el nombre del proyecto.</div>
-        ${proyectos.length === 0 ? `<div class="fa-empty">Aún no hay proyectos.</div>` : `
-        <div class="fa-table-wrap"><table class="fa-table">
-          <thead><tr><th>Proyecto</th><th>Fecha de cierre</th><th></th></tr></thead>
-          <tbody>${proyectos.map((p,i)=>`
-            <tr>
-              <td>${escapeHtml(p.nombre)}</td>
-              <td><input type="date" value="${p.fechaCierre||''}" onchange="window.faGuardarCierreProyecto(${i}, this.value)"></td>
-              <td><button class="fa-icon-btn danger" data-action="borrar-proyecto" data-idx="${i}">Quitar</button></td>
-            </tr>`).join('')}
-          </tbody>
-        </table></div>`}
-        <div data-form="proyecto-nuevo" class="fa-form-grid" style="margin-top:12px; max-width:640px; grid-template-columns:2fr 1fr auto; align-items:end;">
-          <div class="fa-field"><label>Nuevo proyecto</label><input type="text" name="nombre" placeholder="Ej: Sinergia 2026"></div>
-          <div class="fa-field"><label>Fecha de cierre</label><input type="date" name="fechaCierre"></div>
-          <div class="fa-field"><button type="button" class="fa-btn fa-btn-primary" data-action="agregar-proyecto">Agregar</button></div>
-        </div>
-      </div>
+      ${proyectos.length === 0 ? `<div class="fa-card"><div class="fa-empty">Aún no hay eventos. Créalos en la pestaña "Próximos eventos" y aparecerán aquí.</div></div>` : ''}
 
       ${!sel ? '' : `
       <div class="fa-card">
@@ -6579,6 +6496,53 @@ ${lineasDeuda}
     `;
   }
 
+  // ---------------- PRÓXIMOS EVENTOS ----------------
+  // Cada evento es una edición concreta (Ej: "Sinergia on Stage 31 Mayo") con su tipo y su fecha. Esta lista alimenta
+  // el selector de Proyecto de gastos e ingresos, la Fecha del Evento de las ventas y la vista Rentabilidad de Proyecto.
+  function renderEventos(){
+    const eventos = getProyectos().map((p,i)=> ({...p, idx:i})).sort((a,b)=> (a.fechaCierre||'9999').localeCompare(b.fechaCierre||'9999'));
+    const hoy = todayISO();
+    return `
+      <div class="fa-topbar">
+        <div><h1>Próximos eventos</h1><div class="fa-sub">Programa aquí cada evento (presencial u online) con su fecha. Después aparece en las opciones de Ventas, Ingresos y Gastos, y en Rentabilidad de Proyecto.</div></div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Agregar evento</div>
+        <div data-form="evento-nuevo">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Tipo de evento</label>
+              <select name="tipo">${TIPOS_EVENTO.map(t=>`<option value="${t.id}">${escapeHtml(t.label)} (${t.modalidad==='presencial'?'presencial':'online'})</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Fecha del evento</label><input type="date" name="fecha"></div>
+            <div class="fa-field"><label>Nombre (opcional)</label><input type="text" name="nombre" placeholder="Si lo dejas vacío: Sinergia on Stage 31 Mayo"></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="agregar-evento">Agregar evento</button></div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Eventos (${eventos.length})</div>
+        ${eventos.length === 0 ? `<div class="fa-empty">Aún no hay eventos.</div>` : `
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Evento</th><th>Tipo</th><th>Fecha</th><th>Estado</th><th></th></tr></thead>
+          <tbody>${eventos.map(e=>{
+            const tipo = TIPOS_EVENTO.find(t=> t.id === e.tipo);
+            return `
+            <tr>
+              <td>${escapeHtml(e.nombre)}</td>
+              <td>${tipo ? escapeHtml(tipo.label) : '—'}</td>
+              <td><input type="date" value="${e.fechaCierre||''}" onchange="window.faGuardarCierreProyecto(${e.idx}, this.value)"></td>
+              <td>${!e.fechaCierre ? '<span class="fa-badge pendiente">Sin fecha</span>' : (e.fechaCierre >= hoy ? '<span class="fa-badge">Próximo</span>' : '<span class="fa-badge pagado">Realizado</span>')}</td>
+              <td><button class="fa-icon-btn danger" data-action="borrar-evento" data-idx="${e.idx}">Quitar</button></td>
+            </tr>`;}).join('')}
+          </tbody>
+        </table></div>
+        <div class="fa-hint">Un evento con ingresos o gastos etiquetados no se puede quitar: quítales antes la etiqueta.</div>`}
+      </div>
+    `;
+  }
+
   function renderSidebar(){
     const pendientesHistoricos = (state.importacionHistorica||[]).filter(h=>!h.agregado).length;
     const nPorClasificar = (state.cartola.movimientos||[]).filter(m=> m.estado === 'por_clasificar').length;
@@ -6587,6 +6551,7 @@ ${lineasDeuda}
       {id:'ingresosdist', label:'Ingresos y Distribución', icon:'&#8593;'},
       {id:'estadoresultados', label:'Estado de Resultados', icon:'&#9636;'},
       {id:'rentproyecto', label:'Rentabilidad de Proyecto', icon:'&#127919;'},
+      {id:'eventos', label:'Próximos eventos', icon:'&#128197;'},
       {id:'flujo', label:'Flujo de Caja', icon:'&#8646;'},
       {id:'deudas', label:'Gestión de Deudas', icon:'&#8987;'},
       {id:'cartolas', label:'Cartolas bancarias', icon:'&#128196;'},
@@ -6807,6 +6772,7 @@ ${lineasDeuda}
       case 'ingresosdist': return renderIngresosDistribucion();
       case 'estadoresultados': return renderEstadoResultados();
       case 'rentproyecto': return renderRentabilidadProyecto();
+      case 'eventos': return renderEventos();
       case 'flujo': return state.moduloFlujoVista === 'tesoreria' ? renderTesoreria() : state.moduloFlujoVista === 'flujoUSD' ? renderFlujoUSD() : state.moduloFlujoVista === 'tarjeta' ? renderTarjeta() : renderFlujo();
       case 'deudas': return renderGestionDeudas();
       case 'cartolas': return renderCartolas();
@@ -8404,7 +8370,7 @@ ${lineasDeuda}
   function renderConfig(){
     return `
       <div class="fa-topbar">
-        <div><h1>Configuración</h1><div class="fa-sub">Ajusta el año activo, el saldo inicial y tus categorías.</div></div>
+        <div><h1>Configuración</h1><div class="fa-sub">Ajusta el Día Cero, los sueldos, el año activo, los cupos y tus categorías.</div></div>
       </div>
 
       <div class="fa-card">
@@ -8413,10 +8379,15 @@ ${lineasDeuda}
         <div data-form="dia-cero">
           <div class="fa-field" style="max-width:220px; margin-bottom:14px;"><label>Fecha Día Cero</label><input type="date" name="fechaDiaCero" value="${state.config.fechaDiaCero||''}"></div>
           <div class="fa-form-grid">
-            ${BOVEDAS.map(b=>`
-              <div class="fa-field"><label>${escapeHtml(b.label)}</label><input type="number" name="saldo_${b.id}" min="0" step="1" value="${Number((state.tesoreria.saldosIniciales||{})[b.id])||0}"></div>
-            `).join('')}
+            ${BOVEDAS_PAGABLES.map(b=>{
+              const mov = state.tesoreria.movimientos.find(m=> m.origen === 'dia-cero:' + b.id);
+              const etiqueta = b.id === 'operacion' ? 'OPEX inicial (saldo de la cuenta corriente)' : b.label;
+              return `
+              <div class="fa-field"><label>${escapeHtml(etiqueta)}</label><input type="number" name="saldo_${b.id}" min="0" step="1" value="${mov ? Number(mov.monto)||0 : 0}"></div>
+            `;}).join('')}
+            <div class="fa-field"><label>OPEX USD inicial (en dólares)</label><input type="number" name="saldoUSD" min="0" step="0.01" value="${Number(state.config.saldoInicialUSD)||0}"></div>
           </div>
+          <div class="fa-hint">OPEX inicial es el saldo de tu cuenta corriente al Día Cero: con él parte el Flujo de Caja y debe cuadrar con las cartolas.</div>
           <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="save-dia-cero">Guardar Día Cero</button></div>
         </div>
       </div>
@@ -8431,6 +8402,7 @@ ${lineasDeuda}
           <div class="fa-form-grid">
             <div class="fa-field"><label>Nombre del Socio</label><input type="text" name="nombre" placeholder="Ej: Felipe" value="${editingS?escapeHtml(editingS.nombre):''}"></div>
             <div class="fa-field"><label>Sueldo Mensual Acordado</label><input type="number" name="sueldoMensual" min="0" step="1" placeholder="0" value="${editingS?editingS.sueldoMensual:''}"></div>
+            <div class="fa-field"><label>Rige desde el mes</label><input type="month" name="sueldoDesde" value="${editingS?(editingS.sueldoDesde||''):''}"></div>
           </div>
           <div class="fa-form-actions">
             <button type="button" class="fa-btn fa-btn-primary" data-action="submit-socio-config">${editingS?'Guardar cambios':'Agregar socio'}</button>
@@ -8440,12 +8412,13 @@ ${lineasDeuda}
         ${(state.config.socios||[]).length>0 ? `
         <div class="fa-table-wrap" style="margin-top:14px;">
           <table class="fa-table">
-            <thead><tr><th>Nombre</th><th class="num">Sueldo Mensual</th><th></th></tr></thead>
+            <thead><tr><th>Nombre</th><th class="num">Sueldo Mensual</th><th>Rige desde</th><th></th></tr></thead>
             <tbody>
               ${state.config.socios.map(s=>`
                 <tr>
                   <td>${escapeHtml(s.nombre)}</td>
                   <td class="num money">${fmtMoneyC(s.sueldoMensual)}</td>
+                  <td>${s.sueldoDesde ? cartolaMesLabel(s.sueldoDesde) : '—'}</td>
                   <td>
                     <div class="fa-row-actions">
                       <button class="fa-icon-btn" data-action="edit-socio" data-id="${s.id}">Editar</button>
@@ -8457,6 +8430,56 @@ ${lineasDeuda}
             </tbody>
           </table>
         </div>` : `<div class="fa-hint">Aún no agregas ningún socio.</div>`}
+          `;
+        })()}
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Plantilla de Gastos Fijos</div>
+        <div class="fa-section-note">Precarga tus gastos operacionales fijos (Nómina, Software, etc.) — cada vez que abras la app, si no existe todavía el gasto de este mes para una plantilla activa, se genera solo en estado "Pendiente".</div>
+        ${(() => {
+          const editingP = state.editingPlantillaId ? state.plantillasGastosFijos.find(p=>p.id===state.editingPlantillaId) : null;
+          return `
+        <div data-form="plantilla-gasto-fijo">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Nombre</label><input type="text" name="nombre" placeholder="Ej: Nómina, Software CRM" value="${editingP?escapeHtml(editingP.nombre):''}"></div>
+            <div class="fa-field"><label>Categoría</label>
+              <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
+            ${UNIDADES_NEGOCIO.map(u=>`
+            <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctPlantilla()"></div>
+            `).join('')}
+          </div>
+          <div class="fa-hint">Los 4 porcentajes deben sumar 100% entre todos (o dejarlos todos vacíos si no aplica) — así se reparte el costo de esta persona entre las 4 Líneas de Negocio cada mes, para el comparativo de Rentabilidad por Unidad. <strong id="fa-plantilla-suma-pct"></strong></div>
+          <div class="fa-form-actions">
+            <button type="button" class="fa-btn fa-btn-primary" data-action="submit-plantilla-gasto-fijo">${editingP?'Guardar cambios':'Agregar plantilla'}</button>
+            ${editingP?`<button type="button" class="fa-btn fa-btn-ghost" data-action="cancel-edit-plantilla">Cancelar</button>`:''}
+          </div>
+        </div>
+        ${state.plantillasGastosFijos.length>0 ? `
+        <div class="fa-table-wrap" style="margin-top:14px;">
+          <table class="fa-table">
+            <thead><tr><th>Nombre</th><th>Categoría</th><th class="num">Monto Mensual</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              ${state.plantillasGastosFijos.map(p=>`
+                <tr>
+                  <td>${escapeHtml(p.nombre)}</td>
+                  <td>${escapeHtml(p.categoria)}</td>
+                  <td class="num money">${fmtMoneyC(p.montoMensual)}</td>
+                  <td>${p.activa?`<span class="fa-badge pagado">Activa</span>`:`<span class="fa-badge pendiente">Pausada</span>`}</td>
+                  <td>
+                    <div class="fa-row-actions">
+                      <button class="fa-icon-btn" data-action="toggle-plantilla-activa" data-id="${p.id}">${p.activa?'Pausar':'Reactivar'}</button>
+                      <button class="fa-icon-btn" data-action="edit-plantilla" data-id="${p.id}">Editar</button>
+                      <button class="fa-icon-btn danger" data-action="delete-plantilla" data-id="${p.id}">Eliminar</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
           `;
         })()}
       </div>
@@ -8483,11 +8506,23 @@ ${lineasDeuda}
         </div>
         <div data-form="config">
           <div class="fa-form-grid" style="grid-template-columns:1fr; max-width:320px;">
-            <div class="fa-field"><label>Saldo inicial de caja (1 de enero del año activo)</label><input type="number" name="saldoInicial" value="${state.config.saldoInicial}"></div>
             <div class="fa-field"><label>Meta de Ingresos Devengados Mensual</label><input type="number" name="metaMensualIngresos" value="${state.config.metaMensualIngresos||0}"></div>
           </div>
           <div class="fa-hint">La meta mensual se usa en el Dashboard para comparar Ingresos Devengados vs. Meta — no se pide en el Dashboard porque es de solo lectura.</div>
           <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="submit-config">Guardar cambios</button></div>
+        </div>
+      </div>
+
+      <div class="fa-card">
+        <div class="fa-card-title">Cupos de Línea de Crédito y Tarjetas</div>
+        <div class="fa-section-note">Los cupos que tienes con el banco. Están conectados con Gestión de Deudas: cada vez que uses la línea o una tarjeta, aparece como deuda y se descuenta del cupo disponible.</div>
+        <div data-form="cupos-config">
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Cupo Línea de Crédito (CLP)</label><input type="number" name="lineaCredito" min="0" step="1" value="${Number((state.config.cupos||{}).lineaCredito)||0}"></div>
+            <div class="fa-field"><label>Cupo Tarjeta de Crédito Nacional (CLP)</label><input type="number" name="tcNacional" min="0" step="1" value="${Number((state.config.cupos||{}).tcNacional)||0}"></div>
+            <div class="fa-field"><label>Cupo Tarjeta de Crédito Internacional (USD)</label><input type="number" name="tcInternacionalUSD" min="0" step="0.01" value="${Number((state.config.cupos||{}).tcInternacionalUSD)||0}"></div>
+          </div>
+          <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="guardar-cupos">Guardar cupos</button></div>
         </div>
       </div>
 
@@ -9199,27 +9234,51 @@ ${lineasDeuda}
       showToast('Regla quitada (no cambia lo que ya se clasificó).');
       render();
     }
-    else if(action === 'agregar-proyecto'){
-      const f = readFields(btn.closest('[data-form="proyecto-nuevo"]'));
-      const nombre = (f.nombre || '').trim();
-      if(!nombre){ showToast('Escribe el nombre del proyecto.'); return; }
-      if(nombresProyecto().some(n=> n.toLowerCase() === nombre.toLowerCase())){ showToast('Ya existe un proyecto con ese nombre.'); return; }
-      state.config.proyectos = getProyectos().map(p=> ({...p})).concat([{ nombre, fechaCierre: f.fechaCierre || '' }]);
+    else if(action === 'agregar-evento'){
+      const f = readFields(btn.closest('[data-form="evento-nuevo"]'));
+      const tipo = TIPOS_EVENTO.find(t=> t.id === f.tipo);
+      if(!tipo){ showToast('Elige el tipo de evento.'); return; }
+      if(!f.fecha){ showToast('Elige la fecha del evento.'); return; }
+      const lista = getProyectos().map(p=> ({...p}));
+      let nombre = (f.nombre || '').trim();
+      const esAuto = !nombre;
+      if(esAuto) nombre = nombreEventoAuto(tipo, f.fecha);
+      const existe = n=> lista.some(p=> p.nombre.toLowerCase() === n.toLowerCase());
+      if(existe(nombre) && esAuto) nombre = `${nombre} ${f.fecha.slice(0,4)}`;
+      if(existe(nombre)){ showToast('Ya existe un evento con ese nombre.'); return; }
+      lista.push({ nombre, fechaCierre: f.fecha, tipo: tipo.id });
+      state.config.proyectos = lista;
       state.proyectoSel = nombre;
       await saveKey('config', state.config);
-      showToast('Proyecto agregado.');
+      showToast('Evento agregado.');
       render();
     }
-    else if(action === 'borrar-proyecto'){
+    else if(action === 'borrar-evento'){
       const lista = getProyectos().map(p=> ({...p}));
       const p = lista[Number(btn.dataset.idx)];
       if(!p) return;
       const enUso = state.gastos.some(g=> proyectoEfectivoGasto(g) === p.nombre) || state.contratosDevengados.some(c=> c.proyecto === p.nombre) || state.ingresos.some(i=> i.proyecto === p.nombre);
-      if(enUso){ showToast('Ese proyecto tiene ingresos o gastos etiquetados — quítales la etiqueta antes de quitarlo.'); return; }
+      if(enUso){ showToast('Ese evento tiene ingresos o gastos etiquetados — quítales la etiqueta antes de quitarlo.'); return; }
       lista.splice(Number(btn.dataset.idx), 1);
       state.config.proyectos = lista;
       await saveKey('config', state.config);
-      showToast('Proyecto quitado.');
+      showToast('Evento quitado.');
+      render();
+    }
+    else if(action === 'guardar-cupos'){
+      const f = readFields(btn.closest('[data-form="cupos-config"]'));
+      const cupos = {
+        lineaCredito: Math.max(Number(f.lineaCredito)||0, 0),
+        tcNacional: Math.max(Number(f.tcNacional)||0, 0),
+        tcInternacionalUSD: Math.max(Number(f.tcInternacionalUSD)||0, 0)
+      };
+      state.config.cupos = cupos;
+      // El cupo de la línea también es el de la deuda "Sobregiro / Línea de Crédito" de Gestión de Deudas.
+      const sobregiro = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
+      if(sobregiro) sobregiro.cupo = cupos.lineaCredito;
+      await saveKey('config', state.config);
+      if(sobregiro) await saveKey('deudas', state.deudas);
+      showToast('Cupos guardados');
       render();
     }
     else if(action === 'logout'){
@@ -11417,7 +11476,6 @@ ${lineasDeuda}
     else if(action === 'submit-config'){
       const data = readFields(btn.closest('[data-form="config"]'));
       state.config.anio = Number(data.anio) || state.config.anio;
-      state.config.saldoInicial = Number(data.saldoInicial) || 0;
       state.config.metaMensualIngresos = Number(data.metaMensualIngresos) || 0;
       await saveKey('config', state.config);
       showToast('Configuración guardada');
@@ -11433,7 +11491,9 @@ ${lineasDeuda}
       // bóveda, y queda visible de dónde salió ese dinero. Por eso saldosIniciales queda en 0: el valor
       // ahora vive 100% en el movimiento, para no contarlo dos veces.
       let saldoInicialOperacion = 0;
-      BOVEDAS.forEach(b=>{
+      state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== 'dia-cero:recepcion'); // Recepción ya no tiene saldo inicial
+      state.config.saldoInicialUSD = Number(data.saldoUSD) || 0;
+      BOVEDAS_PAGABLES.forEach(b=>{
         const monto = Number(data['saldo_'+b.id]) || 0;
         if(b.id === 'operacion') saldoInicialOperacion = monto;
         const origen = `dia-cero:${b.id}`;
@@ -11478,10 +11538,10 @@ ${lineasDeuda}
       const editId = state.editingSocioId;
       if(editId){
         const idx = state.config.socios.findIndex(s=>s.id===editId);
-        if(idx>-1) state.config.socios[idx] = { ...state.config.socios[idx], nombre: data.nombre, sueldoMensual };
+        if(idx>-1) state.config.socios[idx] = { ...state.config.socios[idx], nombre: data.nombre, sueldoMensual, sueldoDesde: data.sueldoDesde || '' };
         state.editingSocioId = null;
       } else {
-        state.config.socios.push({ id: uid('socio'), nombre: data.nombre, sueldoMensual });
+        state.config.socios.push({ id: uid('socio'), nombre: data.nombre, sueldoMensual, sueldoDesde: data.sueldoDesde || '' });
       }
       await saveKey('config', state.config);
       showToast(editId ? 'Socio actualizado' : 'Socio agregado — se generará su gasto Pendiente cada mes en Estado de Resultados');
