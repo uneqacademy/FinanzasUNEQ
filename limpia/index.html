@@ -1923,7 +1923,7 @@
     asesorError: null,
     config: null,
     cartola: { movimientos: [], archivos: [], reglas: [] }, // Cartolas bancarias (se completa al cargar, con las reglas iniciales)
-    cartolaFiltro: { mes:'', cuenta:'', estado:'' },
+    cartolaFiltro: { mes:'', cuenta:'', estado:'', proyecto:'', texto:'' },
     cartolaMensajes: [],
     cartolaDividir: null, // { id, partes } — línea de cartola que se está dividiendo
     cartolaClasificar: null, // { id, tipo } — línea de cartola que se está clasificando
@@ -6381,12 +6381,26 @@ ${lineasDeuda}
   // ---- Clasificar una línea de cartola con el mismo formulario que se usa al agregar un gasto/ingreso a mano ----
   // Fecha, moneda y monto vienen del banco (no se editan). El resto se completa como en el registro manual.
   const METODOS_PAGO_BANCO = ['Cargo Automático Cuenta Corriente', 'Tarjeta de Débito', 'Cheque'];
-  function cartolaAbrirClasificar(movId){
+  function cartolaAbrirClasificar(movId, editar){
     const mov = state.cartola.movimientos.find(m=> m.id === movId);
     if(!mov) return;
-    const tipo = mov.estado === 'deuda' ? (mov.cargo > 0 ? 'pago_deuda' : 'giro_linea') : (mov.cargo > 0 ? 'gasto' : 'ingreso');
-    state.cartolaClasificar = { id: mov.id, tipo };
+    let tipo = mov.estado === 'deuda' ? (mov.cargo > 0 ? 'pago_deuda' : 'giro_linea') : (mov.cargo > 0 ? 'gasto' : 'ingreso');
+    if(editar && mov.tipo && CARTOLA_TIPOS.some(t=> t.id === mov.tipo)) tipo = mov.tipo;
+    state.cartolaClasificar = { id: mov.id, tipo, editar: !!editar };
     render();
+    if(editar) cartolaPrefillModal(mov);
+  }
+  // Al editar, el formulario parte con lo que ya tiene el movimiento.
+  function cartolaPrefillModal(mov){
+    const cont = document.getElementById('fa-cartola-clasificar'); if(!cont) return;
+    const set = (n, v)=>{ const el = cont.querySelector('[name="'+n+'"]'); if(el && v !== undefined && v !== null) el.value = v; };
+    const d = mov.detalle || {};
+    set('metodo', d.metodo); set('proveedor', d.proveedor); set('descripcion', d.descripcion);
+    if(mov.tipo === 'gasto'){ set('catGasto', mov.categoria); set('devengo', mov.devengo || ''); }
+    if(mov.tipo === 'ingreso'){ set('catIngreso', mov.categoria); set('detalleIngreso', d.descripcion); set('medioPago', d.medioPago); }
+    set('proyecto', mov.proyecto || '');
+    if(d.pcts) UNIDADES_NEGOCIO.forEach(u=> set('pct_'+u.id, d.pcts['pct_'+u.id] || ''));
+    if(mov.deudaInfo){ set('deudaId', mov.deudaInfo.deudaId); set('capital', mov.deudaInfo.capital); set('interes', mov.deudaInfo.interes); set('mora', mov.deudaInfo.mora); }
   }
   function renderCartolaClasificarModal(){
     const cl = state.cartolaClasificar;
@@ -6404,7 +6418,7 @@ ${lineasDeuda}
     return `
       <div class="fa-modal-overlay" data-action="cartola-clasificar-cerrar">
         <div class="fa-modal fa-modal-wide" data-action="confirm-noop" id="fa-cartola-clasificar" style="max-width:640px;">
-          <div class="fa-modal-title">Clasificar movimiento — ${fmtMoney(monto)}</div>
+          <div class="fa-modal-title">${cl.editar ? 'Editar' : 'Clasificar'} movimiento — ${fmtMoney(monto)}</div>
           <div class="fa-hint" style="margin-top:0;">Cuenta ${mov.cuenta} · ${escapeHtml(mov.desc)}</div>
           ${(() => {
             const cands = cartolaCandidatosEnlace(mov);
@@ -6464,7 +6478,7 @@ ${lineasDeuda}
             </div>
           </div>
           <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px;">
-            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${cl.editar ? '' : 'checked'}> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
             <div class="fa-field" style="margin-top:6px;"><label>Texto que se buscará en la descripción</label><input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(mov.desc))}"></div>
             <div class="fa-hint">La regla recuerda el tipo, la categoría y el método (y las líneas de negocio). El proyecto no se recuerda: un mismo proveedor puede servir a eventos distintos.</div>
           </div>
@@ -6760,6 +6774,9 @@ ${lineasDeuda}
     if(f.mes) lista = lista.filter(m=> m.fecha.slice(0,7) === f.mes);
     if(f.cuenta) lista = lista.filter(m=> m.cuenta === f.cuenta);
     if(f.estado) lista = lista.filter(m=> m.estado === f.estado);
+    if(f.proyecto === '__sin__') lista = lista.filter(m=> (m.estado === 'clasificado') && !m.proyecto && m.tipo !== 'dividido');
+    else if(f.proyecto) lista = lista.filter(m=> m.proyecto === f.proyecto);
+    if(f.texto){ const q = cartolaNorm(f.texto); lista = lista.filter(m=> cartolaNorm(m.desc + ' ' + (m.categoria||'') + ' ' + ((m.detalle&&(m.detalle.proveedor||m.detalle.descripcion))||'')).includes(q)); }
     lista = lista.slice().sort((a,b)=> a.fecha.localeCompare(b.fecha) || 0);
     const meses = [...new Set(c.movimientos.map(m=> m.fecha.slice(0,7)))].sort();
     const cuentas = [...new Set(c.movimientos.map(m=> m.cuenta))].sort();
@@ -6838,6 +6855,8 @@ ${lineasDeuda}
           <div class="fa-field"><label>Mes</label><select data-action="cartola-filtro" data-campo="mes"><option value="">Todos</option>${meses.map(m=>`<option value="${m}" ${f.mes===m?'selected':''}>${cartolaMesLabel(m)}</option>`).join('')}</select></div>
           <div class="fa-field"><label>Cuenta</label><select data-action="cartola-filtro" data-campo="cuenta"><option value="">Todas</option>${cuentas.map(x=>`<option value="${x}" ${f.cuenta===x?'selected':''}>${x}</option>`).join('')}</select></div>
           <div class="fa-field"><label>Tipo</label><select data-action="cartola-filtro" data-campo="estado"><option value="">Todos</option>${['clasificado','traspaso','deuda','ignorado'].map(x=>`<option value="${x}" ${f.estado===x?'selected':''}>${CARTOLA_ESTADO_LABEL[x]}</option>`).join('')}</select></div>
+          <div class="fa-field"><label>Proyecto / Evento</label><select data-action="cartola-filtro" data-campo="proyecto"><option value="">Todos</option><option value="__sin__" ${f.proyecto==='__sin__'?'selected':''}>Sin proyecto (clasificados)</option>${nombresProyecto().map(x=>`<option value="${escapeHtml(x)}" ${f.proyecto===x?'selected':''}>${escapeHtml(x)}</option>`).join('')}</select></div>
+          <div class="fa-field" style="grid-column:span 2;"><label>Buscar en descripción / categoría</label><input type="text" data-action="cartola-filtro" data-campo="texto" value="${escapeHtml(f.texto||'')}" placeholder="Ej: meta, hotel, sinergia… (Enter para buscar)"></div>
         </div>
         ${lista.length === 0 ? `<div class="fa-empty">No hay movimientos con esos filtros.</div>` : `
         <div class="fa-hint">Mostrando ${Math.min(lista.length, 300)} de ${lista.length}.</div>
@@ -6848,7 +6867,7 @@ ${lineasDeuda}
               <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
               <td class="num">${m.abono ? fmtMoney(m.abono) : ''}</td><td class="num">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
               <td>${escapeHtml(CARTOLA_ESTADO_LABEL[m.estado]||m.estado)}${m.categoria?` — ${escapeHtml(m.categoria)}`:''}${m.devengo?` <span class="fa-badge" style="background:#EEF2FF;">devengo ${cartolaMesLabel(m.devengo)}</span>`:''}${m.proyecto?` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(m.proyecto)}</span>`:''}${(m.partes||[]).length?`<div style="font-size:11.5px; color:var(--ink-soft);">${m.partes.map(p=>`${fmtMoney(p.monto)} · ${p.tipo==='gasto'?`${escapeHtml(p.categoria)} (${cartolaMesLabel(p.devengo)})${p.proyecto?` · ${escapeHtml(p.proyecto)}`:''}`:`deuda anterior: ${escapeHtml(p.nota||'')}`}`).join('<br>')}</div>`:''}</td>
-              <td><button class="fa-icon-btn" data-action="reabrir-cartola" data-id="${m.id}">Reabrir</button></td>
+              <td style="white-space:nowrap;">${(m.tipo !== 'dividido' && m.estado !== 'deuda') ? `<button class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="cartola-clasificar-abrir" data-edit="1" data-id="${m.id}">Editar</button> ` : ''}<button class="fa-icon-btn" data-action="reabrir-cartola" data-id="${m.id}">Reabrir</button></td>
             </tr>`).join('')}
           </tbody>
         </table></div>`}
@@ -9683,7 +9702,7 @@ ${lineasDeuda}
       await cartolaReabrir(btn.dataset.id);
     }
     else if(action === 'cartola-clasificar-abrir'){
-      cartolaAbrirClasificar(btn.dataset.id);
+      cartolaAbrirClasificar(btn.dataset.id, btn.dataset.edit === '1');
     }
     else if(action === 'cartola-clasificar-cerrar'){
       state.cartolaClasificar = null;
@@ -10076,7 +10095,7 @@ ${lineasDeuda}
         state.pagosImpuestos = [];
         state.tesoreriaUSD = { movimientos: [] };
         state.cartola = cartolaNormalizar(null);
-        state.cartolaFiltro = { mes:'', cuenta:'', estado:'' };
+        state.cartolaFiltro = { mes:'', cuenta:'', estado:'', proyecto:'', texto:'' };
         state.cartolaMensajes = [];
         state.cartolaDividir = null;
         state.cartolaClasificar = null;
