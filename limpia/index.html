@@ -1690,17 +1690,25 @@
     (state.config.socios||[]).forEach(socio=>{
       const sueldoFijo = Number(socio.sueldoMensual) || 0;
       if(sueldoFijo <= 0) return;
-      // No genera sueldo para meses anteriores al que empieza a regir (para no crear deuda hacia atrás).
-      if(socio.sueldoDesde && `${anio}-${String(mes+1).padStart(2,'0')}` < socio.sueldoDesde) return;
-      const yaExisteSueldo = state.gastos.some(g=>{
-        if(g.socioId !== socio.id || !g.origenSueldoDuenos || !g.fecha) return false;
-        const d = new Date(g.fecha+'T00:00:00');
-        return d.getFullYear()===anio && d.getMonth()===mes;
-      });
-      if(!yaExisteSueldo){
-        const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
+      // Genera el sueldo de CADA mes desde el que empieza a regir ("Rige desde el mes") hasta el mes en curso, así los
+      // meses ya pasados también quedan en Estado de Resultados. Sin "Rige desde", solo el mes en curso. Nunca crea
+      // sueldos de meses anteriores a ese mes de inicio, ni duplica los que ya existen.
+      const ymHoy = anio * 12 + mes;
+      let ymIni = ymHoy;
+      if(String(socio.sueldoDesde || '').split('-').length === 2 && Number(socio.sueldoDesde.split('-')[0]) > 2000){
+        const [ai, mi] = socio.sueldoDesde.split('-').map(Number);
+        ymIni = ai * 12 + (mi - 1); // si rige desde un mes futuro, todavía no se genera nada
+      }
+      for(let ym = ymIni; ym <= ymHoy; ym++){
+        const a = Math.floor(ym / 12), m = ym % 12;
+        const yaExisteSueldo = state.gastos.some(g=>{
+          if(g.socioId !== socio.id || !g.origenSueldoDuenos || !g.fecha) return false;
+          const d = new Date(g.fecha+'T00:00:00');
+          return d.getFullYear()===a && d.getMonth()===m;
+        });
+        if(yaExisteSueldo) continue;
         state.gastos.push({
-          id: uid('gas'), fecha: fechaGasto, categoria: 'Sueldo Operativo Socios',
+          id: uid('gas'), fecha: `${a}-${String(m+1).padStart(2,'0')}-01`, categoria: 'Sueldo Operativo Socios',
           proveedor: socio.nombre, descripcion: `Sueldo Dueños del mes — ${socio.nombre}`, monto: sueldoFijo,
           estado: 'Pendiente', montoPagado: 0, origenSueldoDuenos: true, socioId: socio.id, metodo: 'Transferencia'
         });
@@ -12082,6 +12090,7 @@ ${lineasDeuda}
         state.config.socios.push({ id: uid('socio'), nombre: data.nombre, sueldoMensual, sueldoDesde: data.sueldoDesde || '' });
       }
       await saveKey('config', state.config);
+      if(generarGastosFijosDelMes()) await saveKey('gastos', state.gastos, {silent:true});
       showToast(editId ? 'Socio actualizado' : 'Socio agregado — se generará su gasto Pendiente cada mes en Estado de Resultados');
       render();
     }
