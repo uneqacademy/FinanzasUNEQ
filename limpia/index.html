@@ -2262,7 +2262,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -6731,6 +6731,35 @@ ${lineasDeuda}
   };
 
   // Saldos y continuidad por cuenta, a partir de los archivos cargados.
+  // Movimientos que pertenecen a una cartola cargada: de su cuenta y dentro de su período. Si otra cartola de la misma
+  // cuenta se superpone con esas fechas (las líneas son compartidas), esas líneas NO se tocan.
+  function cartolaMovimientosDeArchivo(a){
+    const otras = state.cartola.archivos.filter(x=> x !== a && x.cuenta === a.cuenta);
+    return state.cartola.movimientos.filter(m=> m.cuenta === a.cuenta && m.fecha >= a.desde && m.fecha <= a.hasta
+      && !otras.some(x=> m.fecha >= x.desde && m.fecha <= x.hasta));
+  }
+  function cartolaDescribirEliminacion(a){
+    const movs = cartolaMovimientosDeArchivo(a);
+    const cuenta = e=> movs.filter(m=> m.estado === e).length;
+    const clasificados = cuenta('clasificado');
+    return { movs, total: movs.length, clasificados,
+      gastos: state.gastos.filter(g=> movs.some(m=> m.id === g.origenCartola)).length,
+      ingresos: state.ingresos.filter(i=> movs.some(m=> m.id === i.origenCartola)).length,
+      pagos: state.deudas.pagos.filter(x=> movs.some(m=> m.id === x.origenCartola)).length + (state.deudas.giros||[]).filter(g=> movs.some(m=> m.id === g.origenCartola)).length };
+  }
+  async function cartolaEliminarArchivo(cuenta, desde){
+    const a = state.cartola.archivos.find(x=> x.cuenta === cuenta && x.desde === desde);
+    if(!a){ showToast('No se encontró esa cartola.'); return; }
+    const movs = cartolaMovimientosDeArchivo(a);
+    const ids = new Set(movs.map(m=> m.id));
+    movs.forEach(m=> cartolaQuitarEfectos(m.id));
+    state.cartola.movimientos = state.cartola.movimientos.filter(m=> !ids.has(m.id));
+    state.cartola.archivos = state.cartola.archivos.filter(x=> x !== a);
+    await cartolaGuardarTodo();
+    showToast(`Cartola eliminada: ${ids.size} movimiento${ids.size===1?'':'s'} y todo lo que habían generado.`);
+    render();
+  }
+
   function cartolaResumenArchivos(){
     const porCuenta = {};
     state.cartola.archivos.forEach(a=> (porCuenta[a.cuenta] = porCuenta[a.cuenta] || []).push(a));
@@ -6894,7 +6923,7 @@ ${lineasDeuda}
         <div class="fa-card-title">Cartolas cargadas y cuadre con el banco</div>
         ${archivos.length === 0 ? `<div class="fa-empty">Aún no cargas ninguna cartola.</div>` : `
         <div class="fa-table-wrap"><table class="fa-table">
-          <thead><tr><th>Cuenta</th><th>Período</th><th class="num">Movimientos</th><th class="num">Saldo anterior</th><th class="num">Saldo final</th><th>Cuadre</th></tr></thead>
+          <thead><tr><th>Cuenta</th><th>Período</th><th class="num">Movimientos</th><th class="num">Saldo anterior</th><th class="num">Saldo final</th><th>Cuadre</th><th></th></tr></thead>
           <tbody>${archivos.map(a=>`
             <tr>
               <td>${escapeHtml(a.cuenta)}</td>
@@ -6903,6 +6932,7 @@ ${lineasDeuda}
               <td class="num">${fmtMoney(a.saldoAnterior)}</td>
               <td class="num">${fmtMoney(a.saldoFinal)}</td>
               <td>${a.avisos.length ? `<span style="color:var(--expense);">⚠ ${escapeHtml(a.avisos.join(' '))}</span>` : `<span style="color:var(--income);">✓ Cuadra con el banco</span>`}</td>
+              <td><button type="button" class="fa-icon-btn danger" data-action="eliminar-cartola" data-cuenta="${escapeHtml(a.cuenta)}" data-desde="${a.desde}">Eliminar</button></td>
             </tr>`).join('')}
           </tbody>
         </table></div>`}
@@ -9775,6 +9805,20 @@ ${lineasDeuda}
     else if(action === 'reabrir-cartola'){
       await cartolaReabrir(btn.dataset.id);
     }
+    else if(action === 'eliminar-cartola'){
+      const a = state.cartola.archivos.find(x=> x.cuenta === btn.dataset.cuenta && x.desde === btn.dataset.desde);
+      if(!a) return;
+      const r = cartolaDescribirEliminacion(a);
+      state.confirmDialog = {
+        message: `¿Eliminar la cartola de la cuenta ${a.cuenta} (${fmtDate(a.desde)} – ${fmtDate(a.hasta)})? Se borran sus ${r.total} movimientos` +
+          (r.gastos + r.ingresos + r.pagos > 0 ? ` y todo lo que generaron: ${r.gastos} gasto${r.gastos===1?'':'s'}, ${r.ingresos} ingreso${r.ingresos===1?'':'s'}${r.pagos?`, ${r.pagos} movimiento${r.pagos===1?'':'s'} de deuda`:''}, con sus salidas y entradas de flujo` : '') +
+          '. Las reglas de reconocimiento se conservan, y puedes volver a subir el archivo cuando quieras. Esta acción no se puede deshacer.',
+        action: 'do-eliminar-cartola',
+        data: a.cuenta + '|' + a.desde,
+        confirmLabel: 'Eliminar cartola'
+      };
+      render();
+    }
     else if(action === 'cartola-clasificar-abrir'){
       cartolaAbrirClasificar(btn.dataset.id, btn.dataset.edit === '1');
     }
@@ -10050,6 +10094,10 @@ ${lineasDeuda}
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
         render();
+      }
+      else if(cd.action === 'do-eliminar-cartola'){
+        const [cta, desde] = String(cd.data).split('|');
+        await cartolaEliminarArchivo(cta, desde);
       }
       else if(cd.action === 'do-delete-ctapagar'){
         // Revierte cada pago (su salida de Tesorería) antes de borrar la cuenta misma — para no dejar
