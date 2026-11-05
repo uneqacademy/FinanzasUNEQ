@@ -564,19 +564,25 @@
   // - comisionBloqueada:true → "Dinero Limpio": la Comisión por Cuota queda fija en $0 y no editable, porque
   //   este tipo de ingreso ya llega neto (Co-Producciones y Afiliación).
   const TIPOS_INGRESO_CATALOGO = [
-    { id:'mentoria', label:'Mentorías', duracion:'input' },
-    { id:'sinergia', label:'Sinergia', duracion:3 },
-    { id:'fee_agencia', label:'Fee Agencia', duracion:'input' },
-    { id:'membresia_anual', label:'Membresía Anual', duracion:12 },
-    { id:'membresia_semestral', label:'Membresía Semestral', duracion:6 },
-    { id:'membresia_trimestral', label:'Membresía Trimestral', duracion:3 },
-    { id:'curso_autogestionado', label:'Cursos Autogestionados', duracion:1 },
-    { id:'membresia_mensual', label:'Membresía Mensual', duracion:1 },
-    { id:'evento_online', label:'Eventos Online', duracion:1, usaFechaEvento:true },
-    { id:'evento_presencial', label:'Evento Presencial', duracion:1, usaFechaEvento:true },
-    { id:'coproduccion', label:'Co-Producciones', duracion:1, comisionBloqueada:true },
-    { id:'afiliacion', label:'Afiliación', duracion:1, comisionBloqueada:true }
+    { id:'mentoria', label:'Mentoría', duracion:'input', subtipoLabel:'Programa', subtipos:['OPEN','BEGIN','NEXT','EXIT'] },
+    { id:'curso_autogestionado', label:'Curso Online', duracion:1, subtipoLabel:'Curso', subtipos:['TU CLIENTE SOÑADO','EFECTO 2E'] },
+    { id:'membresia_mensual', label:'Membresía ONE', duracion:1 },
+    { id:'evento_presencial', label:'Evento Presencial Sinergia On Stage', duracion:1, usaFechaEvento:true, modalidadEvento:'presencial', subtipoLabel:'Tipo de venta', subtipos:['Venta de Entradas','Stand','SponsorShip'] },
+    { id:'evento_online', label:'Evento Online', duracion:1, usaFechaEvento:true, modalidadEvento:'online' },
+    { id:'afiliacion', label:'Afiliación', duracion:1, comisionBloqueada:true },
+    { id:'fee_agencia', label:'Servicio de Agencia', duracion:1 },
+    // Tipos antiguos: ya no se ofrecen al registrar una venta, pero siguen funcionando en las ventas que ya existan.
+    { id:'sinergia', label:'Sinergia', duracion:3, oculto:true },
+    { id:'membresia_anual', label:'Membresía Anual', duracion:12, oculto:true },
+    { id:'membresia_semestral', label:'Membresía Semestral', duracion:6, oculto:true },
+    { id:'membresia_trimestral', label:'Membresía Trimestral', duracion:3, oculto:true },
+    { id:'coproduccion', label:'Co-Producciones', duracion:1, comisionBloqueada:true, oculto:true }
   ];
+  // Opciones del selector "Tipo de Ingreso": solo los vigentes (y el tipo antiguo de la venta que se esté editando).
+  function opcionesTipoIngreso(actual){
+    return TIPOS_INGRESO_CATALOGO.filter(t=> !t.oculto || t.id === actual)
+      .map(t=>`<option value="${t.id}" ${t.id === actual ? 'selected' : ''}>${escapeHtml(t.label)}</option>`).join('');
+  }
   // Las 4 Líneas de Negocio de UNEQ, y a qué unidad pertenece cada Tipo de Ingreso del catálogo. Ya no hay
   // tipos excluidos: Evento Presencial (rebautizado "Sinergia on Stage" para este comparativo) y Afiliación
   // ahora tienen su propia unidad, igual que Agencia y Academia.
@@ -676,8 +682,8 @@
   // pasarelas internacionales tipo Hotmart, no de las locales.
   const FORMAS_PAGO_LINEA = [
     { id:'usd', label:'USD — Pasarela Internacional (Hotmart/Stripe)', moneda:'USD', tieneComision:true, tieneAnticipo:true },
-    { id:'paypal', label:'USD — PayPal', moneda:'USD', tieneComision:true, tieneAnticipo:true },
-    { id:'payoneer', label:'USD — Payoneer', moneda:'USD', tieneComision:true, tieneAnticipo:true },
+    { id:'paypal', label:'USD — PayPal', moneda:'USD', tieneComision:true, tieneAnticipo:false },
+    { id:'payoneer', label:'USD — Payoneer', moneda:'USD', tieneComision:true, tieneAnticipo:false },
     { id:'binance', label:'Binance (USDT)', moneda:'USD', tieneComision:true, tieneAnticipo:false },
     { id:'clp_transferencia', label:'CLP — Transferencia directa', moneda:'CLP', tieneComision:false, tieneAnticipo:false },
     { id:'clp_pasarela', label:'CLP — Pasarela de Pago (Transbank/Flow/etc.)', moneda:'CLP', tieneComision:true, tieneAnticipo:false }
@@ -1267,6 +1273,7 @@
       numeroCuotasPago: linea.numeroCuotasPago, comisionPorCuota: linea.comisionPorCuota,
       anticipoPorCuotaUSD: linea.anticipoPorCuotaUSD,
       esIngresoUnico: !!esIngresoUnico,
+      subtipo: linea.subtipo || '',
       proyecto: linea.proyecto || ''
     };
 
@@ -1305,28 +1312,35 @@
     const formaPago = data.formaPago || 'usd';
     const fp = FORMAS_PAGO_LINEA.find(f=>f.id===formaPago) || FORMAS_PAGO_LINEA[0];
     const montoBruto = Number(data.montoBruto) || 0;
-    if(!data.nombre){ showToast('Ponle un nombre a la línea.'); return null; }
-    if(!data.fechaInicio){ showToast('Elige la Fecha de Inicio de esta línea.'); return null; }
+    const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
+    const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
+    if(!data.nombre){ showToast('Ponle el nombre del cliente o proyecto.'); return null; }
+    if(ti.subtipos && !data.subtipo){ showToast(`Elige ${ti.subtipoLabel === 'Tipo de venta' ? 'el tipo de venta' : (ti.subtipoLabel === 'Curso' ? 'el curso' : 'el programa')}.`); return null; }
+    // Eventos: se elige de "Próximos eventos" y la venta toma la fecha del evento (también para sus comisiones).
+    let fechaInicio = data.fechaInicio, fechaEvento = null, proyecto = data.proyecto || '';
+    if(ti.usaFechaEvento){
+      const ev = getProyectos().find(p=> p.nombre === data.eventoNombre);
+      if(!ev){ showToast('Elige el evento. Si no aparece, créalo antes en "Próximos eventos".'); return null; }
+      if(!ev.fechaCierre){ showToast('Ese evento no tiene fecha. Ponla en "Próximos eventos".'); return null; }
+      fechaInicio = ev.fechaCierre; fechaEvento = ev.fechaCierre; proyecto = ev.nombre;
+    }
+    if(!fechaInicio){ showToast('Elige la Fecha de Ingreso.'); return null; }
     if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda} de la línea.`); return null; }
     // El Tipo de Cambio también es por línea — cada una puede haberse cobrado con un dólar distinto. Solo
     // hace falta si ESTA línea específica paga en USD; si es CLP, nunca se pide ni se guarda.
     const tipoCambio = esFormaPagoUSD(formaPago) ? (Number(data.tipoCambio) || 0) : null;
     if(esFormaPagoUSD(formaPago) && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio de esta línea (búscalo o escríbelo a mano) — paga en USD.'); return null; }
-    const tipoIngreso = data.tipoIngreso || TIPOS_INGRESO_CATALOGO[0].id;
-    const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
     const duracionMeses = ti.duracion === 'input' ? Math.min(Math.max(Number(data.duracionMeses)||1, 1), 12) : ti.duracion;
-    if(ti.usaFechaEvento && !data.fechaEvento){ showToast('Ingresa la Fecha del Evento para este tipo de ingreso.'); return null; }
     const numeroCuotasPago = Math.max(Number(data.numeroCuotasPago)||1, 1);
     const comisionPorCuota = (fp.tieneComision && !ti.comisionBloqueada) ? (Number(data.comisionPorCuota) || 0) : 0;
     const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
     return {
       id: uid('linea'), nombre: data.nombre, formaPago, montoBruto, tipoIngreso, duracionMeses, tipoCambio,
-      // Cada línea guarda SU PROPIA fecha de venta — distintas líneas de un mismo lote pueden haberse vendido
-      // en días distintos, así que ya no depende de un campo compartido que se leía solo al confirmar el lote.
-      fechaInicio: data.fechaInicio,
-      fechaEvento: ti.usaFechaEvento ? data.fechaEvento : null,
+      // Cada línea guarda SU PROPIA fecha — distintas líneas de un mismo lote pueden tener fechas distintas.
+      fechaInicio, fechaEvento,
       numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD,
-      proyecto: data.proyecto || ''
+      subtipo: data.subtipo || '',
+      proyecto
     };
   }
 
@@ -2179,7 +2193,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto',
+    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -3996,19 +4010,52 @@
   window.faToggleTipoIngresoLinea = function(){
     const select = document.getElementById('fa-linea-tipo-ingreso');
     const duracionInput = document.getElementById('fa-linea-duracion-input');
-    const fechaEventoWrap = document.getElementById('fa-linea-fecha-evento-wrap');
     const comisionInput = document.getElementById('fa-linea-comision-input');
     const dineroLimpioHint = document.getElementById('fa-linea-dinero-limpio-hint');
     if(!select || !duracionInput) return;
     const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===select.value) || TIPOS_INGRESO_CATALOGO[0];
+    const mostrar = (id, v)=>{ const el = document.getElementById(id); if(el) el.style.display = v ? '' : 'none'; };
+    // Meses de duración: solo Mentoría los pide (los demás duran 1 mes; los eventos cuentan en la fecha del evento).
     duracionInput.disabled = ti.duracion !== 'input';
     if(ti.duracion !== 'input') duracionInput.value = String(ti.duracion);
-    if(fechaEventoWrap) fechaEventoWrap.style.display = ti.usaFechaEvento ? '' : 'none';
+    mostrar('fa-linea-duracion-wrap', ti.duracion === 'input');
+    // Subopciones (programa, curso o tipo de venta).
+    const subSel = document.getElementById('fa-linea-subtipo');
+    if(subSel){
+      if(ti.subtipos){
+        const previo = subSel.dataset.valor || subSel.value;
+        subSel.innerHTML = '<option value="">Elige…</option>' + ti.subtipos.map(x=>`<option ${x === previo ? 'selected' : ''}>${escapeHtml(x)}</option>`).join('');
+        const lbl = document.getElementById('fa-linea-subtipo-label'); if(lbl) lbl.textContent = ti.subtipoLabel;
+      } else { subSel.innerHTML = ''; }
+      mostrar('fa-linea-subtipo-wrap', !!ti.subtipos);
+    }
+    // Eventos: se eligen de Próximos eventos, con su fecha. La venta toma esa fecha.
+    const evSel = document.getElementById('fa-linea-evento');
+    if(evSel){
+      if(ti.usaFechaEvento){
+        const previo = evSel.dataset.valor || evSel.value;
+        const evs = getProyectos().filter(p=> ti.modalidadEvento === 'presencial' ? p.tipo === 'sinergia_on_stage' : p.tipo !== 'sinergia_on_stage');
+        evSel.innerHTML = '<option value="">Elige el evento…</option>' + evs.map(p=>`<option value="${escapeHtml(p.nombre)}" data-fecha="${p.fechaCierre || ''}" ${p.nombre === previo ? 'selected' : ''}>${escapeHtml(p.nombre)}${p.fechaCierre ? ' — ' + fmtDate(p.fechaCierre) : ' (sin fecha)'}</option>`).join('');
+        window.faElegirEventoLinea();
+      } else { evSel.innerHTML = ''; }
+      mostrar('fa-linea-evento-wrap', !!ti.usaFechaEvento);
+    }
+    mostrar('fa-linea-fecha-inicio-wrap', !ti.usaFechaEvento);
+    mostrar('fa-linea-proyecto-wrap', !ti.usaFechaEvento);
     if(comisionInput){
       comisionInput.disabled = !!ti.comisionBloqueada;
       if(ti.comisionBloqueada) comisionInput.value = '0';
     }
     if(dineroLimpioHint) dineroLimpioHint.style.display = ti.comisionBloqueada ? '' : 'none';
+  };
+  // Al elegir un evento, la fecha de la venta pasa a ser la fecha de ese evento.
+  window.faElegirEventoLinea = function(){
+    const evSel = document.getElementById('fa-linea-evento');
+    if(!evSel) return;
+    evSel.dataset.valor = evSel.value;
+    const opt = evSel.options[evSel.selectedIndex];
+    const fecha = (opt && opt.dataset.fecha) || '';
+    ['fa-linea-fecha-evento', 'fa-contrato-fecha'].forEach(id=>{ const el = document.getElementById(id); if(el && fecha) el.value = fecha; });
   };
 
   // Según la Forma de Pago elegida para la línea, cambia la etiqueta de moneda del Monto Bruto y muestra u
@@ -4255,6 +4302,7 @@
     const mainScrollElDespues = root.querySelector('.fa-main');
     if(mainScrollElDespues) mainScrollElDespues.scrollTop = scrollTopGuardado;
     if(state.activeTab === 'ingresosdist') window.faToggleCategoriaIngresoPF();
+    if(state.activeTab === 'estadoresultados') window.faToggleTipoIngresoLinea();
   }
 
   function renderLogin(){
@@ -4920,30 +4968,38 @@
           return `
         <div data-form="contrato-devengado">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${escapeHtml(editingC.nombre)}"></div>
-            <div class="fa-field"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(editingC.proyecto||'')}</select></div>
+            <div class="fa-field"><label>Nombre del Cliente / Proyecto</label><input type="text" name="nombre" placeholder="Ej: Cliente X" value="${escapeHtml(editingC.nombre)}"></div>
+            <div class="fa-field"><label>Tipo de Ingreso</label>
+              <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
+                ${opcionesTipoIngreso(editingC.tipoIngreso)}
+              </select>
+            </div>
+            <div class="fa-field" id="fa-linea-subtipo-wrap" style="display:none;"><label id="fa-linea-subtipo-label">Programa</label>
+              <select name="subtipo" id="fa-linea-subtipo" data-valor="${escapeHtml(editingC.subtipo||'')}" onchange="this.dataset.valor=this.value"></select>
+            </div>
+            <div class="fa-field" id="fa-linea-evento-wrap" style="display:none;"><label>Evento (con su fecha)</label>
+              <select name="eventoNombre" id="fa-linea-evento" data-valor="${escapeHtml(editingC.proyecto||'')}" onchange="window.faElegirEventoLinea()"></select>
+              <div class="fa-hint" style="margin:4px 0 0 0;">Se elige de "Próximos eventos" y la venta toma la fecha del evento.</div>
+            </div>
+            <div class="fa-field" id="fa-linea-fecha-inicio-wrap"><label>Fecha de Ingreso</label><input type="date" id="fa-contrato-fecha" name="fechaVentaLote" value="${editingC.fechaVentaLote||editingC.fechaInicio}"></div>
+            <div class="fa-field" id="fa-linea-duracion-wrap">
+              <label>Meses de Duración</label>
+              <select id="fa-linea-duracion-input" name="duracionMeses" ${ti.duracion==='input'?'':'disabled'}>
+                ${Array.from({length:12},(_,i)=>i+1).map(n=>`<option value="${n}" ${(ti.duracion==='input'?editingC.duracionMeses:ti.duracion)===n?'selected':''}>${n} mes${n===1?'':'es'}</option>`).join('')}
+              </select>
+            </div>
+            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:none;">
+              <input type="hidden" id="fa-linea-fecha-evento" name="fechaEvento" value="${editingC.fechaInicio||''}">
+            </div>
             <div class="fa-field"><label>Forma de Pago</label>
               <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
                 ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}" ${editingC.formaPago===f.id?'selected':''}>${escapeHtml(f.label)}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (${fp.moneda})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${fp.moneda==='USD'?editingC.montoTotalUSD:editingC.montoTotal}"></div>
-            <div class="fa-field"><label>Tipo de Ingreso</label>
-              <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
-                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}" ${editingC.tipoIngreso===t.id?'selected':''}>${escapeHtml(t.label)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="fa-field" id="fa-linea-duracion-wrap">
-              <label>Meses Reales de Duración (1 a 12)</label>
-              <select id="fa-linea-duracion-input" name="duracionMeses" ${ti.duracion==='input'?'':'disabled'}>
-                ${Array.from({length:12},(_,i)=>i+1).map(n=>`<option value="${n}" ${(ti.duracion==='input'?editingC.duracionMeses:ti.duracion)===n?'selected':''}>${n} mes${n===1?'':'es'}</option>`).join('')}
-              </select>
-            </div>
-            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="${ti.usaFechaEvento?'':'display:none;'}">
-              <label>Fecha del Evento (el ingreso cuenta ahí, no en la fecha de venta)</label>
-              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento" value="${editingC.fechaInicio||''}">
-            </div>
-            <div class="fa-field"><label>Fecha de Venta (para las comisiones de las cuotas)</label><input type="date" id="fa-contrato-fecha" name="fechaVentaLote" value="${editingC.fechaVentaLote||editingC.fechaInicio}"></div>
+            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto Total (${fp.moneda})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${fp.moneda==='USD'?editingC.montoTotalUSD:editingC.montoTotal}"></div>
+            <div class="fa-field"><label>Cuotas (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" value="${editingC.numeroCuotasPago||1}"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap" style="${fp.tieneComision?'':'display:none;'}"><label id="fa-linea-comision-label">Comisión por Cuota (${fp.moneda}, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${editingC.comisionPorCuota||''}" ${ti.comisionBloqueada?'disabled':''}></div>
+            <div class="fa-field" id="fa-linea-anticipo-wrap" style="${fp.tieneAnticipo?'':'display:none;'}"><label>Comisión por Anticipación (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${editingC.anticipoPorCuotaUSD||''}"></div>
             <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
               <div style="display:flex; gap:8px;">
                 <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${editingC.tipoCambio||''}">
@@ -4951,9 +5007,7 @@
               </div>
               <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Solo hace falta si la Forma de Pago es en USD.</div>
             </div>
-            <div class="fa-field"><label>Número de Cuotas de Pago</label><input type="number" name="numeroCuotasPago" min="1" step="1" value="${editingC.numeroCuotasPago||1}"></div>
-            <div class="fa-field" id="fa-linea-comision-wrap" style="${fp.tieneComision?'':'display:none;'}"><label id="fa-linea-comision-label">Comisión por Cuota (${fp.moneda}, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${editingC.comisionPorCuota||''}" ${ti.comisionBloqueada?'disabled':''}></div>
-            <div class="fa-field" id="fa-linea-anticipo-wrap" style="${fp.tieneAnticipo?'':'display:none;'}"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${editingC.anticipoPorCuotaUSD||''}"></div>
+            <div class="fa-field" id="fa-linea-proyecto-wrap"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(editingC.proyecto||'')}</select></div>
           </div>
           <div class="fa-hint" id="fa-linea-dinero-limpio-hint" style="${ti.comisionBloqueada?'':'display:none;'} color:var(--income); font-weight:600;">💧 Dinero Limpio: este tipo de ingreso llega neto, sin comisión de pasarela.</div>
           <div class="fa-hint">Al guardar, se regeneran las comisiones/anticipo de ESTA línea con los valores actuales — no afecta a las demás líneas del mismo lote.</div>
@@ -4969,33 +5023,41 @@
           const totalUSDLote = lote.lineas.filter(l=>esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           const totalCLPLote = lote.lineas.filter(l=>l.formaPago && !esFormaPagoUSD(l.formaPago)).reduce((s,l)=>s+(Number(l.montoBruto)||0),0);
           return `
-        <div class="fa-hint" style="margin-top:0;">Para una sola venta: llena los campos y usa "Registrar como Ingreso Único". Para varias ventas juntas en un lote: usa "+ Agregar línea" las veces que necesites, y confirma el lote al final.</div>
+        <div class="fa-hint" style="margin-top:0;">Llena los campos y pulsa "Confirmar Ventas". Si quieres cargar varias ventas juntas, usa "+ Agregar línea" después de cada una y confirma al final.</div>
         <div data-form="linea-lote">
           <div class="fa-form-grid">
-            <div class="fa-field"><label>Nombre del Proyecto/Cliente</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Mentoría Cliente X" value="${lineaEnEdicion?escapeHtml(lineaEnEdicion.nombre):''}"></div>
-            <div class="fa-field"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(lineaEnEdicion?lineaEnEdicion.proyecto:'')}</select></div>
-            <div class="fa-field"><label>Fecha de Inicio (fecha de la venta / primera cuota)</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${lineaEnEdicion?lineaEnEdicion.fechaInicio:todayISO()}"></div>
+            <div class="fa-field"><label>Nombre del Cliente / Proyecto</label><input type="text" id="fa-linea-nombre" name="nombre" placeholder="Ej: Cliente X" value="${lineaEnEdicion?escapeHtml(lineaEnEdicion.nombre):''}"></div>
             <div class="fa-field"><label>Tipo de Ingreso</label>
               <select id="fa-linea-tipo-ingreso" name="tipoIngreso" onchange="window.faToggleTipoIngresoLinea()">
-                ${TIPOS_INGRESO_CATALOGO.map(t=>`<option value="${t.id}" ${lineaEnEdicion&&lineaEnEdicion.tipoIngreso===t.id?'selected':''}>${escapeHtml(t.label)}</option>`).join('')}
+                ${opcionesTipoIngreso(lineaEnEdicion?lineaEnEdicion.tipoIngreso:'')}
               </select>
             </div>
+            <div class="fa-field" id="fa-linea-subtipo-wrap" style="display:none;"><label id="fa-linea-subtipo-label">Programa</label>
+              <select name="subtipo" id="fa-linea-subtipo" data-valor="${lineaEnEdicion?escapeHtml(lineaEnEdicion.subtipo||''):''}" onchange="this.dataset.valor=this.value"></select>
+            </div>
+            <div class="fa-field" id="fa-linea-evento-wrap" style="display:none;"><label>Evento (con su fecha)</label>
+              <select name="eventoNombre" id="fa-linea-evento" data-valor="${lineaEnEdicion?escapeHtml(lineaEnEdicion.proyecto||''):''}" onchange="window.faElegirEventoLinea()"></select>
+              <div class="fa-hint" style="margin:4px 0 0 0;">Se elige de "Próximos eventos" y la venta toma la fecha del evento.</div>
+            </div>
+            <div class="fa-field" id="fa-linea-fecha-inicio-wrap"><label>Fecha de Ingreso</label><input type="date" id="fa-contrato-fecha" name="fechaInicio" value="${lineaEnEdicion?lineaEnEdicion.fechaInicio:todayISO()}"></div>
             <div class="fa-field" id="fa-linea-duracion-wrap">
-              <label>Meses Reales de Duración (1 a 12)</label>
+              <label>Meses de Duración</label>
               <select id="fa-linea-duracion-input" name="duracionMeses">
                 ${Array.from({length:12},(_,i)=>i+1).map(n=>`<option value="${n}" ${lineaEnEdicion&&lineaEnEdicion.duracionMeses===n?'selected':''}>${n} mes${n===1?'':'es'}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:${lineaEnEdicion&&lineaEnEdicion.fechaEvento?'':'none'};">
-              <label>Fecha del Evento (el ingreso cuenta ahí, no en la fecha de venta)</label>
-              <input type="date" id="fa-linea-fecha-evento" name="fechaEvento" value="${lineaEnEdicion&&lineaEnEdicion.fechaEvento?lineaEnEdicion.fechaEvento:''}">
+            <div class="fa-field" id="fa-linea-fecha-evento-wrap" style="display:none;">
+              <input type="hidden" id="fa-linea-fecha-evento" name="fechaEvento" value="${lineaEnEdicion&&lineaEnEdicion.fechaEvento?lineaEnEdicion.fechaEvento:''}">
             </div>
             <div class="fa-field"><label>Forma de Pago</label>
               <select id="fa-linea-forma-pago" name="formaPago" onchange="window.faToggleFormaPagoLinea()">
                 ${FORMAS_PAGO_LINEA.map(f=>`<option value="${f.id}" ${lineaEnEdicion&&lineaEnEdicion.formaPago===f.id?'selected':''}>${escapeHtml(f.label)}</option>`).join('')}
               </select>
             </div>
-            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto de esta línea (${lineaEnEdicion&&esFormaPagoUSD(lineaEnEdicion.formaPago)?'USD':'CLP'})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.montoBruto:''}"></div>
+            <div class="fa-field"><label id="fa-linea-monto-label">Monto Bruto Total (${lineaEnEdicion&&esFormaPagoUSD(lineaEnEdicion.formaPago)?'USD':'CLP'})</label><input type="number" id="fa-linea-monto" name="montoBruto" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.montoBruto:''}"></div>
+            <div class="fa-field"><label>Cuotas (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="${lineaEnEdicion?lineaEnEdicion.numeroCuotasPago:1}"></div>
+            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota (USD, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.comisionPorCuota||'':''}"></div>
+            <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Comisión por Anticipación (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.anticipoPorCuotaUSD||'':''}"></div>
             <div class="fa-field"><label>Tipo de Cambio (CLP por USD)</label>
               <div style="display:flex; gap:8px;">
                 <input type="number" id="fa-contrato-tc" name="tipoCambio" step="0.01" placeholder="Ej: 950.50" value="${lineaEnEdicion&&lineaEnEdicion.tipoCambio?lineaEnEdicion.tipoCambio:''}">
@@ -5003,19 +5065,17 @@
               </div>
               <div id="fa-contrato-tc-status" class="fa-hint" style="margin-top:4px;">Solo hace falta si la Forma de Pago es en USD.</div>
             </div>
-            <div class="fa-field"><label>Número de Cuotas de Pago (cómo paga el cliente)</label><input type="number" name="numeroCuotasPago" min="1" step="1" placeholder="Ej: 3" value="${lineaEnEdicion?lineaEnEdicion.numeroCuotasPago:1}"></div>
-            <div class="fa-field" id="fa-linea-comision-wrap"><label id="fa-linea-comision-label">Comisión por Cuota — Hotmart/Stripe (USD, opcional)</label><input type="number" id="fa-linea-comision-input" name="comisionPorCuota" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.comisionPorCuota||'':''}"></div>
-            <div class="fa-field" id="fa-linea-anticipo-wrap"><label>Anticipo de Fondos por Cuota (USD, opcional)</label><input type="number" name="anticipoPorCuotaUSD" min="0" step="0.01" placeholder="0" value="${lineaEnEdicion?lineaEnEdicion.anticipoPorCuotaUSD||'':''}"></div>
+            <div class="fa-field" id="fa-linea-proyecto-wrap"><label>Proyecto (opcional)</label><select name="proyecto">${opcionesProyecto(lineaEnEdicion?lineaEnEdicion.proyecto:'')}</select></div>
           </div>
           <div class="fa-hint" id="fa-linea-dinero-limpio-hint" style="display:none; color:var(--income); font-weight:600;">💧 Dinero Limpio: este tipo de ingreso llega neto, sin comisión de pasarela — el campo queda bloqueado en $0.</div>
-          <div class="fa-hint">Se genera una comisión (y un anticipo, si aplica) por cada cuota, un mes seguido del otro desde la Fecha de Inicio — cada una queda editable o eliminable por separado después.</div>
+          <div class="fa-hint">Se genera una comisión (y una comisión por anticipación, si aplica) por cada cuota, un mes seguido del otro desde la fecha de ingreso (o la del evento) — cada una queda editable o eliminable por separado después.</div>
           <div class="fa-form-actions">
             ${lineaEnEdicion ? `
             <button type="button" class="fa-btn fa-btn-primary" data-action="guardar-edicion-linea-lote" data-index="${state.editandoLineaLoteIndex}">Guardar cambios en la línea</button>
             <button type="button" class="fa-btn fa-btn-ghost" data-action="cancelar-edicion-linea-lote">Cancelar</button>
             ` : `
-            <button type="button" class="fa-btn fa-btn-primary" data-action="registrar-ingreso-unico">📌 Registrar como Ingreso Único</button>
-            <button type="button" class="fa-btn fa-btn-ghost" data-action="agregar-linea-lote">+ Agregar línea a un Lote</button>
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="agregar-linea-lote">+ Agregar línea</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-ventas">Confirmar Ventas</button>
             `}
           </div>
         </div>
@@ -5023,7 +5083,7 @@
         ${lote.lineas.length>0 ? `
         <div class="fa-table-wrap" style="margin:14px 0;">
           <table class="fa-table">
-            <thead><tr><th>Proyecto/Cliente</th><th>Fecha</th><th>Forma de Pago</th><th>Tipo</th><th>Duración</th><th class="num">Monto</th><th>Cuotas</th><th></th></tr></thead>
+            <thead><tr><th>Cliente / Proyecto</th><th>Fecha</th><th>Forma de Pago</th><th>Tipo</th><th>Duración</th><th class="num">Monto</th><th>Cuotas</th><th></th></tr></thead>
             <tbody>
               ${lote.lineas.map((l,i)=>{
                 const fp = FORMAS_PAGO_LINEA.find(f=>f.id===l.formaPago) || FORMAS_PAGO_LINEA[0];
@@ -5033,7 +5093,7 @@
                   <td>${escapeHtml(l.nombre)}</td>
                   <td>${fmtDate(l.fechaInicio)}</td>
                   <td>${fp.moneda}</td>
-                  <td>${escapeHtml(ti.label)}${l.fechaEvento?` (evento: ${fmtDate(l.fechaEvento)})`:''}</td>
+                  <td>${escapeHtml(ti.label)}${l.subtipo?` — ${escapeHtml(l.subtipo)}`:''}${l.proyecto&&l.fechaEvento?` · ${escapeHtml(l.proyecto)}`:''}</td>
                   <td>${l.duracionMeses} mes${l.duracionMeses===1?'':'es'}</td>
                   <td class="num money">${fp.moneda==='USD'?fmtMoneyUSDC(l.montoBruto):fmtMoneyC(l.montoBruto)}</td>
                   <td>${l.numeroCuotasPago}${l.comisionPorCuota?` (com. ${fp.moneda==='USD'?fmtMoneyUSDC(l.comisionPorCuota):fmtMoneyC(l.comisionPorCuota)}/cuota)`:''}</td>
@@ -5048,9 +5108,6 @@
               <tr style="font-weight:700; background:#F8F9FA;"><td colspan="5">Total del lote</td><td class="num money">${totalUSDLote>0?fmtMoneyUSDC(totalUSDLote)+' + ':''}${fmtMoneyC(totalCLPLote)}</td><td colspan="2"></td></tr>
             </tbody>
           </table>
-        </div>
-        <div class="fa-form-actions">
-          <button type="button" class="fa-btn fa-btn-primary" data-action="confirmar-lote-devengado">Confirmar Lote Completo (${lote.lineas.length} línea${lote.lineas.length===1?'':'s'})</button>
         </div>
         ` : ''}
           `;
@@ -6855,6 +6912,17 @@ ${lineasDeuda}
         <div><h1>Rentabilidad de Proyecto</h1><div class="fa-sub">Junta todos los ingresos y costos etiquetados con un evento o proyecto, sin importar el mes en que ocurrieron, y muestra su Margen Bruto como una unidad aislada: como si todo hubiera ocurrido en la fecha de cierre. No cambia el Estado de Resultados mensual ni el flujo.</div></div>
       </div>
 
+      ${proyectos.length === 0 ? '' : `
+      <div class="fa-card">
+        <div class="fa-card-title">Todos los eventos</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Evento</th><th>Fecha</th><th class="num">Ingresos</th><th class="num">Costos Directos</th><th class="num">Margen Bruto</th><th class="num">% Rentabilidad</th></tr></thead>
+          <tbody>${proyectos.map(p=>{
+            const x = getRentabilidadProyecto(p.nombre);
+            return `<tr><td>${escapeHtml(p.nombre)}</td><td>${p.fechaCierre?fmtDate(p.fechaCierre):'—'}</td><td class="num money">${fmtMoneyC(x.totalIngresos)}</td><td class="num money">${fmtMoneyC(x.totalCostos)}</td><td class="num money">${fmtMoneyC(x.margenBruto)}</td><td class="num">${x.margenBrutoPct!==null?x.margenBrutoPct.toFixed(1)+'%':'—'}</td></tr>`;
+          }).join('')}</tbody>
+        </table></div>
+      </div>`}
       ${proyectos.length === 0 ? `<div class="fa-card"><div class="fa-empty">Aún no hay eventos. Créalos en la pestaña "Próximos eventos" y aparecerán aquí.</div></div>` : ''}
 
       ${!sel ? '' : `
@@ -6872,7 +6940,7 @@ ${lineasDeuda}
           <div class="fa-kpi"><div class="fa-kpi-label">Ingresos</div><div class="fa-kpi-value income money">${fmtMoneyC(r.totalIngresos)}</div></div>
           <div class="fa-kpi"><div class="fa-kpi-label">Costos Directos</div><div class="fa-kpi-value expense money">${fmtMoneyC(r.totalCostos)}</div></div>
           <div class="fa-kpi ${r.margenBruto>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto</div><div class="fa-kpi-value ${r.margenBruto>=0?'income':'expense'} money">${fmtMoneyC(r.margenBruto)}</div></div>
-          <div class="fa-kpi ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}"><div class="fa-kpi-label">Margen Bruto %</div><div class="fa-kpi-value ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}">${r.margenBrutoPct!==null?r.margenBrutoPct.toFixed(1)+'%':'—'}</div></div>
+          <div class="fa-kpi ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}"><div class="fa-kpi-label">% Rentabilidad</div><div class="fa-kpi-value ${r.margenBrutoPct!==null&&r.margenBrutoPct>=0?'income':'expense'}">${r.margenBrutoPct!==null?r.margenBrutoPct.toFixed(1)+'%':'—'}</div></div>
         </div>
         ${tabla('Ventas registradas del proyecto', r.ingresos, r.totalVentas, 'Se cuenta el monto total de cada venta, no su prorrateo mensual.')}
         ${tabla('Ingresos cobrados en CLP del proyecto', r.cobros, r.totalCobros, 'Depósitos etiquetados con este proyecto (por ejemplo desde cartola). Si una misma venta está registrada en los dos lados, etiqueta solo uno para no contarla dos veces.')}
@@ -10418,27 +10486,36 @@ ${lineasDeuda}
       const ti = TIPOS_INGRESO_CATALOGO.find(t=>t.id===tipoIngreso) || TIPOS_INGRESO_CATALOGO[0];
       const esUSD = fp.moneda === 'USD';
       const tipoCambio = esUSD ? (Number(data.tipoCambio) || 0) : null;
-      if(!data.nombre){ showToast('Ponle un nombre al proyecto/cliente.'); return; }
-      if(!data.fechaVentaLote){ showToast('Elige la Fecha de Venta.'); return; }
+      if(!data.nombre){ showToast('Ponle el nombre del cliente o proyecto.'); return; }
+      if(ti.subtipos && !data.subtipo){ showToast('Elige la subopción (programa, curso o tipo de venta).'); return; }
+      // Eventos: la venta toma la fecha del evento elegido en Próximos eventos.
+      let fechaVenta = data.fechaVentaLote, fechaEventoSel = null, proyectoSel = data.proyecto || '';
+      if(ti.usaFechaEvento){
+        const ev = getProyectos().find(p=> p.nombre === data.eventoNombre);
+        if(!ev){ showToast('Elige el evento. Si no aparece, créalo antes en "Próximos eventos".'); return; }
+        if(!ev.fechaCierre){ showToast('Ese evento no tiene fecha. Ponla en "Próximos eventos".'); return; }
+        fechaVenta = ev.fechaCierre; fechaEventoSel = ev.fechaCierre; proyectoSel = ev.nombre;
+      }
+      if(!fechaVenta){ showToast('Elige la Fecha de Ingreso.'); return; }
       if(montoBruto <= 0){ showToast(`Ingresa el Monto Bruto en ${fp.moneda}.`); return; }
       if(esUSD && tipoCambio <= 0){ showToast('Ingresa el Tipo de Cambio (búscalo o escríbelo a mano) — esta línea paga en USD.'); return; }
       const duracionMeses = ti.duracion === 'input' ? Math.min(Math.max(Number(data.duracionMeses)||1, 1), 12) : ti.duracion;
-      if(ti.usaFechaEvento && !data.fechaEvento){ showToast('Ingresa la Fecha del Evento para este tipo de ingreso.'); return; }
       const numeroCuotasPago = Math.max(Number(data.numeroCuotasPago)||1, 1);
       const comisionPorCuota = (fp.tieneComision && !ti.comisionBloqueada) ? (Number(data.comisionPorCuota) || 0) : 0;
       const anticipoPorCuotaUSD = fp.tieneAnticipo ? (Number(data.anticipoPorCuotaUSD) || 0) : 0;
 
       const montoTotal = esUSD ? Math.round(montoBruto * tipoCambio) : Math.round(montoBruto);
-      const fechaIngreso = ti.usaFechaEvento ? data.fechaEvento : data.fechaVentaLote;
+      const fechaIngreso = ti.usaFechaEvento ? fechaEventoSel : fechaVenta;
 
       const contratoActualizado = {
         ...anterior,
         nombre: data.nombre, montoTotal,
         montoTotalUSD: esUSD ? montoBruto : null,
         tipoCambio, formaPago, tipoIngreso, duracionMeses,
-        fechaInicio: fechaIngreso, fechaVentaLote: data.fechaVentaLote,
+        fechaInicio: fechaIngreso, fechaVentaLote: fechaVenta,
         numeroCuotasPago, comisionPorCuota, anticipoPorCuotaUSD,
-        proyecto: data.proyecto || ''
+        subtipo: data.subtipo || '',
+        proyecto: proyectoSel
       };
       state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current =>
         (current||[]).map(c=> c.id===editId ? contratoActualizado : c)
@@ -10450,7 +10527,7 @@ ${lineasDeuda}
       const numCuotas = numeroCuotasPago;
       const comisionPorCuotaCLP = esUSD ? Math.round(comisionPorCuota * tipoCambio) : Math.round(comisionPorCuota);
       const anticipoPorCuotaCLP = esUSD ? Math.round(anticipoPorCuotaUSD * tipoCambio) : 0;
-      const inicioCuotas = new Date(data.fechaVentaLote+'T00:00:00');
+      const inicioCuotas = new Date(fechaVenta+'T00:00:00');
       const gastosNuevos = [];
       for(let i=0; i<numCuotas; i++){
         const d = new Date(inicioCuotas.getFullYear(), inicioCuotas.getMonth()+i, 1);
@@ -10513,6 +10590,31 @@ ${lineasDeuda}
       }
       state.editandoLineaLoteIndex = null;
       showToast('Línea actualizada dentro del lote');
+      render();
+    }
+    else if(action === 'confirmar-ventas'){
+      // Confirma las líneas ya agregadas más la que esté escrita en el formulario (si tiene nombre o monto).
+      const data = readFields(btn.closest('[data-form="linea-lote"]'));
+      const lineas = ((state.loteEnConstruccion && state.loteEnConstruccion.lineas) || []).slice();
+      if(data.nombre || Number(data.montoBruto) > 0){
+        const linea = leerYValidarLinea(data);
+        if(!linea) return;
+        lineas.push(linea);
+      }
+      if(lineas.length === 0){ showToast('Completa al menos una venta.'); return; }
+      const loteId = uid('lote');
+      const contratosNuevos = [], gastosNuevos = [];
+      lineas.forEach(linea=>{
+        const resultado = procesarLineaDevengada(linea, loteId, lineas.length === 1);
+        contratosNuevos.push(resultado.contrato);
+        gastosNuevos.push(...resultado.gastosNuevos);
+      });
+      state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current => [...(current||[]), ...contratosNuevos])) ?? state.contratosDevengados;
+      if(gastosNuevos.length){
+        state.gastos = (await saveKeyMerged('gastos', current => [...(current||[]), ...gastosNuevos])) ?? state.gastos;
+      }
+      state.loteEnConstruccion = { lineas: [] };
+      showToast(lineas.length === 1 ? 'Venta registrada' : `${lineas.length} ventas registradas`);
       render();
     }
     else if(action === 'registrar-ingreso-unico'){
