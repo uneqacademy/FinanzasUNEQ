@@ -8586,7 +8586,7 @@ ${lineasDeuda}
 
       <div class="fa-card">
         <div class="fa-card-title">Zona de riesgo</div>
-        <div class="fa-section-note">Esto borra permanentemente todos tus ingresos y gastos guardados en esta app. No se puede deshacer.</div>
+        <div class="fa-section-note">Esto borra permanentemente todo lo guardado en esta versión (ingresos, gastos, tesorería, deudas, cartolas, reglas y proyectos). No se puede deshacer — descarga antes un Respaldo (.json) si quieres conservar algo.</div>
         <button class="fa-btn fa-btn-danger" data-action="reset-data">Borrar todos los datos</button>
       </div>
     `;
@@ -9509,6 +9509,14 @@ ${lineasDeuda}
         state.contratosDevengados = [];
         state.plantillasGastosFijos = [];
         state.cuentasPorPagar = { items: [], pagos: [] };
+        state.importacionHistorica = [];
+        state.pagosImpuestos = [];
+        state.tesoreriaUSD = { movimientos: [] };
+        state.cartola = cartolaNormalizar(null);
+        state.cartolaFiltro = { mes:'', cuenta:'', estado:'' };
+        state.cartolaMensajes = [];
+        state.cartolaDividir = null;
+        state.proyectoSel = '';
         state.loteEnConstruccion = { lineas: [] };
         state.editingContratoId = null;
         state.editingDeudaId = null;
@@ -9543,13 +9551,15 @@ ${lineasDeuda}
           saveKey('pagosFijosPagos', {}), saveKey('pagosFijosMontos', {}),
           saveKey('tesoreria', state.tesoreria), saveKey('deudas', state.deudas),
           saveKey('contratosDevengados', []),
-          saveKey('plantillasGastosFijos', []), saveKey('cuentasPorPagar', state.cuentasPorPagar)
+          saveKey('plantillasGastosFijos', []), saveKey('cuentasPorPagar', state.cuentasPorPagar),
+          saveKey('importacionHistorica', []), saveKey('pagosImpuestos', []), saveKey('tesoreriaUSD', state.tesoreriaUSD),
+          saveKey('cartola', state.cartola)
         ]);
         // Antes esto no se revisaba — si UNA clave fallaba al guardar (ej. por permisos en Firebase),
         // igual se mostraba "restablecido" como si todo hubiera funcionado, y esa clave se quedaba con los
         // datos viejos. Ahora si falla algo, se avisa explícitamente en vez de fingir que salió bien.
         if(resultados.every(ok=>ok)){
-          showToast('Datos restablecidos — Ingresos, Gastos, Cuenta USD, Tesorería, Deudas, Estado de Resultados, Plantillas y Cuentas por Pagar quedaron en blanco');
+          showToast('Datos restablecidos — Ingresos, Gastos, Cuenta USD, Tesorería, Deudas, Estado de Resultados, Plantillas, Cuentas por Pagar y Cartolas quedaron en blanco');
         } else {
           showToast('⚠️ Algunas claves no se pudieron borrar en Firebase (revisa tu conexión o los permisos). Recarga la página para ver qué quedó sin borrar.');
         }
@@ -11058,7 +11068,7 @@ ${lineasDeuda}
     }
     else if(action === 'reset-data'){
       state.confirmDialog = {
-        message: 'Esto borrará TODOS tus datos guardados en esta versión de prueba: Ingresos, Gastos, Cuenta USD, Pagos Fijos, Tesorería (bóvedas), Gestión de Deudas y Estado de Resultados. ¿Confirmas que quieres continuar?',
+        message: 'Esto borrará TODOS tus datos guardados en esta versión de prueba: Ingresos, Gastos, Cuenta USD, Pagos Fijos, Tesorería (bóvedas), Gestión de Deudas, Estado de Resultados, Cartolas bancarias (movimientos, clasificaciones y reglas) y Proyectos. Antes de borrar, descarga un Respaldo (.json) si quieres conservar algo. ¿Confirmas que quieres continuar?',
         action: 'do-reset-data',
         data: null,
         confirmLabel: 'Borrar todo'
