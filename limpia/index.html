@@ -1821,6 +1821,7 @@
     cartolaFiltro: { mes:'', cuenta:'', estado:'' },
     cartolaMensajes: [],
     cartolaDividir: null, // { id, partes } — línea de cartola que se está dividiendo
+    cartolaClasificar: null, // { id, tipo } — línea de cartola que se está clasificando
     ingresos: [],
     gastos: [],
     ingresosUSD: [],
@@ -2085,7 +2086,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar',
+    'import-cartola-file','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -4020,6 +4021,7 @@
       </div>
       ${renderConfirmModal()}
       ${renderCartolaDividirModal()}
+      ${renderCartolaClasificarModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
       ${renderMarcarCuotaPagadaModal()}
@@ -5983,7 +5985,7 @@ ${lineasDeuda}
   }
   function cartolaReabrirMov(mov){
     cartolaQuitarEfectos(mov.id);
-    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = '';
+    mov.estado = 'por_clasificar'; mov.tipo = null; mov.categoria = ''; mov.regla = null; mov.devengo = ''; mov.partes = null; mov.proyecto = ''; mov.detalle = null;
   }
 
   // Nombre corto para "Proveedor / Cliente": la descripción sin códigos largos.
@@ -6011,7 +6013,7 @@ ${lineasDeuda}
     if(mov.estado !== 'clasificado') return;
     const nombre = cartolaNombreCorto(mov.desc);
     if(mov.tipo === 'gasto' && mov.cargo > 0){
-      cartolaCrearGasto(mov, mov.cargo, mov.categoria, mov.devengo || '', null, '', mov.proyecto);
+      cartolaCrearGasto(mov, mov.cargo, mov.categoria, mov.devengo || '', null, '', mov.proyecto, mov.detalle);
     } else if(mov.tipo === 'dividido' && mov.cargo > 0){
       (mov.partes || []).forEach(p=>{
         if(p.tipo === 'gasto'){
@@ -6027,7 +6029,7 @@ ${lineasDeuda}
     } else if(mov.tipo === 'ingreso' && mov.abono > 0){
       cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
       const ingreso = {
-        id: uid('ing'), fecha: mov.fecha, categoria: mov.categoria, cliente: nombre, pasarela: '',
+        id: uid('ing'), fecha: mov.fecha, categoria: mov.categoria, cliente: nombre, pasarela: (mov.detalle && mov.detalle.medioPago) || '', descripcion: (mov.detalle && mov.detalle.descripcion) || '',
         monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id, proyecto: mov.proyecto || ''
       };
       state.ingresos.push(ingreso);
@@ -6042,16 +6044,17 @@ ${lineasDeuda}
   }
   // Crea el gasto de una línea (o de una parte). Si el mes de devengo es distinto al mes en que se pagó, el gasto
   // queda en el mes de devengo (Estado de Resultados) y la salida de plata queda en el mes del pago (Flujo).
-  function cartolaCrearGasto(mov, monto, categoria, devengoYM, parteId, nota, proyecto){
+  function cartolaCrearGasto(mov, monto, categoria, devengoYM, parteId, nota, proyecto, detalle){
     cartolaAsegurarCategoria(state.config.categoriasGastos, categoria);
     const nombre = cartolaNombreCorto(mov.desc);
     const ymPago = mov.fecha.slice(0,7);
     const ym = devengoYM || ymPago;
     const mismoMes = ym === ymPago;
     const gasto = {
-      id: uid('gas'), fecha: mismoMes ? mov.fecha : `${ym}-01`, proveedor: nombre,
-      descripcion: `Cartola ${mov.cuenta}: ${nombre}` + (nota ? ` — ${nota}` : '') + (mismoMes ? '' : ` (devengado en ${ym}, pagado el ${fmtDate(mov.fecha)})`),
-      categoria, monto, metodo: 'Transferencia', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id, origenParte: parteId || null, proyecto: proyecto || ''
+      id: uid('gas'), fecha: mismoMes ? mov.fecha : `${ym}-01`, proveedor: (detalle && detalle.proveedor) || nombre,
+      descripcion: ((detalle && detalle.descripcion) || `Cartola ${mov.cuenta}: ${nombre}`) + (nota ? ` — ${nota}` : '') + (mismoMes ? '' : ` (devengado en ${ym}, pagado el ${fmtDate(mov.fecha)})`),
+      categoria, monto, metodo: (detalle && detalle.metodo) || 'Cargo Automático Cuenta Corriente', moneda: 'CLP', boveda: 'operacion', origenCartola: mov.id, origenParte: parteId || null, proyecto: proyecto || '',
+      ...((detalle && detalle.pcts) || {})
     };
     if(mismoMes){
       state.gastos.push(gasto);
@@ -6065,6 +6068,99 @@ ${lineasDeuda}
       });
     }
   }
+  // ---- Clasificar una línea de cartola con el mismo formulario que se usa al agregar un gasto/ingreso a mano ----
+  // Fecha, moneda y monto vienen del banco (no se editan). El resto se completa como en el registro manual.
+  const METODOS_PAGO_BANCO = ['Cargo Automático Cuenta Corriente', 'Tarjeta de Débito', 'Cheque'];
+  function cartolaAbrirClasificar(movId){
+    const mov = state.cartola.movimientos.find(m=> m.id === movId);
+    if(!mov) return;
+    state.cartolaClasificar = { id: mov.id, tipo: mov.cargo > 0 ? 'gasto' : 'ingreso' };
+    render();
+  }
+  function renderCartolaClasificarModal(){
+    const cl = state.cartolaClasificar;
+    if(!cl) return '';
+    const mov = state.cartola.movimientos.find(m=> m.id === cl.id);
+    if(!mov) return '';
+    const esCargo = mov.cargo > 0;
+    const monto = esCargo ? mov.cargo : mov.abono;
+    const tipoDef = cl.tipo;
+    const nombre = cartolaNombreCorto(mov.desc);
+    const cd = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    const ef = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+    const optCat = lista=> lista.map(c=>`<option>${escapeHtml(c)}</option>`).join('');
+    const ver = (...tipos)=> `data-solo="${tipos.join(' ')}" style="display:${tipos.includes(tipoDef)?'':'none'};"`;
+    return `
+      <div class="fa-modal-overlay" data-action="cartola-clasificar-cerrar">
+        <div class="fa-modal fa-modal-wide" data-action="confirm-noop" id="fa-cartola-clasificar" style="max-width:640px;">
+          <div class="fa-modal-title">Clasificar movimiento — ${fmtMoney(monto)}</div>
+          <div class="fa-hint" style="margin-top:0;">Cuenta ${mov.cuenta} · ${escapeHtml(mov.desc)}</div>
+          <div class="fa-form-grid" style="grid-template-columns:repeat(3,1fr);">
+            <div class="fa-field"><label>Fecha</label><input type="text" value="${fmtDate(mov.fecha)}" disabled></div>
+            <div class="fa-field"><label>Moneda</label><input type="text" value="CLP" disabled></div>
+            <div class="fa-field"><label>Monto</label><input type="text" value="${fmtMoney(monto)}" disabled></div>
+          </div>
+          <div class="fa-hint">Fecha, moneda y monto vienen del banco y no se cambian.</div>
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>¿Qué es?</label>
+              <select name="tipo" onchange="window.faCartolaClasificarTipo(this)">${CARTOLA_TIPOS.map(t=>`<option value="${t.id}" ${t.id===tipoDef?'selected':''}>${t.label}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field" ${ver('gasto')}><label>Método de pago</label>
+              <select name="metodo">${METODOS_PAGO_BANCO.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field" ${ver('gasto')}><label>Proveedor</label><input type="text" name="proveedor" value="${escapeHtml(nombre)}"></div>
+            <div class="fa-field" ${ver('gasto')}><label>Descripción</label><input type="text" name="descripcion" value="${escapeHtml(mov.desc)}"></div>
+            <div class="fa-field" ${ver('gasto')}><label>Categoría</label>
+              <select name="catGasto"><option value="">Elige la categoría…</option>
+                <optgroup label="Costos Directos">${optCat(cd)}</optgroup>
+                <optgroup label="Gastos Operacionales y otros">${optCat(state.config.categoriasGastos.filter(c=> !cd.includes(c) && !ef.includes(c)))}</optgroup>
+                <optgroup label="Egresos de Flujo (no afecta Estado de Resultados)">${optCat(ef)}</optgroup>
+              </select>
+            </div>
+            <div class="fa-field" ${ver('gasto')}><label>Mes del gasto (si no es el del pago)</label><input type="month" name="devengo"></div>
+            <div class="fa-field" ${ver('ingreso')}><label>Origen del ingreso</label>
+              <select name="catIngreso"><option value="">Elige el origen…</option>${optCat(state.config.categoriasIngresos)}</select>
+            </div>
+            <div class="fa-field" ${ver('ingreso')}><label>Detalle / comentarios</label><input type="text" name="detalleIngreso" value="${escapeHtml(mov.desc)}"></div>
+            <div class="fa-field" ${ver('ingreso')}><label>Medio de pago</label>
+              <select name="medioPago"><option value="">—</option>${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<option>${escapeHtml(p)}</option>`).join('')}</select>
+            </div>
+            <div class="fa-field" ${ver('gasto','ingreso')}><label>Proyecto / Evento (opcional)</label>
+              <select name="proyecto">${opcionesProyecto('')}</select>
+            </div>
+            <div class="fa-field" ${ver('deuda')}><label>Detalle de la deuda</label><input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea"></div>
+          </div>
+          <div ${ver('gasto')}>
+            <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%):</div>
+            <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
+              ${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0"></div>`).join('')}
+            </div>
+          </div>
+          <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px;">
+            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            <div class="fa-field" style="margin-top:6px;"><label>Texto que se buscará en la descripción</label><input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(mov.desc))}"></div>
+            <div class="fa-hint">La regla recuerda el tipo, la categoría y el método (y las líneas de negocio). El proyecto no se recuerda: un mismo proveedor puede servir a eventos distintos.</div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="cartola-clasificar-cerrar">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="cartola-clasificar-guardar">Guardar</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  window.faCartolaClasificarTipo = function(sel){
+    const cont = document.getElementById('fa-cartola-clasificar'); if(!cont) return;
+    cont.querySelectorAll('[data-solo]').forEach(el=>{
+      el.style.display = el.dataset.solo.split(' ').includes(sel.value) ? '' : 'none';
+    });
+  };
+  // Lee los % de línea de negocio de un formulario; null si no se completó ninguno.
+  function cartolaPctsDeForm(f){
+    const pcts = {}; let suma = 0;
+    UNIDADES_NEGOCIO.forEach(u=>{ const v = Number(f['pct_'+u.id])||0; pcts['pct_'+u.id] = v; suma += v; });
+    return { pcts: suma > 0 ? pcts : null, suma };
+  }
+
   async function cartolaGuardarTodo(){
     await saveKey('cartola', state.cartola);
     await saveKey('gastos', state.gastos);
@@ -6087,7 +6183,7 @@ ${lineasDeuda}
         if(existentes.has(m.id)){ repetidas++; return; }
         const mov = { ...m, estado:'por_clasificar', tipo:null, categoria:'', regla:null };
         const regla = cartolaBuscarRegla(mov);
-        if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); auto++; }
+        if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); mov.detalle = regla.detalle ? {...regla.detalle} : null; auto++; }
         state.cartola.movimientos.push(mov);
         if(mov.estado === 'clasificado') cartolaAplicarEfectos(mov);
         nuevas++;
@@ -6125,15 +6221,28 @@ ${lineasDeuda}
     } else if(!CARTOLA_TIPOS.some(t=>t.id === tipo)){
       showToast('Elige qué tipo de movimiento es.'); return;
     }
+    // Datos del formulario completo (método de pago, proveedor, líneas de negocio, medio de pago...). La regla solo
+    // recuerda lo que sirve para otras líneas parecidas (método, líneas de negocio, medio de pago).
+    let detalle = null, detalleRegla = null;
+    if(tipo === 'gasto'){
+      const { pcts, suma } = cartolaPctsDeForm(form);
+      if(pcts && Math.round(suma) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + suma + '%) o quedar todas vacías.'); return; }
+      detalle = { metodo: form.metodo || METODOS_PAGO_BANCO[0], proveedor: (form.proveedor || '').trim(), descripcion: (form.descripcion || '').trim(), pcts };
+      detalleRegla = { metodo: detalle.metodo, pcts };
+    } else if(tipo === 'ingreso'){
+      detalle = { descripcion: (form.detalleIngreso || '').trim(), medioPago: form.medioPago || '' };
+      detalleRegla = { medioPago: detalle.medioPago };
+    }
     let regla = null;
     const patron = cartolaNorm(form.patron);
     if(form.crearRegla && patron){
       state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
-      regla = { id: uid('regla'), patron, tipo, categoria };
+      regla = { id: uid('regla'), patron, tipo, categoria, detalle: detalleRegla };
       state.cartola.reglas.push(regla);
     }
     const afectadas = [mov];
     cartolaSetClasificacion(mov, tipo, categoria, regla ? regla.id : null);
+    mov.detalle = detalle;
     mov.devengo = (tipo === 'gasto' && form.devengo && form.devengo !== mov.fecha.slice(0,7)) ? form.devengo : '';
     mov.partes = null;
     mov.proyecto = (tipo === 'gasto' || tipo === 'ingreso') ? (form.proyecto || '') : '';
@@ -6144,6 +6253,7 @@ ${lineasDeuda}
         if(tipo === 'gasto' && !(m.cargo > 0)) return;
         if(tipo === 'ingreso' && !(m.abono > 0)) return;
         cartolaSetClasificacion(m, tipo, categoria, regla.id);
+        m.detalle = detalleRegla ? {...detalleRegla} : null;
         afectadas.push(m);
       });
     }
@@ -6151,6 +6261,7 @@ ${lineasDeuda}
     await cartolaGuardarTodo();
     showToast(afectadas.length > 1 ? `Listo: se clasificaron ${afectadas.length} líneas parecidas.` : 'Línea clasificada.');
     render();
+    return true;
   }
   async function cartolaReabrir(movId){
     const mov = state.cartola.movimientos.find(m=>m.id === movId);
@@ -6410,7 +6521,7 @@ ${lineasDeuda}
     const catGasto = state.config.categoriasGastos, catIng = state.config.categoriasIngresos;
     return `
       <div class="fa-topbar">
-        <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Al clasificar una, se crea el gasto o ingreso y se actualizan Estado de Resultados, ingresos y flujo.</div></div>
+        <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Al pulsar Clasificar… se abre el mismo formulario que usas al registrar un gasto o ingreso a mano, con la fecha, el monto y la descripción del banco ya puestos. Al guardar, se actualizan Estado de Resultados, ingresos y flujo.</div></div>
       </div>
       ${pend.length === 0 ? `<div class="fa-card"><div class="fa-empty">No hay nada por clasificar. 🎉 (Carga más cartolas en "Cartolas bancarias".)</div></div>` : ''}
       ${meses.map(ym=>{
@@ -6420,7 +6531,7 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">${cartolaMesLabel(ym)} — ${l.length} línea${l.length===1?'':'s'} <span style="font-weight:400; font-size:12px; color:var(--ink-soft);">(abonos ${fmtMoney(tAb)} · cargos ${fmtMoney(tCa)})</span></div>
         <div class="fa-table-wrap"><table class="fa-table">
-          <thead><tr><th>Fecha</th><th>Cta</th><th>Descripción</th><th class="num">Abono</th><th class="num">Cargo</th><th>¿Qué es?</th><th>Recordar</th><th></th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Cta</th><th>Descripción</th><th class="num">Abono</th><th class="num">Cargo</th><th></th></tr></thead>
           <tbody>${l.map(m=>{
             const defTipo = m.abono > 0 ? 'ingreso' : 'gasto';
             return `
@@ -6428,19 +6539,7 @@ ${lineasDeuda}
               <td>${fmtDate(m.fecha)}</td><td>${m.cuenta}</td><td>${escapeHtml(m.desc)}</td>
               <td class="num" style="color:var(--income);">${m.abono ? fmtMoney(m.abono) : ''}</td>
               <td class="num" style="color:var(--expense);">${m.cargo ? fmtMoney(m.cargo) : ''}</td>
-              <td style="min-width:230px;">
-                <select name="tipo" onchange="window.faCartolaTipo(this)">${CARTOLA_TIPOS.map(t=>`<option value="${t.id}" ${t.id===defTipo?'selected':''}>${t.label}</option>`).join('')}</select>
-                <select name="catGasto" style="display:${defTipo==='gasto'?'':'none'}; margin-top:4px;"><option value="">Categoría de gasto…</option>${catGasto.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
-                <select name="catIngreso" style="display:${defTipo==='ingreso'?'':'none'}; margin-top:4px;"><option value="">Categoría de ingreso…</option>${catIng.map(x=>`<option>${escapeHtml(x)}</option>`).join('')}</select>
-                <input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea" style="display:none; margin-top:4px;">
-                <label data-wrap="devengo" style="display:${defTipo==='gasto'?'block':'none'}; margin-top:4px; font-size:11.5px; color:var(--ink-soft);">Mes del gasto (si no es el del pago)<input type="month" name="devengo" style="display:block; width:100%;"></label>
-                <select name="proyecto" title="Proyecto / evento al que pertenece este gasto o ingreso (opcional)" style="margin-top:4px;">${opcionesProyecto('')}</select>
-              </td>
-              <td style="min-width:190px;">
-                <label style="font-size:11.5px; display:flex; gap:4px; align-items:center;"><input type="checkbox" name="crearRegla" checked> Aplicar a las parecidas</label>
-                <input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(m.desc))}" title="Texto que se buscará en las próximas cartolas" style="margin-top:3px; width:100%;">
-              </td>
-              <td style="white-space:nowrap;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="asignar-cartola" data-id="${m.id}">Asignar</button>${m.cargo > 0 ? ` <button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="cartola-dividir-abrir" data-id="${m.id}">Dividir…</button>` : ''}</td>
+              <td style="white-space:nowrap;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="cartola-clasificar-abrir" data-id="${m.id}">Clasificar…</button>${m.cargo > 0 ? ` <button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="cartola-dividir-abrir" data-id="${m.id}">Dividir…</button>` : ''}</td>
             </tr>`;}).join('')}
           </tbody>
         </table></div>
@@ -9203,6 +9302,19 @@ ${lineasDeuda}
     else if(action === 'reabrir-cartola'){
       await cartolaReabrir(btn.dataset.id);
     }
+    else if(action === 'cartola-clasificar-abrir'){
+      cartolaAbrirClasificar(btn.dataset.id);
+    }
+    else if(action === 'cartola-clasificar-cerrar'){
+      state.cartolaClasificar = null;
+      render();
+    }
+    else if(action === 'cartola-clasificar-guardar'){
+      const cl = state.cartolaClasificar;
+      if(!cl) return;
+      const guardado = await cartolaAsignar(cl.id, readFields(document.getElementById('fa-cartola-clasificar')));
+      if(guardado){ state.cartolaClasificar = null; render(); }
+    }
     else if(action === 'cartola-dividir-abrir'){
       const mov = state.cartola.movimientos.find(m=> m.id === btn.dataset.id);
       if(!mov || !(mov.cargo > 0)) return;
@@ -9584,6 +9696,7 @@ ${lineasDeuda}
         state.cartolaFiltro = { mes:'', cuenta:'', estado:'' };
         state.cartolaMensajes = [];
         state.cartolaDividir = null;
+        state.cartolaClasificar = null;
         state.proyectoSel = '';
         state.loteEnConstruccion = { lineas: [] };
         state.editingContratoId = null;
