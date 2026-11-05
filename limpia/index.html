@@ -1697,7 +1697,7 @@
       let ymIni = ymHoy;
       if(String(socio.sueldoDesde || '').split('-').length === 2 && Number(socio.sueldoDesde.split('-')[0]) > 2000){
         const [ai, mi] = socio.sueldoDesde.split('-').map(Number);
-        ymIni = Math.min(ai * 12 + (mi - 1), ymHoy);
+        ymIni = ai * 12 + (mi - 1); // si rige desde un mes futuro, todavía no se genera nada
       }
       for(let ym = ymIni; ym <= ymHoy; ym++){
         const a = Math.floor(ym / 12), m = ym % 12;
