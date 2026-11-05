@@ -2435,12 +2435,15 @@
       return null;
     }
     try {
-      const result = await fbRef(key).transaction(current => transformFn(current));
+      // Firebase no guarda listas vacías (las devuelve como null o las omite dentro de un objeto), así que se devuelve
+      // lo que calculó la transformación —igual a lo guardado, pero con las listas vacías intactas.
+      let calculado;
+      const result = await fbRef(key).transaction(current => (calculado = transformFn(current)));
       if(!result.committed){
         showToast('No se pudo guardar "' + key + '" — inténtalo de nuevo.');
         return null;
       }
-      return result.snapshot.val();
+      return calculado !== undefined ? JSON.parse(JSON.stringify(calculado)) : result.snapshot.val();
     } catch (e) {
       console.error(`Firebase transacción de "${key}" falló`, e);
       showToast('No se pudo guardar "' + key + '" en Firebase. Revisa tu conexión e intenta de nuevo.');
