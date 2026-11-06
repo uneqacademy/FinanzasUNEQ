@@ -507,7 +507,7 @@
   // A propósito NO es editable desde Configuración como las demás categorías — es fijo, para que el registro
   // de ingresos quede siempre consistente y comparable entre meses.
   // Orígenes de ingreso de la lista nueva (Ingresos y Distribución y Por clasificar).
-  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Otros Ingresos no Considerados en Flujo"];
+  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Servicios de Agencia","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Otros Ingresos no Considerados en Flujo"];
   const ORIGENES_INGRESO_PF = [
     "Academia - Cursos Autogestionados",
     "Academia - Mentorías",
@@ -2270,7 +2270,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -2646,6 +2646,13 @@
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.pasarelasPago) { state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      // Una sola vez: origen de ingreso "Servicios de Agencia", categoría de gasto "Proveedores" y las líneas que siempre se clasifican a mano.
+      if(!state.config.migServiciosProveedores){
+        if(!state.config.categoriasIngresos.includes('Servicios de Agencia')) state.config.categoriasIngresos.push('Servicios de Agencia');
+        if(!state.config.categoriasGastos.includes('Proveedores')) state.config.categoriasGastos.push('Proveedores');
+        if(!state.config.cartolaSiempreManual) state.config.cartolaSiempreManual = ['inmobili'];
+        state.config.migServiciosProveedores = true; gastoFinancieroCambio = true;
+      }
       // Una sola vez: agrega "Otros Gastos que no afectan EERR" a los Egresos de Flujo ya guardados (si después la quitas, no vuelve).
       if(!state.config.migOtrosGastosNoEERR){
         if(!state.config.categoriasEgresoFlujo.includes(CAT_OTROS_GASTOS_NO_EERR)) state.config.categoriasEgresoFlujo.push(CAT_OTROS_GASTOS_NO_EERR);
@@ -6274,7 +6281,14 @@ ${lineasDeuda}
     };
   }
 
+  // Líneas que SIEMPRE se clasifican a mano (ej. "Inmobiliaria": a veces es pasada de dinero y a veces pago de un servicio):
+  // no se aplican reglas ni se crean reglas nuevas con ellas.
+  function cartolaEsSiempreManual(desc){
+    const dn = cartolaNorm(desc);
+    return (state.config.cartolaSiempreManual || []).some(p=> { const pn = cartolaNorm(p); return pn && dn.includes(pn); });
+  }
   function cartolaBuscarRegla(mov){
+    if(cartolaEsSiempreManual(mov.desc)) return null;
     const dn = cartolaNorm(mov.desc);
     let mejor = null;
     state.cartola.reglas.forEach(r=>{
@@ -6565,7 +6579,8 @@ ${lineasDeuda}
             </div>
           </div>
           <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px;">
-            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${cl.editar ? '' : 'checked'}> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${(cl.editar || cartolaEsSiempreManual(mov.desc)) ? '' : 'checked'} ${cartolaEsSiempreManual(mov.desc) ? 'disabled' : ''}> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            ${cartolaEsSiempreManual(mov.desc) ? '<div class="fa-hint" style="margin:4px 0 0 0;">Esta línea está en tu lista de "clasificar siempre a mano": se clasifica solo esta, sin reglas.</div>' : ''}
             <div class="fa-field" style="margin-top:6px;"><label>Texto que se buscará en la descripción</label><input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(mov.desc))}"></div>
             <div class="fa-hint">La regla recuerda el tipo, la categoría y el método (y las líneas de negocio). El proyecto no se recuerda: un mismo proveedor puede servir a eventos distintos.</div>
           </div>
@@ -6679,7 +6694,7 @@ ${lineasDeuda}
     }
     let regla = null;
     const patron = cartolaNorm(form.patron);
-    if(form.crearRegla && patron && !deudaInfo){
+    if(form.crearRegla && patron && !deudaInfo && !cartolaEsSiempreManual(mov.desc)){
       state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
       regla = { id: uid('regla'), patron, tipo, categoria, detalle: detalleRegla };
       state.cartola.reglas.push(regla);
@@ -7025,6 +7040,12 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">Reglas de reconocimiento (${c.reglas.length})</div>
         <div class="fa-section-note">Si la descripción de una línea contiene el texto de la regla, la app la clasifica sola. Se crean al clasificar en "Por clasificar". Gana la regla con el texto más largo.</div>
+        <div style="border-top:1px solid var(--border); margin:10px 0; padding-top:10px;" data-form="manual-cartola">
+          <div style="font-weight:600; font-size:13px;">Líneas que siempre clasifico a mano</div>
+          <div class="fa-hint" style="margin:2px 0 8px 0;">Si la descripción contiene alguno de estos textos, la app nunca la clasifica sola ni crea reglas con ella. Sirve para proveedores o clientes que unas veces son una cosa y otras otra (ej. "Inmobiliaria").</div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">${(state.config.cartolaSiempreManual || []).map((x,i)=>`<span class="fa-chip">${escapeHtml(x)}<button data-action="quitar-manual-cartola" data-idx="${i}">&times;</button></span>`).join('') || '<span class="fa-hint" style="margin:0;">Ninguna todavía.</span>'}</div>
+          <div style="display:flex; gap:8px; max-width:420px;"><input type="text" name="manualPatron" placeholder="Ej: inmobili" style="flex:1;"><button type="button" class="fa-btn fa-btn-ghost" data-action="agregar-manual-cartola">Agregar</button></div>
+        </div>
         <details>
           <summary style="cursor:pointer; font-weight:600; font-size:13px;">Ver reglas</summary>
           <div class="fa-table-wrap" style="margin-top:8px;"><table class="fa-table">
@@ -9901,6 +9922,24 @@ ${lineasDeuda}
         data: a.cuenta + '|' + a.desde,
         confirmLabel: 'Eliminar cartola'
       };
+      render();
+    }
+    else if(action === 'agregar-manual-cartola'){
+      const data = readFields(btn.closest('[data-form="manual-cartola"]'));
+      const txt = cartolaNorm(data.manualPatron || '');
+      if(!txt){ showToast('Escribe el texto que debe contener la descripción.'); return; }
+      if(!state.config.cartolaSiempreManual) state.config.cartolaSiempreManual = [];
+      if(!state.config.cartolaSiempreManual.includes(txt)) state.config.cartolaSiempreManual.push(txt);
+      await saveKey('config', state.config, {silent:true});
+      showToast('Listo: esas líneas se clasificarán siempre a mano.');
+      render();
+    }
+    else if(action === 'quitar-manual-cartola'){
+      const i = Number(btn.dataset.idx);
+      if(state.config.cartolaSiempreManual && state.config.cartolaSiempreManual[i] !== undefined){
+        state.config.cartolaSiempreManual.splice(i, 1);
+        await saveKey('config', state.config, {silent:true});
+      }
       render();
     }
     else if(action === 'cartola-clasificar-abrir'){
