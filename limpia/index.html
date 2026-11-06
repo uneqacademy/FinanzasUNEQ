@@ -450,6 +450,9 @@
   // solo se considera en Cuenta Corriente (saldo real) — nunca en Resumen, Flujo de Caja, Rentabilidad ni
   // Fijos vs Variables. Todas las demás categorías cuentan en todos los cálculos financieros.
   const CAT_INGRESO_NO_VENTA = "Otros Ingresos no Considerados en Flujo";
+  // Pasada de dinero: plata de un cliente que entra a la cuenta para cubrir algo que se pagó con nuestra tarjeta (ej. Facebook Ads).
+  // No es venta (fuera de Estado de Resultados, Rentabilidad y Venta Bruta) pero sí entra al banco, así que cuenta en el Flujo de Caja.
+  const CAT_INGRESO_PASADA = "Pasada de Dinero (no es venta)";
   const CAT_INGRESO_NO_VENTA_ANTERIOR = "No asociado a Servicios Prestados Directos"; // nombre viejo, para migrar datos existentes
   const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
   // Pago del estado de cuenta de la tarjeta de crédito: mueve plata real de Cuenta Corriente (por eso SÍ debe
@@ -504,7 +507,7 @@
   // A propósito NO es editable desde Configuración como las demás categorías — es fijo, para que el registro
   // de ingresos quede siempre consistente y comparable entre meses.
   // Orígenes de ingreso de la lista nueva (Ingresos y Distribución y Por clasificar).
-  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Otros Ingresos no Considerados en Flujo"];
+  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Otros Ingresos no Considerados en Flujo"];
   const ORIGENES_INGRESO_PF = [
     "Academia - Cursos Autogestionados",
     "Academia - Mentorías",
@@ -1845,6 +1848,10 @@
       if(!config.categoriasNoVenta.includes(cat)){ config.categoriasNoVenta.push(cat); changed = true; }
       if(!config.categoriasIngresosSoloFlujo.includes(cat)){ config.categoriasIngresosSoloFlujo.push(cat); changed = true; }
     });
+    // Pasada de Dinero: no-venta pero SÍ en Flujo de Caja (igual que Crédito Comercial).
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresos.push(CAT_INGRESO_PASADA); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_PASADA)){ config.categoriasNoVenta.push(CAT_INGRESO_PASADA); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_PASADA); changed = true; }
     // "Otros Ingresos" DEJÓ de ser no-venta: en Ingresos y Distribución (V2) es una de las 5 categorías
     // oficiales del embudo Profit First — es venta real, no financiamiento. Se saca de las listas de
     // exclusión si quedó ahí de una versión anterior (self-healing en la otra dirección).
