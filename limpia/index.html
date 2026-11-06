@@ -6873,6 +6873,75 @@ ${lineasDeuda}
     render();
   }
 
+  // ---- Cuadre mes a mes: saldo del banco contra Operación en la app, con la diferencia explicada ----
+  // Acumulado desde el Día Cero. Cada diferencia se descompone en causas conocidas (lo que la app no cuenta o cuenta de más)
+  // y lo que no se logra explicar queda como "Otros" (movimientos manuales sin enlazar, montos distintos, etc.).
+  function cartolaCuadreMensual(){
+    const c = state.cartola;
+    if(!c || !c.archivos || !c.archivos.length) return [];
+    const dc = state.config.fechaDiaCero || '';
+    const opMovs = state.tesoreria.movimientos.filter(m=> m.boveda === 'operacion' && esMovimientoVigente(m));
+    const signo = m=> (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
+    const saldoIni = Number((state.tesoreria.saldosIniciales||{}).operacion) || 0;
+    const diaCeroApp = saldoIni + state.tesoreria.movimientos.filter(m=> m.origen === 'dia-cero:operacion').reduce((s,m)=> s + signo(m), 0);
+    const autoIds = new Set((state.deudas.giros||[]).filter(g=> g.auto).map(g=> 'giro:' + g.id));
+    const meses = [...new Set(c.archivos.map(a=> a.desde.slice(0,7)))].sort();
+    return meses.map(ym=>{
+      const corte = c.archivos.filter(a=> a.desde.slice(0,7) === ym).reduce((m,a)=> a.hasta > m ? a.hasta : m, '');
+      const cuentas = [...new Set(c.archivos.filter(a=> a.desde <= corte).map(a=> a.cuenta))];
+      let banco = 0, inicial = 0; const sinCartola = [];
+      cuentas.forEach(cu=>{
+        const arch = c.archivos.filter(a=> a.cuenta === cu && a.desde <= corte).sort((a,b)=> a.desde.localeCompare(b.desde));
+        const ult = arch[arch.length-1];
+        banco += Number(ult.saldoFinal)||0;
+        if(ult.desde.slice(0,7) !== ym) sinCartola.push(cu);
+        inicial += (Number(arch[0].saldoAnterior)||0) + c.movimientos.filter(m=> m.cuenta === cu && dc && m.fecha < dc).reduce((s,m)=> s + m.abono - m.cargo, 0);
+      });
+      const app = saldoIni + opMovs.filter(m=> m.fecha <= corte).reduce((s,m)=> s + signo(m), 0);
+      const lineas = c.movimientos.filter(m=> cuentas.includes(m.cuenta) && m.fecha <= corte && (!dc || m.fecha >= dc));
+      const causas = [];
+      const sumar = (clave, etiqueta, estado)=>{
+        const l = lineas.filter(m=> m.estado === estado);
+        const neto = l.reduce((s,m)=> s + m.abono - m.cargo, 0);
+        if(l.length) causas.push({ clave, etiqueta, n: l.length, efecto: -neto });
+      };
+      sumar('porclasificar', 'Líneas por clasificar (no cuentan hasta que las clasifiques)', 'por_clasificar');
+      sumar('traspaso', 'Traspasos (no entran al flujo; si entró plata de una cuenta que no cargaste, edítalos como Ingreso)', 'traspaso');
+      sumar('deuda', 'Líneas de deuda por procesar (clasifícalas como pago de deuda o uso de la línea)', 'deuda');
+      sumar('ignorado', 'Líneas ignoradas', 'ignorado');
+      const cobertura = opMovs.filter(m=> m.fecha <= corte && autoIds.has(m.origen)).reduce((s,m)=> s + signo(m), 0);
+      if(cobertura) causas.push({ clave:'cobertura', etiqueta:'Cobertura automática de la línea de crédito / sobregiro (suma a Operación cuando queda negativa)', n: 0, efecto: cobertura });
+      const aInicial = diaCeroApp - inicial;
+      if(aInicial) causas.push({ clave:'inicial', etiqueta:'Saldo del Día Cero distinto al saldo del banco al comenzar', n: 0, efecto: aInicial });
+      const dif = app - banco;
+      const explicado = causas.reduce((s,x)=> s + x.efecto, 0);
+      const otros = dif - explicado;
+      if(otros) causas.push({ clave:'otros', etiqueta:'Otros (movimientos manuales sin enlazar a la cartola, líneas divididas con otro monto, etc.)', n: 0, efecto: otros });
+      return { ym, corte, banco, app, dif, causas, sinCartola };
+    });
+  }
+  function renderCuadreMensual(){
+    const filas = cartolaCuadreMensual();
+    if(!filas.length) return '';
+    return `
+      <div class="fa-card">
+        <div class="fa-card-title">Cuadre mes a mes con el banco</div>
+        <div class="fa-section-note">Compara el saldo de tus cartolas con Operación en la app, acumulado desde el Día Cero. "Diferencia" es lo de la app menos lo del banco: si es $0, cuadra. Si no, abajo se explica de dónde sale.</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Mes</th><th class="num">Banco</th><th class="num">Operación (app)</th><th class="num">Diferencia</th><th>Por qué</th></tr></thead>
+          <tbody>${filas.map(f=>`
+            <tr>
+              <td>${cartolaMesLabel(f.ym)}<div class="fa-hint" style="margin:0;">al ${fmtDate(f.corte)}</div></td>
+              <td class="num">${fmtMoney(f.banco)}</td>
+              <td class="num">${fmtMoney(f.app)}</td>
+              <td class="num" style="font-weight:700; color:${f.dif === 0 ? 'var(--income)' : 'var(--expense)'};">${f.dif === 0 ? '✓ Cuadra' : fmtMoney(f.dif)}</td>
+              <td style="font-size:12px;">${f.dif === 0 ? '' : f.causas.map(x=> `<div>${x.efecto > 0 ? '+' : '−'}${fmtMoney(Math.abs(x.efecto))} · ${escapeHtml(x.etiqueta)}${x.n ? ` (${x.n} línea${x.n===1?'':'s'})` : ''}</div>`).join('')}${f.sinCartola.length ? `<div style="color:var(--ink-soft);">Falta la cartola de este mes de la cuenta ${f.sinCartola.join(', ')}: se usó su último saldo conocido.</div>` : ''}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+  }
+
   function renderCartolas(){
     const c = state.cartola;
     const archivos = cartolaResumenArchivos();
@@ -6943,6 +7012,8 @@ ${lineasDeuda}
           </tbody>
         </table></div>`}
       </div>
+
+      ${renderCuadreMensual()}
 
       <div class="fa-card">
         <div class="fa-card-title">Reglas de reconocimiento (${c.reglas.length})</div>
