@@ -450,6 +450,9 @@
   // solo se considera en Cuenta Corriente (saldo real) — nunca en Resumen, Flujo de Caja, Rentabilidad ni
   // Fijos vs Variables. Todas las demás categorías cuentan en todos los cálculos financieros.
   const CAT_INGRESO_NO_VENTA = "Otros Ingresos no Considerados en Flujo";
+  // Pasada de dinero: plata de un cliente que entra a la cuenta para cubrir algo que se pagó con nuestra tarjeta (ej. Facebook Ads).
+  // No es venta (fuera de Estado de Resultados, Rentabilidad y Venta Bruta) pero sí entra al banco, así que cuenta en el Flujo de Caja.
+  const CAT_INGRESO_PASADA = "Pasada de Dinero (no es venta)";
   const CAT_INGRESO_NO_VENTA_ANTERIOR = "No asociado a Servicios Prestados Directos"; // nombre viejo, para migrar datos existentes
   const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
   // Pago del estado de cuenta de la tarjeta de crédito: mueve plata real de Cuenta Corriente (por eso SÍ debe
@@ -504,7 +507,7 @@
   // A propósito NO es editable desde Configuración como las demás categorías — es fijo, para que el registro
   // de ingresos quede siempre consistente y comparable entre meses.
   // Orígenes de ingreso de la lista nueva (Ingresos y Distribución y Por clasificar).
-  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Otros Ingresos no Considerados en Flujo"];
+  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Servicios de Agencia","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Otros Ingresos no Considerados en Flujo"];
   const ORIGENES_INGRESO_PF = [
     "Academia - Cursos Autogestionados",
     "Academia - Mentorías",
@@ -628,6 +631,22 @@
     }
     return '';
   }
+  // A qué unidad de negocio pertenece un proyecto/evento (por el tipo del evento): Sinergia on Stage → su propia unidad;
+  // Maratón Digital y Emprende Consciente (online) → Academia.
+  function unidadDeProyecto(nombre){
+    const pr = getProyectos().find(x=> x.nombre === nombre);
+    if(!pr) return null;
+    if(pr.tipo === 'sinergia_on_stage') return 'sinergia_on_stage';
+    if(pr.tipo === 'maraton_digital' || pr.tipo === 'emprende_consciente') return 'academia';
+    return null;
+  }
+  // Un gasto etiquetado con un proyecto/evento es Costo Directo (no existiría sin el evento), sea cual sea su categoría.
+  // También lo son las categorías marcadas como costo directo y lo ligado a una línea de venta.
+  function esCostoDirectoGasto(g){
+    if(g.origenContrato) return true;
+    if((state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT).includes(g.categoria)) return true;
+    return !!proyectoDe(g);
+  }
   function opcionesProyecto(sel){
     const nombres = nombresProyecto();
     const extra = (sel && !nombres.includes(sel)) ? [sel] : [];
@@ -652,7 +671,7 @@
       if(egresoFlujo.includes(g.categoria)) return; // cortafuegos: lo que no es resultado nunca entra acá
       const monto = montoNegocioGasto(g);
       const fila = { fecha: g.fecha, nombre: g.proveedor || g.descripcion || '', detalle: g.categoria, monto };
-      (g.origenContrato || catDirectas.includes(g.categoria) ? costosDirectos : otrosGastos).push(fila);
+      (esCostoDirectoGasto(g) ? costosDirectos : otrosGastos).push(fila);
     });
     const orden = (a,b)=> (a.fecha||'').localeCompare(b.fecha||'');
     costosDirectos.sort(orden); otrosGastos.sort(orden);
@@ -1456,7 +1475,7 @@
       if(monto === 0) return;
       const esFinanciero = g.categoria === CAT_GASTO_FINANCIERO || g.categoria === CAT_GASTO_COSTO_LIQUIDEZ;
       const esEgresoFlujo = categoriasEgresoFlujo.includes(g.categoria);
-      const esCostoDirecto = !esFinanciero && !esEgresoFlujo && categoriasCostoDirecto.includes(g.categoria);
+      const esCostoDirecto = !esFinanciero && !esEgresoFlujo && esCostoDirectoGasto(g);
       const esOperacional = !esFinanciero && !esEgresoFlujo && !esCostoDirecto;
       const coincide = (tipo==='gastoFinanciero' && esFinanciero) || (tipo==='costoDirecto' && esCostoDirecto) || (tipo==='gastoOperacional' && esOperacional);
       if(!coincide) return;
@@ -1506,9 +1525,23 @@
         resultado[unidad].costosDirectos += monto;
         return;
       }
-      const fracciones = getFraccionesUnidadGasto(g);
+      // Sin % asignado, un gasto etiquetado con un evento va 100% a la unidad de ese evento.
+      let fracciones = getFraccionesUnidadGasto(g);
+      if(!fracciones){ const ud = proyectoDe(g) ? unidadDeProyecto(proyectoDe(g)) : null; if(ud) fracciones = { [ud]: 1 }; }
       if(!fracciones) return; // sin asignar -> excluido del comparativo
-      UNIDADES_NEGOCIO.forEach(u=> resultado[u.id].gastosOperacionales += monto * (fracciones[u.id]||0));
+      const destino = (g.categoria !== CAT_GASTO_FINANCIERO && g.categoria !== CAT_GASTO_COSTO_LIQUIDEZ && esCostoDirectoGasto(g)) ? 'costosDirectos' : 'gastosOperacionales';
+      UNIDADES_NEGOCIO.forEach(u=> resultado[u.id][destino] += monto * (fracciones[u.id]||0));
+    });
+
+    // Cobros (ingresos de la cartola o manuales) que asignaste a una o más unidades con porcentajes. Solo cuentan los que tienen %
+    // asignado (si después registras esas mismas ventas en Registro de Ventas, quítale el % al cobro para no contarlas dos veces).
+    state.ingresos.forEach(i=>{
+      if(!i.fecha || i.moneda === 'USD' || !esIngresoVenta(i) || esIngresoPorDeuda(i)) return;
+      const d = new Date(i.fecha+'T00:00:00');
+      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
+      const fr = getFraccionesUnidadGasto(i);
+      if(!fr) return;
+      UNIDADES_NEGOCIO.forEach(u=> resultado[u.id].ingresos += (Number(i.monto)||0) * (fr[u.id]||0));
     });
 
     UNIDADES_NEGOCIO.forEach(u=>{
@@ -1633,7 +1666,7 @@
       // sale de la empresa (retiro, impuesto, cuota de deuda, gasto personal), pero no es un costo del
       // negocio que deba restar del Margen Bruto ni de la Rentabilidad Neta.
       else if(categoriasEgresoFlujo.includes(g.categoria)) { /* excluido a propósito */ }
-      else if(categoriasCostoDirecto.includes(g.categoria)) meses[m].costosDirectos += monto;
+      else if(esCostoDirectoGasto(g)) meses[m].costosDirectos += monto;
       else meses[m].gastosOperacionales += monto;
     });
 
@@ -1845,6 +1878,10 @@
       if(!config.categoriasNoVenta.includes(cat)){ config.categoriasNoVenta.push(cat); changed = true; }
       if(!config.categoriasIngresosSoloFlujo.includes(cat)){ config.categoriasIngresosSoloFlujo.push(cat); changed = true; }
     });
+    // Pasada de Dinero: no-venta pero SÍ en Flujo de Caja (igual que Crédito Comercial).
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresos.push(CAT_INGRESO_PASADA); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_PASADA)){ config.categoriasNoVenta.push(CAT_INGRESO_PASADA); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_PASADA); changed = true; }
     // "Otros Ingresos" DEJÓ de ser no-venta: en Ingresos y Distribución (V2) es una de las 5 categorías
     // oficiales del embudo Profit First — es venta real, no financiamiento. Se saca de las listas de
     // exclusión si quedó ahí de una versión anterior (self-healing en la otra dirección).
@@ -2263,7 +2300,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -2639,6 +2676,13 @@
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.pasarelasPago) { state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      // Una sola vez: origen de ingreso "Servicios de Agencia", categoría de gasto "Proveedores" y las líneas que siempre se clasifican a mano.
+      if(!state.config.migServiciosProveedores){
+        if(!state.config.categoriasIngresos.includes('Servicios de Agencia')) state.config.categoriasIngresos.push('Servicios de Agencia');
+        if(!state.config.categoriasGastos.includes('Proveedores')) state.config.categoriasGastos.push('Proveedores');
+        if(!state.config.cartolaSiempreManual) state.config.cartolaSiempreManual = ['inmobili'];
+        state.config.migServiciosProveedores = true; gastoFinancieroCambio = true;
+      }
       // Una sola vez: agrega "Otros Gastos que no afectan EERR" a los Egresos de Flujo ya guardados (si después la quitas, no vuelve).
       if(!state.config.migOtrosGastosNoEERR){
         if(!state.config.categoriasEgresoFlujo.includes(CAT_OTROS_GASTOS_NO_EERR)) state.config.categoriasEgresoFlujo.push(CAT_OTROS_GASTOS_NO_EERR);
@@ -4926,7 +4970,7 @@
 
       <div class="fa-card">
         <div class="fa-card-title">🏢 Rentabilidad por Unidad de Negocio — Acumulada ${anio}</div>
-        <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Afiliación y Sinergia on Stage (Evento Presencial) tienen su propia unidad. Los gastos operacionales sin % asignado (o sin dedicación en su Plantilla) no cuentan aquí todavía.</div>
+        <div class="fa-section-note">Agencia = Fee Agencia + Co-Producciones. Academia = Mentorías, Sinergia, Membresías, Cursos y Eventos Online. Afiliación y Sinergia on Stage (Evento Presencial) tienen su propia unidad. Los gastos operacionales sin % asignado (o sin dedicación en su Plantilla) no cuentan aquí todavía. Un gasto etiquetado con un evento es Costo Directo y va a la línea de ese evento (Sinergia on Stage, o Academia si es online), salvo que le asignes otros %. Los cobros (ingresos de cartola o manuales) suman a la línea solo si les asignaste %: si después cargas esas mismas ventas como ventas devengadas, quítales el % para no contarlas dos veces.</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-top:10px;">
           ${(() => {
             const acumulado = getRentabilidadPorUnidadAcumuladaAnio(anio);
@@ -6267,7 +6311,14 @@ ${lineasDeuda}
     };
   }
 
+  // Líneas que SIEMPRE se clasifican a mano (ej. "Inmobiliaria": a veces es pasada de dinero y a veces pago de un servicio):
+  // no se aplican reglas ni se crean reglas nuevas con ellas.
+  function cartolaEsSiempreManual(desc){
+    const dn = cartolaNorm(desc);
+    return (state.config.cartolaSiempreManual || []).some(p=> { const pn = cartolaNorm(p); return pn && dn.includes(pn); });
+  }
   function cartolaBuscarRegla(mov){
+    if(cartolaEsSiempreManual(mov.desc)) return null;
     const dn = cartolaNorm(mov.desc);
     let mejor = null;
     state.cartola.reglas.forEach(r=>{
@@ -6418,7 +6469,8 @@ ${lineasDeuda}
       cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
       const ingreso = {
         id: uid('ing'), fecha: mov.fecha, categoria: mov.categoria, cliente: nombre, pasarela: (mov.detalle && mov.detalle.medioPago) || '', descripcion: (mov.detalle && mov.detalle.descripcion) || '',
-        monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id, proyecto: mov.proyecto || ''
+        monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id, proyecto: mov.proyecto || '',
+        ...((mov.detalle && mov.detalle.pcts) || {})
       };
       state.ingresos.push(ingreso);
       // Entra directo a Operación (no pasa por el reparto Profit First) si cuenta para el flujo.
@@ -6540,7 +6592,7 @@ ${lineasDeuda}
               <select name="medioPago"><option value="">—</option>${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<option>${escapeHtml(p)}</option>`).join('')}</select>
             </div>
             <div class="fa-field" ${ver('gasto','ingreso')}><label>Proyecto / Evento (opcional)</label>
-              <select name="proyecto">${opcionesProyecto('')}</select>
+              <select name="proyecto" onchange="window.faProyectoPct(this)">${opcionesProyecto('')}</select>
             </div>
             <div class="fa-field" ${ver('pago_deuda','giro_linea')}><label>¿Qué deuda?</label>
               <select name="deudaId"><option value="">Elige la deuda…</option>${state.deudas.inventario.filter(d=> d.activa || esDeudaFija(d)).map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)} (saldo ${fmtMoney(getSaldoDeuda(d.id))})</option>`).join('')}</select>
@@ -6551,14 +6603,15 @@ ${lineasDeuda}
             <div class="fa-field" ${ver('deuda')}><label>Detalle de la deuda</label><input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea"></div>
           </div>
           <div class="fa-hint" ${ver('pago_deuda')}>Capital + interés + mora tienen que sumar exactamente el cargo del banco. El pago se aplica a la cuota más atrasada primero. Solo el interés y la mora llegan al Estado de Resultados.</div>
-          <div ${ver('gasto')}>
-            <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%):</div>
+          <div ${ver('gasto','ingreso')}>
+            <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%; al elegir un evento se propone su línea):</div>
             <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
               ${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0"></div>`).join('')}
             </div>
           </div>
           <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px;">
-            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${cl.editar ? '' : 'checked'}> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${(cl.editar || cartolaEsSiempreManual(mov.desc)) ? '' : 'checked'} ${cartolaEsSiempreManual(mov.desc) ? 'disabled' : ''}> Aplicar a las líneas parecidas y recordarlo para las próximas cartolas</label>
+            ${cartolaEsSiempreManual(mov.desc) ? '<div class="fa-hint" style="margin:4px 0 0 0;">Esta línea está en tu lista de "clasificar siempre a mano": se clasifica solo esta, sin reglas.</div>' : ''}
             <div class="fa-field" style="margin-top:6px;"><label>Texto que se buscará en la descripción</label><input type="text" name="patron" value="${escapeHtml(cartolaPatronSugerido(mov.desc))}"></div>
             <div class="fa-hint">La regla recuerda el tipo, la categoría y el método (y las líneas de negocio). El proyecto no se recuerda: un mismo proveedor puede servir a eventos distintos.</div>
           </div>
@@ -6569,6 +6622,14 @@ ${lineasDeuda}
         </div>
       </div>`;
   }
+  // Al elegir un evento, propone el 100% de la línea de negocio que le corresponde (solo si no hay porcentajes escritos).
+  window.faProyectoPct = function(sel){
+    const cont = sel.closest('#fa-cartola-clasificar, [data-form]'); if(!cont) return;
+    const campos = UNIDADES_NEGOCIO.map(u=> cont.querySelector('[name="pct_'+u.id+'"]')).filter(Boolean);
+    if(!campos.length || campos.some(c=> c.value !== '' && Number(c.value) !== 0)) return;
+    const ud = unidadDeProyecto(sel.value); if(!ud) return;
+    campos.forEach(c=> c.value = (c.name === 'pct_' + ud) ? '100' : '');
+  };
   window.faCartolaClasificarTipo = function(sel){
     const cont = document.getElementById('fa-cartola-clasificar'); if(!cont) return;
     cont.querySelectorAll('[data-solo]').forEach(el=>{
@@ -6667,12 +6728,14 @@ ${lineasDeuda}
       detalle = { metodo: form.metodo || METODOS_PAGO_BANCO[0], proveedor: (form.proveedor || '').trim(), descripcion: (form.descripcion || '').trim(), pcts };
       detalleRegla = { metodo: detalle.metodo, pcts };
     } else if(tipo === 'ingreso'){
-      detalle = { descripcion: (form.detalleIngreso || '').trim(), medioPago: form.medioPago || '' };
+      const { pcts, suma } = cartolaPctsDeForm(form);
+      if(pcts && Math.round(suma) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + suma + '%) o quedar todas vacías.'); return; }
+      detalle = { descripcion: (form.detalleIngreso || '').trim(), medioPago: form.medioPago || '', pcts };
       detalleRegla = { medioPago: detalle.medioPago };
     }
     let regla = null;
     const patron = cartolaNorm(form.patron);
-    if(form.crearRegla && patron && !deudaInfo){
+    if(form.crearRegla && patron && !deudaInfo && !cartolaEsSiempreManual(mov.desc)){
       state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
       regla = { id: uid('regla'), patron, tipo, categoria, detalle: detalleRegla };
       state.cartola.reglas.push(regla);
@@ -7018,6 +7081,12 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">Reglas de reconocimiento (${c.reglas.length})</div>
         <div class="fa-section-note">Si la descripción de una línea contiene el texto de la regla, la app la clasifica sola. Se crean al clasificar en "Por clasificar". Gana la regla con el texto más largo.</div>
+        <div style="border-top:1px solid var(--border); margin:10px 0; padding-top:10px;" data-form="manual-cartola">
+          <div style="font-weight:600; font-size:13px;">Líneas que siempre clasifico a mano</div>
+          <div class="fa-hint" style="margin:2px 0 8px 0;">Si la descripción contiene alguno de estos textos, la app nunca la clasifica sola ni crea reglas con ella. Sirve para proveedores o clientes que unas veces son una cosa y otras otra (ej. "Inmobiliaria").</div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">${(state.config.cartolaSiempreManual || []).map((x,i)=>`<span class="fa-chip">${escapeHtml(x)}<button data-action="quitar-manual-cartola" data-idx="${i}">&times;</button></span>`).join('') || '<span class="fa-hint" style="margin:0;">Ninguna todavía.</span>'}</div>
+          <div style="display:flex; gap:8px; max-width:420px;"><input type="text" name="manualPatron" placeholder="Ej: inmobili" style="flex:1;"><button type="button" class="fa-btn fa-btn-ghost" data-action="agregar-manual-cartola">Agregar</button></div>
+        </div>
         <details>
           <summary style="cursor:pointer; font-weight:600; font-size:13px;">Ver reglas</summary>
           <div class="fa-table-wrap" style="margin-top:8px;"><table class="fa-table">
@@ -7286,7 +7355,10 @@ ${lineasDeuda}
               <select name="categoria" onchange="window.faToggleCategoriaIngresoPF()" ${editing&&esIngresoPorDeuda(editing)?'disabled':''}>${state.config.categoriasIngresos.map(c=>`<option ${editing&&editing.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Detalle / Comentarios</label><input type="text" name="cliente" placeholder="Ej: Cliente o comentario" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
-            <div class="fa-field" id="fa-pf-proyecto-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Proyecto / Evento (opcional)</label><select name="proyecto">${opcionesProyecto(editing?editing.proyecto:'')}</select></div>
+            <div class="fa-field" id="fa-pf-proyecto-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Proyecto / Evento (opcional)</label><select name="proyecto" onchange="window.faProyectoPct(this)">${opcionesProyecto(editing?editing.proyecto:'')}</select></div>
+            <div class="fa-field" id="fa-pf-pct-wrap" style="grid-column:1/-1; display:${editing&&editing.moneda==='USD'?'none':''};"><label>Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%)</label>
+              <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editing&&editing['pct_'+u.id]?editing['pct_'+u.id]:''}"></div>`).join('')}</div>
+            </div>
             <div class="fa-field" id="fa-pf-pasarela-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Medio de pago</label>
               <select name="pasarela">${(state.config.pasarelasPago||PASARELAS_PAGO_DEFAULT).map(p=>`<option ${editing&&editing.pasarela===p?'selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
             </div>
@@ -9896,6 +9968,24 @@ ${lineasDeuda}
       };
       render();
     }
+    else if(action === 'agregar-manual-cartola'){
+      const data = readFields(btn.closest('[data-form="manual-cartola"]'));
+      const txt = cartolaNorm(data.manualPatron || '');
+      if(!txt){ showToast('Escribe el texto que debe contener la descripción.'); return; }
+      if(!state.config.cartolaSiempreManual) state.config.cartolaSiempreManual = [];
+      if(!state.config.cartolaSiempreManual.includes(txt)) state.config.cartolaSiempreManual.push(txt);
+      await saveKey('config', state.config, {silent:true});
+      showToast('Listo: esas líneas se clasificarán siempre a mano.');
+      render();
+    }
+    else if(action === 'quitar-manual-cartola'){
+      const i = Number(btn.dataset.idx);
+      if(state.config.cartolaSiempreManual && state.config.cartolaSiempreManual[i] !== undefined){
+        state.config.cartolaSiempreManual.splice(i, 1);
+        await saveKey('config', state.config, {silent:true});
+      }
+      render();
+    }
     else if(action === 'cartola-clasificar-abrir'){
       cartolaAbrirClasificar(btn.dataset.id, btn.dataset.edit === '1');
     }
@@ -10549,6 +10639,8 @@ ${lineasDeuda}
       const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
       const montos = repartirMontoPF(montoParaDistribuir, pct);
 
+      const { pcts: pctsIng, suma: sumaIng } = cartolaPctsDeForm(data);
+      if(pctsIng && Math.round(sumaIng) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + sumaIng + '%) o quedar todas vacías.'); return; }
       const ingreso = {
         id: ingresoId,
         fecha: data.fecha,
@@ -10559,6 +10651,7 @@ ${lineasDeuda}
         moneda: 'CLP',
         estado: 'Pagado',
         proyecto: data.proyecto || '',
+        ...(pctsIng || {}),
         distribucion: { porcentajes: {...pct}, montos, reserva, confirmadoEl: new Date().toISOString() }
       };
       if(editId){
