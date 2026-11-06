@@ -549,7 +549,8 @@
   // Resultados (ni Margen Bruto ni Rentabilidad Neta) — solo importa para Tesorería (Módulo 4) y Gestión de
   // Deudas (Módulo 5). Ej: retiros de utilidades, pago de impuestos, cuotas de deuda, gastos personales de
   // los socios que no son costo del negocio.
-  const CATEGORIAS_EGRESO_FLUJO_DEFAULT = ["Pago Convenio TGR", "Pago F29", "Retiro de Utilidades", "Almuerzo Socios", "Estacionamientos", "Almuerzos", "Transporte"];
+  const CAT_OTROS_GASTOS_NO_EERR = "Otros Gastos que no afectan EERR";
+  const CATEGORIAS_EGRESO_FLUJO_DEFAULT = ["Pago Convenio TGR", "Pago F29", "Retiro de Utilidades", "Almuerzo Socios", "Estacionamientos", "Almuerzos", "Transporte", CAT_OTROS_GASTOS_NO_EERR];
   // Categorías sugeridas de Gastos Operacionales (estructura fija) — no son una lista cerrada, solo se
   // aseguran de existir como opción; cualquier gasto que no sea Costo Directo ni Gasto Financiero cae acá.
   const CATEGORIAS_OPEX_SUGERIDAS = ["Nómina Equipo", "Sueldo Operativo Socios", "Software/Suscripciones", "Viáticos y Generales"];
@@ -2638,6 +2639,11 @@
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.pasarelasPago) { state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      // Una sola vez: agrega "Otros Gastos que no afectan EERR" a los Egresos de Flujo ya guardados (si después la quitas, no vuelve).
+      if(!state.config.migOtrosGastosNoEERR){
+        if(!state.config.categoriasEgresoFlujo.includes(CAT_OTROS_GASTOS_NO_EERR)) state.config.categoriasEgresoFlujo.push(CAT_OTROS_GASTOS_NO_EERR);
+        state.config.migOtrosGastosNoEERR = true; gastoFinancieroCambio = true;
+      }
       CATEGORIAS_COSTO_DIRECTO_DEFAULT.concat(CATEGORIAS_OPEX_SUGERIDAS).concat(CATEGORIAS_EGRESO_FLUJO_DEFAULT).forEach(cat=>{
         if(!state.config.categoriasGastos.includes(cat)){ state.config.categoriasGastos.push(cat); gastoFinancieroCambio = true; }
       });
@@ -3301,7 +3307,7 @@
   // ---------------- Gastos manuales: método de pago, líneas múltiples, tarjetas y pago de deudas ----------------
   const METODOS_PAGO_GASTO = [
     'Tarjeta Prepago USD', 'Tarjeta Prepago CLP', 'Tarjeta de Débito', 'Tarjeta de Crédito Nacional',
-    'Tarjeta de Crédito Internacional', 'Efectivo', 'Transferencia', 'Cheque', 'Cargo Automático Cuenta Corriente'
+    'Tarjeta de Crédito Internacional', 'Efectivo', 'Transferencia', 'Pago Online', 'Cheque', 'Cargo Automático Cuenta Corriente'
   ];
   // Métodos de los que la plata NO sale del banco al momento: la compra sube la deuda de la tarjeta.
   function esMetodoTarjetaCredito(m){
