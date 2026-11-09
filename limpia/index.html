@@ -2097,6 +2097,7 @@
     tarjetaClasificar: null, // { id, editar } — compra de tarjeta que se está clasificando
     tarjetaPago: null, // { id } — pago del estado de cuenta de una tarjeta que se está clasificando
     tarjetaMensajes: [],
+    lineaMensajes: [],
     ingresos: [],
     gastos: [],
     ingresosUSD: [],
@@ -2363,7 +2364,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','import-linea-file','eliminar-linea','linea-auto','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -5671,6 +5672,7 @@
             <div class="fa-hint" style="margin:0 0 2px 0;">${usadoUSD<0 ? 'Saldo a favor en dólares' : 'Deuda actual en dólares'}</div>
             <div style="font-size:10.5px; color:var(--ink-soft); margin:0 0 8px 0;">≈ ${usado<0?'−':''}${fmtMoneyC(Math.abs(usado))} al dólar promedio de las compras</div>` : `<div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':(usado<0?'var(--income)':'var(--ink-soft)')};">${fmtMoneyC(Math.abs(usado))}</div>
             <div class="fa-hint" style="margin:0 0 8px 0;">${usado<0 ? 'Saldo a favor (pagaste de más)' : 'Deuda actual'}</div>`}
+            ${(() => { const aut = (state.deudas.giros || []).filter(g=> g.deudaId === d.id && g.auto).reduce((t,g)=> t + (Number(g.monto)||0), 0); return aut > 0 ? `<div class="fa-hint" style="margin:0 0 8px 0; color:var(--expense);">Incluye ${fmtMoneyC(aut)} de uso <strong>automático</strong>: la app cubre con la línea cada vez que Operación queda en negativo. Si no corresponde, es que falta clasificar algo: mira la tabla "Cuadre mes a mes" en Cartolas bancarias.</div>` : ''; })()}
             ${d.cupoEnUSD ? '' : `<div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;"><div style="background:${pct>=80?'var(--expense)':'var(--ink-soft)'}; height:100%; width:${pct.toFixed(0)}%;"></div></div>`}
             ${d.id===SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Sobregiro no pactado: sin cupo. Se genera solo cuando Operación queda en negativo y la línea de crédito no alcanza.</div>' : ''}<div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(cupo-usado)}</strong>`}${esIntlUSD ? ` · Disponible: <strong>${fmtMoneyUSDC(cupo-usadoUSD)}</strong>` : ''}</div>
             ${movsDeuda.length ? `<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12.5px; font-weight:600;">Ver movimientos (${movsDeuda.length})</summary>
@@ -6331,6 +6333,8 @@ ${lineasDeuda}
         return m;
       }),
       tarjetaArchivos: Array.isArray(base.tarjetaArchivos) ? base.tarjetaArchivos : [],
+      lineaMovs: Array.isArray(base.lineaMovs) ? base.lineaMovs : [],
+      lineaArchivos: Array.isArray(base.lineaArchivos) ? base.lineaArchivos : [],
       reglas: Array.isArray(base.reglas) ? base.reglas : cartolaVacia().reglas
     };
   }
@@ -6818,7 +6822,7 @@ ${lineasDeuda}
         const mov = { ...m, estado:'por_clasificar', tipo:null, categoria:'', regla:null };
         const regla = cartolaBuscarRegla(mov);
         if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); mov.detalle = regla.detalle ? {...regla.detalle} : null; auto++; }
-        if(mov.estado !== 'clasificado' || mov.tipo === 'deuda') cartolaAutoPagoTarjeta(mov);
+        if(mov.estado !== 'clasificado' || mov.tipo === 'deuda') { if(!cartolaAutoPagoTarjeta(mov)) cartolaAutoLinea(mov); }
         state.cartola.movimientos.push(mov);
         if(mov.estado === 'clasificado') cartolaAplicarEfectos(mov);
         nuevas++;
@@ -7621,6 +7625,155 @@ ${lineasDeuda}
       </div>`).join('');
   }
 
+  // ---------------- Estados de la línea de crédito (Itaú, Excel) y cuadre contra la cuenta y contra la deuda de la app ----------------
+  // Cada "Cargo Lc Por Falta De Fondos" del banco es un USO de la línea (la deuda sube); cada "Pago Automatico De Linea Credi" o depósito
+  // es un PAGO (la deuda baja). Se comparan con lo que la app tiene registrado en la deuda "Línea de Crédito".
+  function parseEstadoLinea(buffer){
+    if(typeof XLSX === 'undefined') return { ok:false, error:'No se pudo cargar el lector de Excel. Revisa tu conexión y recarga la página.' };
+    let rows;
+    try{
+      const wb = XLSX.read(new Uint8Array(buffer), { type:'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, raw:false, defval:'' });
+    } catch(e){ return { ok:false, error:'No se pudo abrir el archivo como Excel.' }; }
+    const filas = rows.map(r=> r.map(x=> String(x == null ? '' : x).trim()).filter(x=> x !== ''));
+    const texto = filas.map(r=> r.join(' | ')).join('\n');
+    if(!/Estado de L[ií]nea de Cr[eé]dito/i.test(texto)) return { ok:false, error:'No parece un estado de la línea de crédito de Itaú.' };
+    const per = texto.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/);
+    if(!per) return { ok:false, error:'No se encontró el período del estado de la línea.' };
+    const desde = `${per[3]}-${per[2]}-${per[1]}`, hasta = `${per[6]}-${per[5]}-${per[4]}`;
+    const num = s=>{ const t = String(s == null ? '' : s).replace(/[^0-9\-]/g, ''); return t && t !== '-' ? parseInt(t, 10) : 0; };
+    let aprobado = 0, usado = 0;
+    const i0 = filas.findIndex(r=> /^Monto Aprobado/i.test(r[0] || ''));
+    if(i0 >= 0 && filas[i0+1]){ aprobado = num(filas[i0+1][0]); usado = num(filas[i0+1][1]); }
+    const movs = [];
+    const vistos = {};
+    filas.forEach(r=>{
+      if(!/^\d{2}\/\d{2}$/.test(r[0] || '') || r.length < 6) return;
+      const [dd, mm] = r[0].split('/');
+      const anio = Number(mm) <= Number(per[5]) ? per[6] : per[3]; // el mes cae en el año del final del período, salvo si el período cruza de año
+      const fecha = `${anio}-${mm}-${dd}`;
+      const desc = r[3] || '', dep = num(r[4]), giro = num(r[5]), saldo = num(r[6]);
+      const tipo = /falta de fondos/i.test(desc) ? 'uso' : (dep > 0 ? 'pago' : (giro > 0 ? 'uso' : 'otro'));
+      const base = fecha + desc + dep + giro + saldo; vistos[base] = (vistos[base] || 0) + 1;
+      movs.push({ id: 'lc_' + tarjetaHash(base + '_' + vistos[base]), fecha, desc, monto: tipo === 'pago' ? dep : giro, tipo, saldo });
+    });
+    if(!movs.length) return { ok:false, error:'No encontré movimientos en este estado de la línea.' };
+    return { ok:true, desde, hasta, aprobado, usado, movs };
+  }
+  async function importarEstadosLinea(files){
+    const c = state.cartola;
+    const mensajes = [];
+    let nuevos = 0;
+    for(const file of files){
+      let buffer;
+      try{ buffer = await file.arrayBuffer(); } catch(e){ mensajes.push({ nivel:'error', texto:`${file.name}: no se pudo leer el archivo.` }); continue; }
+      const r = parseEstadoLinea(buffer);
+      if(!r.ok){ mensajes.push({ nivel:'error', texto:`${file.name}: ${r.error}` }); continue; }
+      c.lineaMovs = c.lineaMovs.filter(m=> m.archivo !== r.desde);
+      r.movs.forEach(m=>{ c.lineaMovs.push({ ...m, archivo: r.desde }); nuevos++; });
+      c.lineaArchivos = c.lineaArchivos.filter(a=> a.desde !== r.desde);
+      c.lineaArchivos.push({ nombre: file.name, desde: r.desde, hasta: r.hasta, aprobado: r.aprobado, usado: r.usado, n: r.movs.length, cargadoEl: todayISO() });
+      mensajes.push({ nivel:'ok', texto:`${file.name} — ${fmtDate(r.desde)} al ${fmtDate(r.hasta)}, ${r.movs.length} movimientos, usado al cierre ${fmtMoney(r.usado)}.` });
+    }
+    state.lineaMensajes = mensajes;
+    await lineaGuardarTodo();
+    showToast(nuevos > 0 ? `Estados de la línea cargados: ${nuevos} movimientos.` : 'No se cargó ningún movimiento nuevo.');
+    render();
+  }
+  async function lineaGuardarTodo(){
+    await Promise.all([ saveKey('cartola/lineaMovs', state.cartola.lineaMovs), saveKey('cartola/lineaArchivos', state.cartola.lineaArchivos) ]);
+  }
+  // Las dos líneas de la cuenta que SIEMPRE son de la línea de crédito: el uso (entra plata) y el pago automático (sale plata).
+  function cartolaAutoLinea(mov){
+    const deuda = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
+    if(!deuda) return false;
+    const n = cartolaNorm(mov.desc);
+    if(mov.abono > 0 && /^abono desde linea de credito/.test(n)){
+      cartolaSetClasificacion(mov, 'giro_linea', deuda.nombre, null);
+      mov.deudaInfo = { deudaId: deuda.id, monto: mov.abono };
+    } else if(mov.cargo > 0 && /^cargo ctacte por traspaso lc/.test(n)){
+      cartolaSetClasificacion(mov, 'pago_deuda', deuda.nombre, null);
+      mov.deudaInfo = { deudaId: deuda.id, capital: mov.cargo, interes: 0, mora: 0 };
+    } else return false;
+    mov.detalle = null; mov.devengo = ''; mov.partes = null; mov.proyecto = '';
+    return true;
+  }
+  // Cuadre: cada movimiento del banco se empareja con el de la app (mismo tipo, mismo monto, fecha cercana).
+  function lineaCuadre(){
+    const c = state.cartola;
+    if(!c.lineaArchivos.length) return null;
+    const dias = (a, b)=> Math.abs((new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000);
+    const appUsos = (state.deudas.giros || []).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && !g.auto).map(g=> ({ fecha: g.fecha, monto: Math.round(Number(g.monto)||0), tipo:'uso', usado:false }));
+    const appPagos = state.deudas.pagos.filter(p=> p.deudaId === SOBREGIRO_OPEX_ID).map(p=> ({ fecha: p.fecha, monto: Math.round(Number(p.capital)||0), tipo:'pago', usado:false }));
+    const autos = (state.deudas.giros || []).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && g.auto).map(g=> ({ fecha: g.fecha, monto: Math.round(Number(g.monto)||0) }));
+    const banco = c.lineaMovs.filter(m=> m.tipo === 'uso' || m.tipo === 'pago').slice().sort((a,b)=> a.fecha.localeCompare(b.fecha));
+    const sinParBanco = [];
+    banco.forEach(m=>{
+      const lista = m.tipo === 'uso' ? appUsos : appPagos;
+      let mejor = null;
+      lista.forEach(a=>{ if(!a.usado && a.monto === m.monto && dias(a.fecha, m.fecha) <= 4 && (!mejor || dias(a.fecha, m.fecha) < dias(mejor.fecha, m.fecha))) mejor = a; });
+      if(mejor) mejor.usado = true; else sinParBanco.push(m);
+    });
+    const sinParApp = appUsos.concat(appPagos).filter(a=> !a.usado);
+    const corte = c.lineaArchivos.map(a=> a.hasta);
+    const fechaIni = c.lineaArchivos.reduce((m,a)=> (!m || a.desde < m) ? a.desde : m, '');
+    const filas = c.lineaArchivos.slice().sort((a,b)=> a.desde.localeCompare(b.desde)).map(a=>{
+      const hasta = a.hasta;
+      const g = (state.deudas.giros || []).filter(x=> x.deudaId === SOBREGIRO_OPEX_ID && x.fecha <= hasta).reduce((s,x)=> s + (Number(x.monto)||0), 0);
+      const p = state.deudas.pagos.filter(x=> x.deudaId === SOBREGIRO_OPEX_ID && x.fecha <= hasta).reduce((s,x)=> s + (Number(x.capital)||0), 0);
+      const app = Math.round(g - p);
+      const dif = app - a.usado;
+      const causas = [];
+      const bancoUsosSin = sinParBanco.filter(m=> m.tipo === 'uso' && m.fecha <= hasta), bancoPagosSin = sinParBanco.filter(m=> m.tipo === 'pago' && m.fecha <= hasta);
+      const suma = l=> l.reduce((s,x)=> s + x.monto, 0);
+      if(bancoUsosSin.length) causas.push({ etiqueta:`Usos del banco que no están registrados en la app (${bancoUsosSin.length})`, efecto: -suma(bancoUsosSin) });
+      if(bancoPagosSin.length) causas.push({ etiqueta:`Pagos del banco que no están registrados en la app (${bancoPagosSin.length}) — revisa si quedaron como traspaso`, efecto: suma(bancoPagosSin) });
+      const aUsosSin = sinParApp.filter(x=> x.tipo === 'uso' && x.fecha <= hasta), aPagosSin = sinParApp.filter(x=> x.tipo === 'pago' && x.fecha <= hasta);
+      if(aUsosSin.length) causas.push({ etiqueta:`Usos en la app que el banco no muestra (${aUsosSin.length})`, efecto: suma(aUsosSin) });
+      if(aPagosSin.length) causas.push({ etiqueta:`Pagos en la app que el banco no muestra (${aPagosSin.length})`, efecto: -suma(aPagosSin) });
+      const aut = autos.filter(x=> x.fecha <= hasta);
+      if(aut.length) causas.push({ etiqueta:`Uso AUTOMÁTICO de la línea porque Operación quedó en negativo (${aut.length})`, efecto: suma(aut) });
+      const otros = dif - causas.reduce((s,x)=> s + x.efecto, 0);
+      if(otros) causas.push({ etiqueta:'Otros (saldo inicial u otra diferencia)', efecto: otros });
+      return { desde: a.desde, hasta, banco: a.usado, aprobado: a.aprobado, app, dif, causas };
+    });
+    return { filas, sinParBanco, sinParApp, autos };
+  }
+  function renderLineaCard(){
+    const c = state.cartola;
+    const cu = lineaCuadre();
+    return `
+      <div class="fa-card">
+        <div class="fa-card-title">Estados de la línea de crédito</div>
+        <div class="fa-section-note">Sube los estados de la línea de crédito de Itaú (Excel). La app compara cada uso y cada pago del banco con lo que tienes en la deuda "Línea de Crédito", y te dice qué falta o qué sobra. Los usos ("Abono Desde Linea De Credito") y los pagos automáticos ("Cargo Ctacte Por Traspaso Lc") de tu cuenta se clasifican solos.</div>
+        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-linea-file">Elegir estados de la línea (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="linea-auto">Clasificar usos y pagos automáticos de la cuenta</button></div>
+        <input type="file" id="fa-import-linea" data-action="import-linea-file" accept=".xls,.xlsx" multiple style="display:none;">
+        ${(state.lineaMensajes || []).length ? `<div style="margin-top:10px;">${state.lineaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':'inherit'};">${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
+        ${cu ? `
+        <div class="fa-card-title" style="margin-top:14px;">Cuadre de la línea con el banco</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Período</th><th class="num">Usado según el banco</th><th class="num">Deuda en la app</th><th class="num">Diferencia</th><th>Por qué</th><th></th></tr></thead>
+          <tbody>${cu.filas.map(f=>`
+            <tr>
+              <td>${fmtDate(f.desde)} – ${fmtDate(f.hasta)}</td>
+              <td class="num">${fmtMoney(f.banco)}</td>
+              <td class="num">${fmtMoney(f.app)}</td>
+              <td class="num" style="font-weight:700; color:${f.dif === 0 ? 'var(--income)' : 'var(--expense)'};">${f.dif === 0 ? '✓ Cuadra' : fmtMoney(f.dif)}</td>
+              <td style="font-size:12px;">${f.dif === 0 ? '' : f.causas.map(x=> `<div>${x.efecto > 0 ? '+' : '−'}${fmtMoney(Math.abs(x.efecto))} · ${escapeHtml(x.etiqueta)}</div>`).join('')}</td>
+              <td><button type="button" class="fa-icon-btn danger" data-action="eliminar-linea" data-desde="${f.desde}">Eliminar</button></td>
+            </tr>`).join('')}
+          </tbody></table></div>
+        ${(cu.sinParBanco.length || cu.sinParApp.length) ? `
+        <div class="fa-hint" style="margin-top:10px;"><strong>Movimientos sin su par</strong> (el banco y la app no coinciden en tipo, monto y fecha cercana):</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Fecha</th><th>Dónde está</th><th>Qué es</th><th class="num">Monto</th><th>Qué hacer</th></tr></thead>
+          <tbody>${cu.sinParBanco.map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>Solo en el banco</td><td>${escapeHtml(m.desc)}</td><td class="num">${m.tipo === 'pago' ? '−' : '+'}${fmtMoney(m.monto)}</td><td style="font-size:12px;">${m.tipo === 'pago' ? 'Busca la transferencia en tus cartolas (suele estar como "Traspaso") y clasifícala como Pago de deuda a la Línea de Crédito.' : 'Busca el abono en tu cuenta y clasifícalo como Uso de la línea de crédito.'}</td></tr>`).join('')}
+          ${cu.sinParApp.map(a=>`<tr><td>${fmtDate(a.fecha)}</td><td>Solo en la app</td><td>${a.tipo === 'pago' ? 'Pago a la línea' : 'Uso de la línea'}</td><td class="num">${a.tipo === 'pago' ? '−' : '+'}${fmtMoney(a.monto)}</td><td style="font-size:12px;">El banco no muestra este movimiento: revisa si está en el período cargado o si se clasificó de más.</td></tr>`).join('')}</tbody>
+        </table></div>` : ''}` : ''}
+        ${c.lineaArchivos.length === 0 ? '' : `<div class="fa-hint" style="margin-top:8px;">Cupo aprobado según el banco: ${fmtMoney(c.lineaArchivos[c.lineaArchivos.length-1].aprobado)}.</div>`}
+      </div>`;
+  }
+
   function renderCartolas(){
     const c = state.cartola;
     const archivos = cartolaResumenArchivos();
@@ -7693,6 +7846,8 @@ ${lineasDeuda}
       </div>
 
       ${renderTarjetasCard()}
+
+      ${renderLineaCard()}
 
       ${renderCuadreMensual()}
 
@@ -10666,6 +10821,24 @@ ${lineasDeuda}
       };
       render();
     }
+    else if(action === 'abrir-linea-file'){
+      const fi = document.getElementById('fa-import-linea');
+      if(fi) fi.click();
+    }
+    else if(action === 'linea-auto'){
+      if(!state.deudas.inventario.some(d=> d.id === SOBREGIRO_OPEX_ID)){ showToast('Primero define el cupo de la Línea de Crédito en Configuración, para que exista su deuda.'); return; }
+      const pend = state.cartola.movimientos.filter(m=> (m.estado === 'por_clasificar' || m.estado === 'deuda') && ((m.abono > 0 && /^abono desde linea de credito/.test(cartolaNorm(m.desc))) || (m.cargo > 0 && /^cargo ctacte por traspaso lc/.test(cartolaNorm(m.desc)))));
+      if(!pend.length){ showToast('No hay usos ni pagos automáticos de la línea pendientes por clasificar.'); return; }
+      pend.forEach(m=>{ if(cartolaAutoLinea(m)) cartolaAplicarEfectos(m); });
+      await cartolaGuardarTodo();
+      showToast(`Listo: ${pend.length} movimiento${pend.length===1?'':'s'} de la línea de crédito clasificado${pend.length===1?'':'s'}.`);
+      render();
+    }
+    else if(action === 'eliminar-linea'){
+      const desde = btn.dataset.desde;
+      state.confirmDialog = { message: '¿Eliminar este estado de la línea de crédito? Solo se borra el archivo cargado (para comparar): no toca tu deuda ni tus cartolas. Puedes volver a subirlo.', action: 'do-eliminar-linea', data: desde, confirmLabel: 'Eliminar estado' };
+      render();
+    }
     else if(action === 'tarjeta-pago-abrir'){
       state.tarjetaPago = { id: btn.dataset.id };
       render();
@@ -10975,6 +11148,13 @@ ${lineasDeuda}
           state.editingGastoId = null;
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
+        render();
+      }
+      else if(cd.action === 'do-eliminar-linea'){
+        state.cartola.lineaMovs = state.cartola.lineaMovs.filter(m=> m.archivo !== cd.data);
+        state.cartola.lineaArchivos = state.cartola.lineaArchivos.filter(a=> a.desde !== cd.data);
+        await lineaGuardarTodo();
+        showToast('Estado de la línea eliminado.');
         render();
       }
       else if(cd.action === 'do-reiniciar-tarjetas'){
@@ -13208,6 +13388,12 @@ ${lineasDeuda}
       el.value = '';
       if(files.length === 0) return;
       await importarCartolas(files);
+    }
+    else if(action === 'import-linea-file'){
+      const files = Array.from(el.files || []);
+      el.value = '';
+      if(files.length === 0) return;
+      await importarEstadosLinea(files);
     }
     else if(action === 'import-tarjeta-file'){
       const files = Array.from(el.files || []);
