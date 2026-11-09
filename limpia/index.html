@@ -2345,7 +2345,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -6300,7 +6300,9 @@ ${lineasDeuda}
       archivos: Array.isArray(base.archivos) ? base.archivos : [],
       tarjetaMovs: (Array.isArray(base.tarjetaMovs) ? base.tarjetaMovs : []).map(m=>{
         // Antes los traspasos de deuda entre tarjetas se ignoraban; ahora se aplican (baja la internacional y sube la nacional).
-        if(m && m.tarjeta === 'nacional' && m.clase === 'interno' && m.estado === 'ignorado' && /traspaso deuda/i.test(m.desc || '')) return { ...m, clase:'traspaso_deuda', estado:'por_clasificar', categoria:'' };
+        if(m && m.tarjeta === 'nacional' && m.clase === 'interno' && m.estado === 'ignorado' && /traspaso deuda|regul deuda/i.test(m.desc || '')) return { ...m, clase:'traspaso_deuda', estado:'por_clasificar', categoria:'' };
+        // El "Pago Tc Usd" del estado internacional es la contraparte del traspaso desde la nacional: no es un pago aparte.
+        if(m && m.tarjeta === 'internacional' && m.clase === 'pago_tarjeta' && m.estado === 'por_clasificar') return { ...m, clase:'interno', estado:'ignorado', categoria:'Contraparte en dólares del traspaso de deuda — se aplica desde el estado de la tarjeta nacional' };
         // Los pagos que muestra el estado de cuenta ("Monto cancelado" / "Pago Tc Usd") también quedan por clasificar.
         if(m && m.clase === 'interno' && m.estado === 'ignorado' && /monto cancelado|pago tc/i.test(m.desc || '')) return { ...m, clase:'pago_tarjeta', estado:'por_clasificar', categoria:'', monto: Math.abs(Number(m.monto) || 0), montoUSD: m.montoUSD == null ? m.montoUSD : Math.abs(Number(m.montoUSD) || 0) };
         return m;
@@ -6399,6 +6401,16 @@ ${lineasDeuda}
   function cartolaEsSiempreManual(desc){
     const dn = cartolaNorm(desc);
     return (state.config.cartolaSiempreManual || []).some(p=> { const pn = cartolaNorm(p); return pn && dn.includes(pn); });
+  }
+  // Todo "Pago Tarjeta De Credito" que sale de la cuenta corriente en pesos se abona a la tarjeta NACIONAL. Devuelve true si lo clasificó.
+  function cartolaAutoPagoTarjeta(mov){
+    if(!(mov.cargo > 0) || !/^pago tarjeta de credito/.test(cartolaNorm(mov.desc))) return false;
+    const deuda = state.deudas.inventario.find(d=> d.id === DEUDA_TC_NACIONAL_ID);
+    if(!deuda) return false;
+    cartolaSetClasificacion(mov, 'pago_deuda', deuda.nombre, null);
+    mov.deudaInfo = { deudaId: deuda.id, capital: mov.cargo, interes: 0, mora: 0 };
+    mov.detalle = null; mov.devengo = ''; mov.partes = null; mov.proyecto = '';
+    return true;
   }
   function cartolaBuscarRegla(mov){
     if(cartolaEsSiempreManual(mov.desc)) return null;
@@ -6697,7 +6709,7 @@ ${lineasDeuda}
               <select name="proyecto" onchange="window.faProyectoPct(this)">${opcionesProyecto('')}</select>
             </div>
             <div class="fa-field" ${ver('pago_deuda','giro_linea')}><label>¿Qué deuda?</label>
-              <select name="deudaId"><option value="">Elige la deuda…</option>${state.deudas.inventario.filter(d=> d.activa || esDeudaFija(d)).map(d=>`<option value="${d.id}">${escapeHtml(d.nombre)} (saldo ${fmtMoney(getSaldoDeuda(d.id))})</option>`).join('')}</select>
+              <select name="deudaId"><option value="">Elige la deuda…</option>${state.deudas.inventario.filter(d=> d.activa || esDeudaFija(d)).map(d=>`<option value="${d.id}" ${(d.id === DEUDA_TC_NACIONAL_ID && /^pago tarjeta de credito/.test(cartolaNorm(mov.desc))) ? 'selected' : ''}>${escapeHtml(d.nombre)} (saldo ${fmtMoney(getSaldoDeudaFirmado(d.id))})</option>`).join('')}</select>
             </div>
             <div class="fa-field" ${ver('pago_deuda')}><label>Capital</label><input type="number" name="capital" min="0" step="1" value="${esCargo ? monto : ''}"></div>
             <div class="fa-field" ${ver('pago_deuda')}><label>Interés (va a Estado de Resultados)</label><input type="number" name="interes" min="0" step="1" value="0"></div>
@@ -6783,6 +6795,7 @@ ${lineasDeuda}
         const mov = { ...m, estado:'por_clasificar', tipo:null, categoria:'', regla:null };
         const regla = cartolaBuscarRegla(mov);
         if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); mov.detalle = regla.detalle ? {...regla.detalle} : null; auto++; }
+        if(mov.estado !== 'clasificado' || mov.tipo === 'deuda') cartolaAutoPagoTarjeta(mov);
         state.cartola.movimientos.push(mov);
         if(mov.estado === 'clasificado') cartolaAplicarEfectos(mov);
         nuevas++;
@@ -7188,16 +7201,12 @@ ${lineasDeuda}
         if(i < 0 || !/^\d{10,}$/.test(r[i+1] || '')) return;
         const fecha = tarjetaFechaISO(r[i]), ref = r[i+1], desc = r[i+2] || '', monto = tarjetaNumero(r[i+3]);
         const d = desc.toLowerCase();
-        if(/traspaso deuda/.test(d)){
+        if(/traspaso deuda|regul deuda/.test(d)){
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'traspaso_deuda', estado:'por_clasificar' });
           return;
         }
         if(/monto cancelado/.test(d)){
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto: Math.abs(monto), moneda:'CLP', clase:'pago_tarjeta', estado:'por_clasificar' });
-          return;
-        }
-        if(/regul deuda/.test(d)){
-          movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'interno', estado:'ignorado', categoria:'Pago o traspaso entre tarjetas — no es gasto' });
           return;
         }
         if(/comision compra internacional/.test(d)){ comisiones.n++; comisiones.total += monto; return; }
@@ -7212,12 +7221,8 @@ ${lineasDeuda}
         const fecha = tarjetaFechaISO(r[i]), desc = r[i+1] || '', usd = tarjetaNumero(r[r.length - 1]);
         const d = desc.toLowerCase();
         if(/^total de/.test(d)) return;
-        if(/pago tc/.test(d)){
-          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: Math.abs(usd), moneda:'USD', clase:'pago_tarjeta', estado:'por_clasificar' });
-          return;
-        }
-        if(/traspaso deuda/.test(d)){
-          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: usd, moneda:'USD', clase:'interno', estado:'ignorado', categoria:'Traspaso de deuda — se aplica desde el estado de la tarjeta nacional' });
+        if(/pago tc|traspaso deuda/.test(d)){
+          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: usd, moneda:'USD', clase:'interno', estado:'ignorado', categoria:'Contraparte en dólares del traspaso de deuda — se aplica desde el estado de la tarjeta nacional' });
           return;
         }
         movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + fecha + desc + usd)), tarjeta:'internacional', fecha, desc: desc.replace(/\s+\d{4}$/, ''), monto: 0, montoUSD: usd, moneda:'USD', origenMonto: r[r.length - 2] || '', clase:'compra', estado:'por_clasificar' });
@@ -7371,7 +7376,7 @@ ${lineasDeuda}
         <div class="fa-modal" data-action="confirm-noop" id="fa-tarjeta-pago" style="max-width:560px;">
           <div class="fa-modal-title">Pago de tarjeta — ${tarjetaMontoTxt(m)}</div>
           <div class="fa-hint" style="margin-top:0;">Estado de la tarjeta ${m.tarjeta} · ${fmtDate(m.fecha)} · ${escapeHtml(m.desc)}</div>
-          <div class="fa-hint" style="background:#F0F7FF; border:1px solid #BBD7F5; border-radius:8px; padding:8px 10px;"><strong>¿Qué es esto?</strong> Es un pago que aparece en el estado de cuenta de la tarjeta. La plata salió de tu cuenta, y esa salida ya está (o debe estar) en tu cartola. Acá solo hay que evitar contar el abono dos veces.<br><strong>Qué hacer:</strong> ${(() => { const pend = lineas.find(x=> x.esPagoTarjeta && (x.estado === 'por_clasificar' || x.estado === 'deuda')); const ok = lineas.find(x=> x.aTarjeta); if(ok) return 'Esa línea de tu cuenta ya está clasificada como pago a una tarjeta: elige <em>"Ya está registrado"</em> y guarda.'; if(pend) return 'La línea de tu cuenta del ' + fmtDate(pend.fecha) + ' ("' + escapeHtml(pend.desc) + '") todavía está sin clasificar. <strong>Cancela esto, clasifícala primero como Pago de deuda</strong> (con la tarjeta que corresponda), y después vuelve acá y elige <em>"Ya está registrado"</em>.'; return 'No veo una línea de pago de tarjeta en tu cuenta con este monto. Si el pago salió de otra cuenta que no cargaste, elige <em>"Registrar el abono"</em>.'; })()}</div>
+          <div class="fa-hint" style="background:#F0F7FF; border:1px solid #BBD7F5; border-radius:8px; padding:8px 10px;"><strong>¿Qué es esto?</strong> Es un pago que aparece en el estado de cuenta de la tarjeta. La plata salió de tu cuenta, y esa salida ya está (o debe estar) en tu cartola. Acá solo hay que evitar contar el abono dos veces.<br><strong>Qué hacer:</strong> ${(() => { const pend = lineas.find(x=> x.esPagoTarjeta && (x.estado === 'por_clasificar' || x.estado === 'deuda')); const ok = lineas.find(x=> x.aTarjeta); if(ok) return 'Esa línea de tu cuenta ya está clasificada como pago a una tarjeta: elige <em>"Ya está registrado"</em> y guarda.'; if(pend) return 'La línea de tu cuenta del ' + fmtDate(pend.fecha) + ' ("' + escapeHtml(pend.desc) + '") todavía está sin clasificar. <strong>Cancela esto, clasifícala primero como Pago de deuda a la Tarjeta de Crédito Nacional</strong> (todo pago desde la cuenta en pesos va a la nacional), y después vuelve acá y elige <em>"Ya está registrado"</em>.'; return 'No veo una línea de pago de tarjeta en tu cuenta con este monto. Si el pago salió de otra cuenta que no cargaste, elige <em>"Registrar el abono"</em>.'; })()}</div>
           <div class="fa-hint">${lineas.length ? 'Líneas de tu cuenta con este monto y fecha cercana:<br>' + lineas.map(x=> `• ${fmtDate(x.fecha)} · cuenta ${x.cuenta} · ${escapeHtml(x.desc)} — <strong>${escapeHtml(CARTOLA_ESTADO_LABEL[x.estado] || x.estado)}${x.categoria ? ' — ' + escapeHtml(x.categoria) : ''}</strong>`).join('<br>') : 'No encontré una línea de tu cuenta con este mismo monto en esas fechas.'}</div>
           <div class="fa-form-grid" style="grid-template-columns:1fr;">
             <div class="fa-field"><label>¿Qué hago con este pago?</label>
@@ -7381,7 +7386,7 @@ ${lineasDeuda}
               </select>
             </div>
             <div class="fa-field"><label>Tarjeta a la que se abona</label>
-              <select name="destino" style="width:100%;"><option value="deuda_tc_internacional" ${m.tarjeta === 'internacional' ? 'selected' : ''}>Tarjeta de Crédito Internacional</option><option value="deuda_tc_nacional" ${m.tarjeta === 'nacional' ? 'selected' : ''}>Tarjeta de Crédito Nacional</option></select>
+              <select name="destino" style="width:100%;"><option value="deuda_tc_nacional" selected>Tarjeta de Crédito Nacional</option><option value="deuda_tc_internacional">Tarjeta de Crédito Internacional</option></select>
             </div>
           </div>
           <div class="fa-hint">Usa "Registrar el abono" solo si ese pago NO está clasificado desde la cartola de la cuenta; si no, la deuda bajaría dos veces. Si el pago de la cuenta ya está como "Pago de deuda", deja la primera opción.</div>
@@ -7537,7 +7542,7 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">Estados de cuenta de tarjetas de crédito</div>
         <div class="fa-section-note">Sube el estado de cuenta de la tarjeta nacional y/o internacional de Itaú (Excel). Cada compra queda en "Por clasificar" para asignarle categoría, evento y líneas de negocio. Las comisiones e intereses del banco entran solos como Gasto Financiero; los pagos y traspasos entre tarjetas se ignoran (no son gasto). Para que cuenten, define antes el cupo de cada tarjeta en Configuración.</div>
-        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-reabrir-pagos">Dejar todos los pagos de tarjeta por clasificar</button></div>
+        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-reabrir-pagos">Dejar todos los pagos de tarjeta por clasificar</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-pagos-a-nacional">Clasificar los pagos de la cuenta como pago a la Tarjeta Nacional</button></div>
         <input type="file" id="fa-import-tarjeta" data-action="import-tarjeta-file" accept=".xls,.xlsx" multiple style="display:none;">
         ${(state.tarjetaMensajes || []).length ? `<div style="margin-top:10px;">${state.tarjetaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':'inherit'};">${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
         ${c.tarjetaArchivos.length ? `
@@ -10598,6 +10603,15 @@ ${lineasDeuda}
         showToast('Traspaso aplicado: baja la deuda de la tarjeta internacional y sube la de la nacional.');
         render();
       }
+    }
+    else if(action === 'tarjeta-pagos-a-nacional'){
+      const pend = state.cartola.movimientos.filter(m=> (m.estado === 'por_clasificar' || m.estado === 'deuda') && m.cargo > 0 && /^pago tarjeta de credito/.test(cartolaNorm(m.desc)));
+      if(!pend.length){ showToast('No hay pagos de la cuenta a la tarjeta pendientes por clasificar.'); return; }
+      if(!state.deudas.inventario.some(d=> d.id === DEUDA_TC_NACIONAL_ID)){ showToast('Primero define el cupo de la Tarjeta Nacional en Configuración, para que exista su deuda.'); return; }
+      pend.forEach(m=>{ if(cartolaAutoPagoTarjeta(m)) cartolaAplicarEfectos(m); });
+      await cartolaGuardarTodo();
+      showToast(`Listo: ${pend.length} pago${pend.length===1?'':'s'} de la cuenta quedaron como abono a la Tarjeta Nacional.`);
+      render();
     }
     else if(action === 'tarjeta-pago-abrir'){
       state.tarjetaPago = { id: btn.dataset.id };
