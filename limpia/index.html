@@ -6717,12 +6717,26 @@ ${lineasDeuda}
   }
 
   async function cartolaGuardarTodo(){
-    await saveKey('cartola', state.cartola);
-    await saveKey('gastos', state.gastos);
-    await saveKey('ingresos', state.ingresos);
-    await saveKey('tesoreria', state.tesoreria, {silent:true});
-    await saveKey('config', state.config, {silent:true});
-    await saveKey('deudas', state.deudas, {silent:true});
+    await Promise.all([
+      saveKey('cartola', state.cartola),
+      saveKey('gastos', state.gastos),
+      saveKey('ingresos', state.ingresos),
+      saveKey('tesoreria', state.tesoreria, {silent:true}),
+      saveKey('config', state.config, {silent:true}),
+      saveKey('deudas', state.deudas, {silent:true})
+    ]);
+  }
+  // Guardado liviano para las tarjetas: solo sube lo que cambia (los movimientos de tarjeta, las reglas, los gastos, la deuda y la
+  // configuración), todo a la vez, en vez de reescribir la cartola completa en cada clic.
+  async function tarjetaGuardarTodo(){
+    await Promise.all([
+      saveKey('cartola/tarjetaMovs', state.cartola.tarjetaMovs),
+      saveKey('cartola/tarjetaArchivos', state.cartola.tarjetaArchivos),
+      saveKey('cartola/reglas', state.cartola.reglas),
+      saveKey('gastos', state.gastos),
+      saveKey('config', state.config, {silent:true}),
+      saveKey('deudas', state.deudas, {silent:true})
+    ]);
   }
 
   async function importarCartolas(files){
@@ -7215,7 +7229,7 @@ ${lineasDeuda}
       if(rl.fallidos.length) mensajes.push({ nivel:'error', texto: rl.error + ` (${rl.fallidos.length} quedaron por clasificar)` });
     }
     state.tarjetaMensajes = mensajes;
-    await cartolaGuardarTodo();
+    await tarjetaGuardarTodo();
     showToast(nuevas > 0 ? `Estados de tarjeta cargados: ${nuevas} movimientos nuevos.` : 'Esos estados ya estaban cargados — no se duplicó nada.');
     render();
   }
@@ -7371,7 +7385,7 @@ ${lineasDeuda}
         if(rl.fallidos.length) showToast(rl.error);
       }
     }
-    await cartolaGuardarTodo();
+    await tarjetaGuardarTodo();
     showToast(afectadas.length > 1 ? `Listo: se clasificaron ${afectadas.length} compras parecidas.` : 'Compra clasificada.');
     return true;
   }
@@ -7379,7 +7393,7 @@ ${lineasDeuda}
     const m = state.cartola.tarjetaMovs.find(x=> x.id === id); if(!m) return;
     tarjetaQuitarEfectos(m.id);
     m.estado = 'por_clasificar'; m.categoria = ''; m.proyecto = ''; m.detalle = null; m.regla = null;
-    await cartolaGuardarTodo();
+    await tarjetaGuardarTodo();
     showToast('La compra volvió a "Por clasificar".');
     render();
   }
@@ -7389,7 +7403,7 @@ ${lineasDeuda}
     ids.forEach(id=> tarjetaQuitarEfectos(id));
     state.cartola.tarjetaMovs = state.cartola.tarjetaMovs.filter(m=> m.archivo !== clave);
     state.cartola.tarjetaArchivos = state.cartola.tarjetaArchivos.filter(a=> !(a.tipo === tipo && a.hasta === hasta));
-    await cartolaGuardarTodo();
+    await tarjetaGuardarTodo();
     showToast(`Estado de cuenta eliminado: ${ids.size} movimientos y los gastos que habían generado.`);
     render();
   }
@@ -10448,7 +10462,11 @@ ${lineasDeuda}
     else if(action === 'tarjeta-clasificar-guardar'){
       const cl = state.tarjetaClasificar;
       if(!cl) return;
-      const guardado = await tarjetaClasificarGuardar(cl.id, readFields(document.getElementById('fa-tarjeta-clasificar')));
+      const textoBoton = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Guardando…';
+      let guardado = false;
+      try{ guardado = await tarjetaClasificarGuardar(cl.id, readFields(document.getElementById('fa-tarjeta-clasificar'))); }
+      finally{ if(!guardado){ btn.disabled = false; btn.textContent = textoBoton; } }
       if(guardado){ state.tarjetaClasificar = null; render(); }
     }
     else if(action === 'tarjeta-reabrir'){
@@ -10464,7 +10482,11 @@ ${lineasDeuda}
     else if(action === 'cartola-clasificar-guardar'){
       const cl = state.cartolaClasificar;
       if(!cl) return;
-      const guardado = await cartolaAsignar(cl.id, readFields(document.getElementById('fa-cartola-clasificar')));
+      const textoBoton = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Guardando…';
+      let guardado = false;
+      try{ guardado = await cartolaAsignar(cl.id, readFields(document.getElementById('fa-cartola-clasificar'))); }
+      finally{ if(!guardado){ btn.disabled = false; btn.textContent = textoBoton; } }
       if(guardado){ state.cartolaClasificar = null; render(); }
     }
     else if(action === 'cartola-dividir-abrir'){
