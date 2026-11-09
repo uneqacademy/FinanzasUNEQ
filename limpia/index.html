@@ -1324,6 +1324,14 @@
     return true;
   }
 
+  // Gastos fijos (plantilla y sueldo de socios) que siguen "Pendiente". Los de meses anteriores se muestran como Cuentas por Pagar.
+  function getFijosPendientes(){
+    return state.gastos.filter(g=> (g.origenPlantilla || g.origenSueldoDuenos) && g.estado === 'Pendiente' && g.fecha && !g.enlaceCartola);
+  }
+  function getFijosVencidosSinProcesar(){
+    const ymHoy = todayISO().slice(0,7);
+    return getFijosPendientes().filter(g=> g.fecha.slice(0,7) < ymHoy).sort((a,b)=> a.fecha.localeCompare(b.fecha));
+  }
   function getCuentasPorPagarActivas(){
     return state.cuentasPorPagar.items
       .filter(c=>c.activa)
@@ -1696,17 +1704,24 @@
     const mes = hoy.getMonth();
     let generados = false;
     state.plantillasGastosFijos.filter(p=>p.activa).forEach(p=>{
-      const yaExiste = state.gastos.some(g=>{
-        if(g.origenPlantilla !== p.id || !g.fecha) return false;
-        const d = new Date(g.fecha+'T00:00:00');
-        return d.getFullYear()===anio && d.getMonth()===mes;
-      });
-      if(!yaExiste){
-        const fechaGasto = `${anio}-${String(mes+1).padStart(2,'0')}-01`;
+      // Genera cada mes desde "Rige desde el mes" de la plantilla hasta el mes en curso (así lo que partió en enero queda en
+      // Estado de Resultados desde enero). Sin fecha de inicio, solo el mes en curso. Nunca duplica un mes que ya existe.
+      const ymHoy = anio * 12 + mes;
+      let ymIni = ymHoy;
+      const ini = String(p.inicio || '').split('-');
+      if(ini.length === 2 && Number(ini[0]) > 2000) ymIni = Number(ini[0]) * 12 + (Number(ini[1]) - 1);
+      for(let ym = ymIni; ym <= ymHoy; ym++){
+        const a = Math.floor(ym / 12), m = ym % 12;
+        const yaExiste = state.gastos.some(g=>{
+          if(g.origenPlantilla !== p.id || !g.fecha) return false;
+          const d = new Date(g.fecha+'T00:00:00');
+          return d.getFullYear()===a && d.getMonth()===m;
+        });
+        if(yaExiste) continue;
         const pctsCongelados = {};
         UNIDADES_NEGOCIO.forEach(u=> pctsCongelados['pct_'+u.id] = p['pct_'+u.id]);
         state.gastos.push({
-          id: uid('gas'), fecha: fechaGasto, categoria: p.categoria,
+          id: uid('gas'), fecha: `${a}-${String(m+1).padStart(2,'0')}-01`, categoria: p.categoria,
           proveedor: p.nombre, descripcion: `Gasto fijo: ${p.nombre}`, monto: p.montoMensual,
           estado: 'Pendiente', montoPagado: 0, origenPlantilla: p.id, metodo: 'Transferencia',
           // Se congela la dedicación de ESTE momento — si la plantilla cambia después, no altera meses ya
@@ -5407,6 +5422,18 @@
           ` : ''}
         </div>
         ${Object.keys(gastoPorProyecto).length>0 ? `<div class="fa-hint" style="margin-top:14px;"><strong>Gasto por proyecto (${state.config.anio}):</strong> ${Object.keys(gastoPorProyecto).map(e=>`${escapeHtml(e)}: ${fmtMoneyC(gastoPorProyecto[e])}`).join(' · ')}</div>` : ''}
+        ${(() => {
+          const ymHoy = todayISO().slice(0,7);
+          const delMes = getFijosPendientes().filter(g=> g.fecha.slice(0,7) === ymHoy);
+          const vencidos = getFijosVencidosSinProcesar();
+          if(!delMes.length && !vencidos.length) return '';
+          return `
+        <div style="border:1.5px solid var(--border); border-radius:10px; padding:12px; margin-top:14px;">
+          <div style="font-weight:700; font-size:13.5px;">Gastos fijos por procesar este mes (${delMes.length})</div>
+          ${delMes.length ? `<div class="fa-table-wrap" style="margin-top:6px;"><table class="fa-table"><tbody>${delMes.map(g=>`<tr><td>${escapeHtml(g.proveedor || g.categoria)}</td><td class="num money">${fmtMoneyC(g.monto)}</td><td><button class="fa-icon-btn" data-action="abrir-procesar-gasto" data-id="${g.id}">Procesar pago</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="fa-hint">No hay nada por procesar este mes.</div>'}
+          ${vencidos.length ? `<div class="fa-hint" style="margin-top:6px; color:var(--expense);">${vencidos.length} gasto${vencidos.length===1?'':'s'} fijo${vencidos.length===1?'':'s'} de meses anteriores sin procesar (${fmtMoneyC(vencidos.reduce((t,g)=> t + (Number(g.monto)||0), 0))}): están en Gestión de Deudas, en Cuentas por Pagar.</div>` : ''}
+        </div>`;
+        })()}
         ${gastosDelAnio.length>0 ? `
         <div class="fa-filter-bar" style="margin-top:14px;">
           <select onchange="window.faFiltrarGastosMes(this.value)">
@@ -5686,12 +5713,13 @@
 
       <div class="fa-card">
         <div class="fa-card-title">📋 Cuentas por Pagar</div>
-        <div class="fa-section-note">Sección aparte de tus créditos — sin interés, sin cuota mínima. Se generan solas cuando pagas parcialmente un gasto en Estado de Resultados, pero también puedes agregar una a mano.</div>
+        <div class="fa-section-note">Sección aparte de tus créditos — sin interés, sin cuota mínima. Se generan solas cuando pagas parcialmente un gasto en Estado de Resultados, pero también puedes agregar una a mano. Los gastos fijos de meses anteriores que no procesaste aparecen aquí también.</div>
         ${(() => {
           const ctasActivas = getCuentasPorPagarActivas();
-          const totalCtasPorPagar = ctasActivas.reduce((s,c)=>s+c.saldo,0);
+          const fijosVencidos = getFijosVencidosSinProcesar();
+          const totalCtasPorPagar = ctasActivas.reduce((s,c)=>s+c.saldo,0) + fijosVencidos.reduce((s,g)=> s + (Number(g.monto)||0), 0);
           return `
-        ${ctasActivas.length===0 ? `<div class="fa-empty">No tienes Cuentas por Pagar activas.</div>` : `
+        ${(ctasActivas.length===0 && fijosVencidos.length===0) ? `<div class="fa-empty">No tienes Cuentas por Pagar activas.</div>` : `
         <div class="fa-kpi-grid" style="grid-template-columns:repeat(1,1fr); max-width:260px; margin-bottom:14px;">
           <div class="fa-kpi expense"><div class="fa-kpi-label">Total Cuentas por Pagar</div><div class="fa-kpi-value expense money">${fmtMoneyC(totalCtasPorPagar)}</div></div>
         </div>
@@ -5699,6 +5727,13 @@
           <table class="fa-table">
             <thead><tr><th>Nombre</th><th>Origen</th><th class="num">Saldo Pendiente</th><th></th></tr></thead>
             <tbody>
+              ${fijosVencidos.map(g=>`
+                <tr>
+                  <td>${escapeHtml(g.proveedor || g.categoria)} — ${cartolaMesLabel(g.fecha.slice(0,7))}</td>
+                  <td>Gasto fijo sin procesar</td>
+                  <td class="num money">${fmtMoneyC(g.monto)}</td>
+                  <td><div class="fa-row-actions"><button class="fa-icon-btn" data-action="abrir-procesar-gasto" data-id="${g.id}">Procesar pago</button></div></td>
+                </tr>`).join('')}
               ${ctasActivas.map(c=>{
                 const pagosDeEstaCuenta = state.cuentasPorPagar.pagos.filter(p=>p.ctaId===c.id);
                 return `
@@ -6363,6 +6398,12 @@ ${lineasDeuda}
         if(g.origenCartola || g.enlaceCartola || g.origenPagoDeuda || g.boveda !== 'operacion' || g.monedaOriginal === 'USD') return;
         if(Math.round(Number(g.monto)||0) === monto && dias(g.fecha) <= 10) lista.push({ tipo:'gasto', id:g.id, dias:dias(g.fecha), etiqueta:`${fmtDate(g.fecha)} · ${g.proveedor || g.categoria} · ${fmtMoney(g.monto)} (gasto)` });
       });
+      // Gastos fijos pendientes (plantilla / sueldo de socios) por el mismo monto: el pago del banco los deja pagados, sin contarlos dos veces.
+      state.gastos.forEach(g=>{
+        if(!(g.origenPlantilla || g.origenSueldoDuenos) || g.estado !== 'Pendiente' || g.enlaceCartola || !g.fecha) return;
+        if(Math.round(Number(g.monto)||0) !== monto) return;
+        lista.push({ tipo:'fijo', id:g.id, dias: dias(g.fecha), etiqueta:`${cartolaMesLabel(g.fecha.slice(0,7))} · ${g.proveedor || g.categoria} · ${fmtMoney(g.monto)} (gasto fijo pendiente)` });
+      });
       state.deudas.pagos.forEach(p=>{
         if(p.origenCartola || p.enlaceCartola || (p.cuentaOrigen || 'operacion') !== 'operacion') return;
         const total = Math.round(Number(p.montoTotalPagado != null ? p.montoTotalPagado : p.montoTotal)||0);
@@ -6378,10 +6419,10 @@ ${lineasDeuda}
     return lista.sort((a,b)=> a.dias - b.dias);
   }
   function cartolaRegistroEnlazable(tipo, id){
-    return tipo === 'gasto' ? state.gastos.find(g=> g.id === id) : tipo === 'ingreso' ? state.ingresos.find(i=> i.id === id) : state.deudas.pagos.find(p=> p.id === id);
+    return (tipo === 'gasto' || tipo === 'fijo') ? state.gastos.find(g=> g.id === id) : tipo === 'ingreso' ? state.ingresos.find(i=> i.id === id) : state.deudas.pagos.find(p=> p.id === id);
   }
   function cartolaOrigenTesoreria(tipo, id){
-    return tipo === 'gasto' ? `gasto:${id}` : tipo === 'pago' ? `pagodeuda:${id}` : null;
+    return tipo === 'gasto' ? `gasto:${id}` : tipo === 'fijo' ? `gastoprocesado:${id}` : tipo === 'pago' ? `pagodeuda:${id}` : null;
   }
   // Marca el registro manual como enlazado y, si hace falta, lleva su salida de flujo a la fecha real del banco.
   function cartolaAplicarEnlace(mov){
@@ -6389,6 +6430,14 @@ ${lineasDeuda}
     const rec = cartolaRegistroEnlazable(en.tipo, en.id);
     if(!rec) return;
     rec.enlaceCartola = mov.id;
+    if(en.tipo === 'fijo'){
+      // El gasto fijo pendiente queda pagado con este cargo del banco (la salida de flujo es la del banco, una sola vez).
+      en.antes = { estado: rec.estado, montoPagado: rec.montoPagado, boveda: rec.boveda, fechaPago: rec.fechaPago };
+      rec.estado = 'Pagado'; rec.montoPagado = rec.monto; rec.boveda = 'operacion'; rec.fechaPago = mov.fecha;
+      state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${rec.id}`);
+      state.tesoreria.movimientos.push({ id: uid('tes'), fecha: mov.fecha, boveda: 'operacion', tipo: 'salida', monto: mov.cargo, descripcion: `Pago de "${rec.proveedor || rec.categoria}" (cartola)`, origen: `gastoprocesado:${rec.id}` });
+      return;
+    }
     const origen = cartolaOrigenTesoreria(en.tipo, en.id);
     const tm = origen && state.tesoreria.movimientos.find(m=> m.origen === origen);
     if(tm && tm.fecha !== mov.fecha){ en.fechaFlujoAntes = tm.fecha; tm.fecha = mov.fecha; }
@@ -6398,6 +6447,11 @@ ${lineasDeuda}
     [['gasto', state.gastos], ['ingreso', state.ingresos], ['pago', state.deudas.pagos]].forEach(([tipo, lista])=>{
       lista.filter(r=> r.enlaceCartola === movId).forEach(r=>{
         delete r.enlaceCartola;
+        if(tipo === 'gasto' && mov && mov.enlace && mov.enlace.tipo === 'fijo' && mov.enlace.antes){
+          Object.assign(r, mov.enlace.antes);
+          state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> m.origen !== `gastoprocesado:${r.id}`);
+          return;
+        }
         const origen = cartolaOrigenTesoreria(tipo, r.id);
         const tm = origen && state.tesoreria.movimientos.find(m=> m.origen === origen);
         if(tm && mov && mov.enlace && mov.enlace.fechaFlujoAntes) tm.fecha = mov.enlace.fechaFlujoAntes;
@@ -9198,6 +9252,7 @@ ${lineasDeuda}
               <select name="categoria">${state.config.categoriasGastos.map(c=>`<option ${editingP&&editingP.categoria===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
             </div>
             <div class="fa-field"><label>Monto Mensual</label><input type="number" name="montoMensual" min="0" step="1" placeholder="0" value="${editingP?editingP.montoMensual:''}"></div>
+            <div class="fa-field"><label>Rige desde el mes</label><input type="month" name="inicio" value="${editingP&&editingP.inicio?editingP.inicio:''}"><div class="fa-hint" style="margin:4px 0 0 0;">Si partió en enero, pon enero: se crea el gasto de cada mes hasta hoy. Vacío = solo desde este mes.</div></div>
             ${UNIDADES_NEGOCIO.map(u=>`
             <div class="fa-field"><label>% Dedicación ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editingP&&editingP['pct_'+u.id]!==undefined?editingP['pct_'+u.id]:''}" oninput="window.faActualizarSumaPctPlantilla()"></div>
             `).join('')}
@@ -9211,13 +9266,14 @@ ${lineasDeuda}
         ${state.plantillasGastosFijos.length>0 ? `
         <div class="fa-table-wrap" style="margin-top:14px;">
           <table class="fa-table">
-            <thead><tr><th>Nombre</th><th>Categoría</th><th class="num">Monto Mensual</th><th>Estado</th><th></th></tr></thead>
+            <thead><tr><th>Nombre</th><th>Categoría</th><th class="num">Monto Mensual</th><th>Desde</th><th>Estado</th><th></th></tr></thead>
             <tbody>
               ${state.plantillasGastosFijos.map(p=>`
                 <tr>
                   <td>${escapeHtml(p.nombre)}</td>
                   <td>${escapeHtml(p.categoria)}</td>
                   <td class="num money">${fmtMoneyC(p.montoMensual)}</td>
+                  <td>${p.inicio ? cartolaMesLabel(p.inicio) : '—'}</td>
                   <td>${p.activa?`<span class="fa-badge pagado">Activa</span>`:`<span class="fa-badge pendiente">Pausada</span>`}</td>
                   <td>
                     <div class="fa-row-actions">
@@ -12024,13 +12080,15 @@ ${lineasDeuda}
       const editId = state.editingPlantillaId;
       if(editId){
         const idx = state.plantillasGastosFijos.findIndex(p=>p.id===editId);
-        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual, ...pcts };
+        if(idx>-1) state.plantillasGastosFijos[idx] = { ...state.plantillasGastosFijos[idx], nombre:data.nombre, categoria:data.categoria, montoMensual, inicio: data.inicio || '', ...pcts };
         state.editingPlantillaId = null;
       } else {
-        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, ...pcts, activa:true, fechaCreacion: todayISO() });
+        state.plantillasGastosFijos.push({ id: uid('plantilla'), nombre:data.nombre, categoria:data.categoria, montoMensual, inicio: data.inicio || '', ...pcts, activa:true, fechaCreacion: todayISO() });
       }
       await saveKey('plantillasGastosFijos', state.plantillasGastosFijos);
-      showToast(editId?'Plantilla actualizada':'Plantilla agregada — se generará su gasto Pendiente la próxima vez que abras la app (o el mes que corresponda)');
+      const generadosAhora = generarGastosFijosDelMes();
+      if(generadosAhora) await saveKey('gastos', state.gastos, {silent:true});
+      showToast(editId?'Plantilla actualizada':'Plantilla agregada — sus gastos quedan Pendientes en Estado de Resultados desde el mes de inicio');
       render();
     }
     else if(action === 'edit-plantilla'){
