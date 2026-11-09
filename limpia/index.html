@@ -909,62 +909,105 @@
   }
 
 
-  // ---------------- Cobertura automática: Línea de Crédito y Sobregiro no pactado ----------------
-  // Cada vez que Operación queda en negativo (por una cartola o por un movimiento manual), la app cubre el déficit
-  // sola: primero con la Línea de Crédito (hasta su cupo disponible) y lo que sobre va al Sobregiro no pactado de la
-  // cuenta corriente. Se recalcula completo cada vez desde el libro de Tesorería, así que al corregir o borrar
-  // un movimiento la cobertura se ajusta sola y nunca queda duplicada. Los giros automáticos llevan auto:true.
-  function planCoberturasAuto(){
-    const mov = state.tesoreria.movimientos.filter(m=> m.boveda === 'operacion' && esMovimientoVigente(m) && !(String(m.origen||'').startsWith('giro:') && (state.deudas.giros||[]).some(g=> g.auto && m.origen === 'giro:' + g.id)));
-    const saldoIni = Number((state.tesoreria.saldosIniciales||{}).operacion) || 0;
-    const porFecha = {};
-    mov.forEach(m=>{ (porFecha[m.fecha] = porFecha[m.fecha] || []).push(m); });
-    const lineaDef = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
-    const cupo = lineaDef ? (Number(lineaDef.cupo)||0) : 0;
-    const eventosLinea = [];
-    (state.deudas.giros||[]).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && !g.auto).forEach(g=> eventosLinea.push({ fecha:g.fecha, monto:Number(g.monto)||0 }));
-    state.deudas.pagos.filter(x=> x.deudaId === SOBREGIRO_OPEX_ID).forEach(x=> eventosLinea.push({ fecha:x.fecha, monto:-(Number(x.capital)||0) }));
-    const lineaSaldoEn = f=> Math.max((lineaDef ? Number(lineaDef.montoOriginal)||0 : 0) + eventosLinea.filter(e=> e.fecha <= f).reduce((t,e)=> t + e.monto, 0), 0);
-    const plan = [];
-    let saldo = saldoIni;
-    Object.keys(porFecha).sort().forEach(f=>{
-      porFecha[f].forEach(m=> saldo += (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0));
-      if(saldo >= 0) return;
-      const deficit = Math.round(-saldo);
-      const disponible = Math.max(cupo - lineaSaldoEn(f), 0);
-      const aLinea = Math.min(deficit, disponible), aSobregiro = deficit - aLinea;
-      if(aLinea > 0){ plan.push({ fecha:f, deudaId:SOBREGIRO_OPEX_ID, monto:aLinea }); eventosLinea.push({ fecha:f, monto:aLinea }); }
-      if(aSobregiro > 0) plan.push({ fecha:f, deudaId:SOBREGIRO_CC_ID, monto:aSobregiro });
-      saldo = 0;
+  // ---------------- Línea de Crédito y Sobregiro no pactado, por cuenta ----------------
+  // - El SOBREGIRO NO PACTADO es el saldo negativo real (según el banco) de las cuentas que NO tienen línea de crédito (hoy la 5994). Es una
+  //   deuda informativa: sube y baja sola con ese saldo, no mueve el flujo ni la cubre la línea.
+  // - La LÍNEA DE CRÉDITO cubre solo la cuenta que la tiene (hoy la 6463). Cuando esa cuenta queda en negativo, la app PROPONE un uso de la
+  //   línea; no pasa nada hasta que tú lo aceptas (botón "Aceptar"), y recién ahí entra a la deuda de la línea y al flujo.
+  function cuentaDeLinea(){
+    const c = state.cartola.movimientos.find(m=> /^abono desde linea de credito|^cargo ctacte por traspaso lc/.test(cartolaNorm(m.desc)));
+    return (c && c.cuenta) || (state.config && state.config.cuentaLinea) || '6463';
+  }
+  // Saldo de cada cuenta al cierre de cada día (el que informa el banco en la cartola).
+  function saldosDiariosPorCuenta(){
+    const por = {};
+    state.cartola.movimientos.forEach((m, i)=>{ (por[m.cuenta] = por[m.cuenta] || []).push({ f: m.fecha, i, s: Number(m.saldo) || 0 }); });
+    const res = {};
+    Object.keys(por).forEach(cu=>{
+      const dias = {};
+      por[cu].sort((a,b)=> a.f.localeCompare(b.f) || a.i - b.i).forEach(x=>{ dias[x.f] = x.s; });
+      res[cu] = dias;
+    });
+    return res;
+  }
+  // Deuda "sobregiro no pactado" día a día: la suma de los saldos negativos de las cuentas sin línea.
+  function planSobregiroCC(){
+    const lin = cuentaDeLinea();
+    const sd = saldosDiariosPorCuenta();
+    const cuentas = Object.keys(sd).filter(cu=> cu !== lin);
+    const fechas = [...new Set(cuentas.flatMap(cu=> Object.keys(sd[cu])))].sort();
+    const ultimo = {}; let prev = 0; const plan = [];
+    fechas.forEach(f=>{
+      cuentas.forEach(cu=>{ if(sd[cu][f] !== undefined) ultimo[cu] = sd[cu][f]; });
+      const total = Math.round(cuentas.reduce((s,cu)=> s + Math.max(-(ultimo[cu] || 0), 0), 0));
+      if(total !== prev){ plan.push({ fecha: f, delta: total - prev }); prev = total; }
     });
     return plan;
   }
-  function firmaCoberturas(lista){ return JSON.stringify(lista.map(x=> [x.fecha, x.deudaId, x.monto])); }
-  // Devuelve true si cambió algo (y lo guarda).
   async function recalcCoberturasAuto(){
     if(!state.tesoreria || !state.deudas || !state.deudas.inventario || !state.config) return false;
     if(!state.deudas.giros) state.deudas.giros = [];
-    const actuales = state.deudas.giros.filter(g=> g.auto).sort((a,b)=> a.fecha.localeCompare(b.fecha) || a.deudaId.localeCompare(b.deudaId));
-    const plan = planCoberturasAuto().sort((a,b)=> a.fecha.localeCompare(b.fecha) || a.deudaId.localeCompare(b.deudaId));
-    if(firmaCoberturas(actuales.map(g=> ({fecha:g.fecha, deudaId:g.deudaId, monto:g.monto}))) === firmaCoberturas(plan)) return false;
-    const idsViejos = new Set(actuales.map(g=> 'giro:' + g.id));
+    const plan = planSobregiroCC();
+    const actuales = state.deudas.giros.filter(g=> g.auto).map(g=> [g.fecha, g.deudaId, Math.round(g.monto)]).concat(state.deudas.pagos.filter(p=> p.auto).map(p=> [p.fecha, p.deudaId, -Math.round(p.capital)]));
+    const nuevos = plan.map(x=> [x.fecha, SOBREGIRO_CC_ID, x.delta]);
+    const firma = l=> JSON.stringify(l.slice().sort((a,b)=> String(a[0]).localeCompare(String(b[0])) || a[2] - b[2]));
+    if(firma(actuales) === firma(nuevos)) return false;
+    // se quitan los usos "automáticos" anteriores (de la versión vieja también) con sus entradas de flujo
+    const viejos = new Set(state.deudas.giros.filter(g=> g.auto).map(g=> 'giro:' + g.id));
     state.deudas.giros = state.deudas.giros.filter(g=> !g.auto);
-    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> !idsViejos.has(m.origen));
-    plan.forEach(x=>{
-      let d = state.deudas.inventario.find(y=> y.id === x.deudaId);
+    state.deudas.pagos = state.deudas.pagos.filter(p=> !p.auto);
+    state.tesoreria.movimientos = state.tesoreria.movimientos.filter(m=> !viejos.has(m.origen));
+    if(plan.length){
+      let d = state.deudas.inventario.find(y=> y.id === SOBREGIRO_CC_ID);
       if(!d){
         d = { id:SOBREGIRO_CC_ID, nombre:'Sobregiro Cuenta Corriente (no pactado)', categoria:'Sobregiro no pactado', tipoDeuda:'generica', montoOriginal:0, tasaInteres:0, tasaInteresPeriodo:'mensual', cuotaMinima:0, cupo:0, fija:true, fechaVencimiento:'', cronogramaCuotas:null, fechaCreacion: todayISO() };
         state.deudas.inventario.push(d);
       }
       d.activa = true;
-      const giro = { id: uid('giro'), deudaId:x.deudaId, fecha:x.fecha, monto:x.monto, auto:true, origen:'autocobertura',
-        descripcion: x.deudaId === SOBREGIRO_OPEX_ID ? 'Uso automático de la línea de crédito (Operación en negativo)' : 'Sobregiro no pactado (Operación en negativo)' };
-      state.deudas.giros.push(giro);
-      state.tesoreria.movimientos.push({ id: uid('tes'), fecha:x.fecha, boveda:'operacion', tipo:'entrada', monto:x.monto,
-        descripcion: (x.deudaId === SOBREGIRO_OPEX_ID ? 'Cobertura automática — Línea de Crédito' : 'Cobertura automática — Sobregiro no pactado'), origen:'giro:' + giro.id });
-    });
+      plan.forEach(x=>{
+        if(x.delta > 0) state.deudas.giros.push({ id: uid('giro'), deudaId: SOBREGIRO_CC_ID, fecha: x.fecha, monto: x.delta, auto:true, origen:'sobregiro_cuenta', descripcion:'Saldo negativo de la cuenta corriente (según el banco)' });
+        else state.deudas.pagos.push({ id: uid('pagodeuda'), deudaId: SOBREGIRO_CC_ID, fecha: x.fecha, montoTotal: -x.delta, montoTotalPagado: -x.delta, capital: -x.delta, interes:0, interesMora:0, cuentaOrigen:'auto', auto:true, sinFlujo:true, aplicaciones:[] });
+      });
+    }
     await saveKey('deudas', state.deudas, {silent:true});
     await saveKey('tesoreria', state.tesoreria, {silent:true});
+    return true;
+  }
+  // Usos de la línea que la app propone (cuenta de la línea en negativo). No están guardados: se calculan cada vez.
+  function lineaPropuestas(){
+    const linea = state.deudas && state.deudas.inventario && state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
+    if(!linea) return [];
+    const cu = cuentaDeLinea();
+    const dc = state.config.fechaDiaCero || '';
+    const archivos = state.cartola.archivos.filter(a=> a.cuenta === cu).sort((a,b)=> a.desde.localeCompare(b.desde));
+    if(!archivos.length) return [];
+    const lineas = state.cartola.movimientos.filter(m=> m.cuenta === cu);
+    let saldo = Number(archivos[0].saldoAnterior) || 0;
+    if(dc) saldo += lineas.filter(m=> m.fecha < dc).reduce((s,m)=> s + m.abono - m.cargo, 0);
+    const ev = {};
+    lineas.filter(m=> (!dc || m.fecha >= dc) && (m.estado === 'clasificado' || m.estado === 'traspaso')).forEach(m=>{ ev[m.fecha] = (ev[m.fecha] || 0) + m.abono - m.cargo; });
+    (state.deudas.giros || []).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && g.origen === 'cobertura_aceptada').forEach(g=>{ ev[g.fecha] = (ev[g.fecha] || 0) + (Number(g.monto) || 0); });
+    const props = [];
+    const fechas = Object.keys(ev).sort();
+    const dd = (x, y)=> Math.abs((new Date(x + 'T00:00:00') - new Date(y + 'T00:00:00')) / 86400000);
+    fechas.forEach((f, i)=>{
+      saldo += ev[f];
+      if(saldo >= 0) return;
+      // Un negativo que se recupera en los 3 días siguientes (ej. una transferencia entre tus cuentas que el banco registra al otro día) no se propone.
+      let mira = saldo, recupera = false;
+      for(let j = i + 1; j < fechas.length && dd(fechas[j], f) <= 3; j++){ mira += ev[fechas[j]]; if(mira >= 0){ recupera = true; break; } }
+      if(!recupera){ props.push({ fecha: f, monto: Math.round(-saldo), cuenta: cu }); saldo = 0; }
+    });
+    return props;
+  }
+  // Acepta una propuesta: la deuda de la línea sube y la plata entra a Operación en esa fecha.
+  async function lineaAceptarPropuesta(fecha, monto){
+    const linea = state.deudas.inventario.find(d=> d.id === SOBREGIRO_OPEX_ID);
+    if(!linea || !(monto > 0)) return false;
+    const giro = { id: uid('giro'), deudaId: SOBREGIRO_OPEX_ID, fecha, monto, origen:'cobertura_aceptada', descripcion:`Cobertura aceptada: la cuenta ${cuentaDeLinea()} quedó en negativo` };
+    state.deudas.giros.push(giro);
+    linea.activa = true;
+    state.tesoreria.movimientos.push({ id: uid('tes'), fecha, boveda:'operacion', tipo:'entrada', monto, descripcion:'Cobertura aceptada de la Línea de Crédito', origen:'giro:' + giro.id });
     return true;
   }
 
@@ -2364,7 +2407,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','import-linea-file','eliminar-linea','linea-auto','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','import-linea-file','eliminar-linea','linea-auto','linea-aceptar','linea-aceptar-todos','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -5655,7 +5698,7 @@
         return `
       <div class="fa-card">
         <div class="fa-card-title">💳 Línea de Crédito y Tarjetas</div>
-        <div class="fa-section-note">Se crean solas con los cupos que defines en Configuración. Su deuda sube cuando las usas y baja cuando las pagas. Si Operación queda en negativo, la app usa sola la línea de crédito y, si no alcanza, registra el Sobregiro no pactado de la cuenta corriente.</div>
+        <div class="fa-section-note">Se crean solas con los cupos que defines en Configuración. Su deuda sube cuando las usas y baja cuando las pagas. Si la cuenta de la línea queda en negativo, la app te propone un uso de la línea y tú lo aceptas. El Sobregiro no pactado es el saldo negativo real de la otra cuenta corriente.</div>
         ${fijas.length === 0 ? `<div class="fa-empty">Aún no defines cupos. Ponlos en Configuración > Cupos de Línea de Crédito y Tarjetas.</div>` : `
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:14px;">
           ${fijas.map(d=>{
@@ -5672,9 +5715,20 @@
             <div class="fa-hint" style="margin:0 0 2px 0;">${usadoUSD<0 ? 'Saldo a favor en dólares' : 'Deuda actual en dólares'}</div>
             <div style="font-size:10.5px; color:var(--ink-soft); margin:0 0 8px 0;">≈ ${usado<0?'−':''}${fmtMoneyC(Math.abs(usado))} al dólar promedio de las compras</div>` : `<div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':(usado<0?'var(--income)':'var(--ink-soft)')};">${fmtMoneyC(Math.abs(usado))}</div>
             <div class="fa-hint" style="margin:0 0 8px 0;">${usado<0 ? 'Saldo a favor (pagaste de más)' : 'Deuda actual'}</div>`}
-            ${(() => { const aut = (state.deudas.giros || []).filter(g=> g.deudaId === d.id && g.auto).reduce((t,g)=> t + (Number(g.monto)||0), 0); return aut > 0 ? `<div class="fa-hint" style="margin:0 0 8px 0; color:var(--expense);">Incluye ${fmtMoneyC(aut)} de uso <strong>automático</strong>: la app cubre con la línea cada vez que Operación queda en negativo. Si no corresponde, es que falta clasificar algo: mira la tabla "Cuadre mes a mes" en Cartolas bancarias.</div>` : ''; })()}
+            ${d.id === SOBREGIRO_OPEX_ID ? (() => {
+              const props = lineaPropuestas();
+              if(!props.length) return '';
+              const tot = props.reduce((t,x)=> t + x.monto, 0);
+              return `<div style="border:1.5px solid var(--expense); border-radius:8px; padding:8px 10px; margin:0 0 8px 0; background:#FFF5F5;">
+                <div style="font-size:12.5px; font-weight:700;">La línea cubriría ${props.length} movimiento${props.length===1?'':'s'} (${fmtMoneyC(tot)})</div>
+                <div class="fa-hint" style="margin:2px 0 6px 0;">La cuenta ${props[0].cuenta} quedó en negativo en estas fechas. No se aplica nada hasta que lo aceptes: al aceptar, sube la deuda de la línea y entra a tu flujo. Si no corresponde, es que falta clasificar algo (mira el "Cuadre mes a mes").</div>
+                ${props.slice(0, 12).map(x=> `<div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; padding:2px 0;"><span>${fmtDate(x.fecha)} · ${fmtMoneyC(x.monto)}</span><button type="button" class="fa-btn fa-btn-ghost" style="padding:2px 10px; font-size:11.5px;" data-action="linea-aceptar" data-fecha="${x.fecha}" data-monto="${x.monto}">Aceptar</button></div>`).join('')}
+                ${props.length > 12 ? `<div class="fa-hint" style="margin:2px 0;">… y ${props.length - 12} más.</div>` : ''}
+                <div class="fa-form-actions" style="margin-top:6px;"><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 12px; font-size:12px;" data-action="linea-aceptar-todos">Aceptar los ${props.length}</button></div>
+              </div>`;
+            })() : ''}${d.id === SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Es el saldo negativo real de la cuenta (según el banco). No lo cubre la línea de crédito.</div>' : ''}
             ${d.cupoEnUSD ? '' : `<div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;"><div style="background:${pct>=80?'var(--expense)':'var(--ink-soft)'}; height:100%; width:${pct.toFixed(0)}%;"></div></div>`}
-            ${d.id===SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Sobregiro no pactado: sin cupo. Se genera solo cuando Operación queda en negativo y la línea de crédito no alcanza.</div>' : ''}<div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(cupo-usado)}</strong>`}${esIntlUSD ? ` · Disponible: <strong>${fmtMoneyUSDC(cupo-usadoUSD)}</strong>` : ''}</div>
+            <div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(cupo-usado)}</strong>`}${esIntlUSD ? ` · Disponible: <strong>${fmtMoneyUSDC(cupo-usadoUSD)}</strong>` : ''}</div>
             ${movsDeuda.length ? `<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12.5px; font-weight:600;">Ver movimientos (${movsDeuda.length})</summary>
               <div class="fa-table-wrap" style="margin-top:6px; max-height:260px; overflow:auto;"><table class="fa-table"><thead><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead><tbody>${movsDeuda.slice().reverse().map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>${escapeHtml(m.detalle)}</td><td class="num" style="color:${m.delta<0?'var(--income)':'var(--expense)'};">${esIntlUSD && m.usd != null ? (m.usd<0?'−':'+') + fmtMoneyUSDC(Math.abs(m.usd)) + `<div style="font-size:10px; color:var(--ink-soft);">${m.delta<0?'−':'+'}${fmtMoneyC(Math.abs(m.delta))}</div>` : (m.delta<0?'−':'+') + fmtMoneyC(Math.abs(m.delta))}</td><td class="num">${esIntlUSD && m.saldoUSD != null ? (m.saldoUSD<0?'−':'') + fmtMoneyUSDC(Math.abs(m.saldoUSD)) : (m.saldo<0?'−':'') + fmtMoneyC(Math.abs(m.saldo))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
             <div class="fa-form-actions" style="margin-top:10px;">
@@ -7103,7 +7157,7 @@ ${lineasDeuda}
     const signo = m=> (m.tipo === 'salida' ? -1 : 1) * (Number(m.monto)||0);
     const saldoIni = Number((state.tesoreria.saldosIniciales||{}).operacion) || 0;
     const diaCeroApp = saldoIni + state.tesoreria.movimientos.filter(m=> m.origen === 'dia-cero:operacion').reduce((s,m)=> s + signo(m), 0);
-    const autoIds = new Set((state.deudas.giros||[]).filter(g=> g.auto).map(g=> 'giro:' + g.id));
+    const autoIds = new Set((state.deudas.giros||[]).filter(g=> g.origen === 'cobertura_aceptada').map(g=> 'giro:' + g.id));
     const meses = [...new Set(c.archivos.map(a=> a.desde.slice(0,7)))].sort();
     return meses.map(ym=>{
       const corte = c.archivos.filter(a=> a.desde.slice(0,7) === ym).reduce((m,a)=> a.hasta > m ? a.hasta : m, '');
@@ -7129,7 +7183,7 @@ ${lineasDeuda}
       sumar('deuda', 'Líneas de deuda por procesar (clasifícalas como pago de deuda o uso de la línea)', 'deuda');
       sumar('ignorado', 'Líneas ignoradas', 'ignorado');
       const cobertura = opMovs.filter(m=> m.fecha <= corte && autoIds.has(m.origen)).reduce((s,m)=> s + signo(m), 0);
-      if(cobertura) causas.push({ clave:'cobertura', etiqueta:'Cobertura automática de la línea de crédito / sobregiro (suma a Operación cuando queda negativa)', n: 0, efecto: cobertura });
+      if(cobertura) causas.push({ clave:'cobertura', etiqueta:'Coberturas de la línea de crédito que aceptaste (suman a Operación)', n: 0, efecto: cobertura });
       const aInicial = diaCeroApp - inicial;
       if(aInicial) causas.push({ clave:'inicial', etiqueta:'Saldo del Día Cero distinto al saldo del banco al comenzar', n: 0, efecto: aInicial });
       const dif = app - banco;
@@ -7705,7 +7759,7 @@ ${lineasDeuda}
     const dias = (a, b)=> Math.abs((new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000);
     const appUsos = (state.deudas.giros || []).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && !g.auto).map(g=> ({ fecha: g.fecha, monto: Math.round(Number(g.monto)||0), tipo:'uso', usado:false }));
     const appPagos = state.deudas.pagos.filter(p=> p.deudaId === SOBREGIRO_OPEX_ID).map(p=> ({ fecha: p.fecha, monto: Math.round(Number(p.capital)||0), tipo:'pago', usado:false }));
-    const autos = (state.deudas.giros || []).filter(g=> g.deudaId === SOBREGIRO_OPEX_ID && g.auto).map(g=> ({ fecha: g.fecha, monto: Math.round(Number(g.monto)||0) }));
+    const autos = [];
     const banco = c.lineaMovs.filter(m=> m.tipo === 'uso' || m.tipo === 'pago').slice().sort((a,b)=> a.fecha.localeCompare(b.fecha));
     const sinParBanco = [];
     banco.forEach(m=>{
@@ -10820,6 +10874,15 @@ ${lineasDeuda}
         action: 'do-reiniciar-tarjetas', data: '', confirmLabel: 'Reiniciar tarjetas'
       };
       render();
+    }
+    else if(action === 'linea-aceptar'){
+      const ok1 = await lineaAceptarPropuesta(btn.dataset.fecha, Number(btn.dataset.monto));
+      if(ok1){ await saveKey('deudas', state.deudas, {silent:true}); await saveKey('tesoreria', state.tesoreria, {silent:true}); showToast('Movimiento aceptado: sube la deuda de la línea y entra a tu flujo.'); render(); }
+    }
+    else if(action === 'linea-aceptar-todos'){
+      const props = lineaPropuestas();
+      for(const x of props) await lineaAceptarPropuesta(x.fecha, x.monto);
+      if(props.length){ await saveKey('deudas', state.deudas, {silent:true}); await saveKey('tesoreria', state.tesoreria, {silent:true}); showToast(`${props.length} movimiento${props.length===1?'':'s'} aceptado${props.length===1?'':'s'}.`); render(); }
     }
     else if(action === 'abrir-linea-file'){
       const fi = document.getElementById('fa-import-linea');
