@@ -453,6 +453,11 @@
   // Pasada de dinero: plata de un cliente que entra a la cuenta para cubrir algo que se pagó con nuestra tarjeta (ej. Facebook Ads).
   // No es venta (fuera de Estado de Resultados, Rentabilidad y Venta Bruta) pero sí entra al banco, así que cuenta en el Flujo de Caja.
   const CAT_INGRESO_PASADA = "Pasada de Dinero (no es venta)";
+  // Inversiones (DAP, acciones, fondos mutuos): la plata sale de la caja pero NO es un gasto del negocio. Va en Egresos de Flujo:
+  // resta del Flujo de Caja y no toca Estado de Resultados, Rentabilidad ni Costos. Cuando se rescata, entra como
+  // "Rescate de Inversión": suma al Flujo de Caja pero no es venta (no entra a Estado de Resultados ni a Venta Bruta).
+  const CAT_EGRESO_INVERSION = "Inversiones (DAP, Acciones, FFMM)";
+  const CAT_INGRESO_RESCATE = "Rescate de Inversión (no es venta)";
   const CAT_INGRESO_NO_VENTA_ANTERIOR = "No asociado a Servicios Prestados Directos"; // nombre viejo, para migrar datos existentes
   const CAT_GASTO_NO_VENTA = "Gasto no asociado a Venta Directa";
   // Pago del estado de cuenta de la tarjeta de crédito: mueve plata real de Cuenta Corriente (por eso SÍ debe
@@ -507,7 +512,7 @@
   // A propósito NO es editable desde Configuración como las demás categorías — es fijo, para que el registro
   // de ingresos quede siempre consistente y comparable entre meses.
   // Orígenes de ingreso de la lista nueva (Ingresos y Distribución y Por clasificar).
-  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Servicios de Agencia","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Otros Ingresos no Considerados en Flujo"];
+  const ORIGENES_INGRESO_NUEVOS = ["Ventas de InfoProductos","SponsorShip","Capacitaciones","Charlas","Servicios de Agencia","Crédito Comercial","Aporte Inversionista","Avance desde TC","Otros Ingresos","Pasada de Dinero (no es venta)","Rescate de Inversión (no es venta)","Otros Ingresos no Considerados en Flujo"];
   const ORIGENES_INGRESO_PF = [
     "Academia - Cursos Autogestionados",
     "Academia - Mentorías",
@@ -553,7 +558,7 @@
   // Deudas (Módulo 5). Ej: retiros de utilidades, pago de impuestos, cuotas de deuda, gastos personales de
   // los socios que no son costo del negocio.
   const CAT_OTROS_GASTOS_NO_EERR = "Otros Gastos que no afectan EERR";
-  const CATEGORIAS_EGRESO_FLUJO_DEFAULT = ["Pago Convenio TGR", "Pago F29", "Retiro de Utilidades", "Almuerzo Socios", "Estacionamientos", "Almuerzos", "Transporte", CAT_OTROS_GASTOS_NO_EERR];
+  const CATEGORIAS_EGRESO_FLUJO_DEFAULT = ["Pago Convenio TGR", "Pago F29", "Retiro de Utilidades", "Almuerzo Socios", "Estacionamientos", "Almuerzos", "Transporte", CAT_OTROS_GASTOS_NO_EERR, CAT_EGRESO_INVERSION];
   // Categorías sugeridas de Gastos Operacionales (estructura fija) — no son una lista cerrada, solo se
   // aseguran de existir como opción; cualquier gasto que no sea Costo Directo ni Gasto Financiero cae acá.
   const CATEGORIAS_OPEX_SUGERIDAS = ["Nómina Equipo", "Sueldo Operativo Socios", "Software/Suscripciones", "Viáticos y Generales"];
@@ -1896,6 +1901,10 @@
     // Pasada de Dinero: no-venta pero SÍ en Flujo de Caja (igual que Crédito Comercial).
     if(!config.categoriasIngresos.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresos.push(CAT_INGRESO_PASADA); changed = true; }
     if(!config.categoriasNoVenta.includes(CAT_INGRESO_PASADA)){ config.categoriasNoVenta.push(CAT_INGRESO_PASADA); changed = true; }
+    // Rescate de Inversión: igual que la pasada de dinero (no-venta, pero sí en Flujo de Caja).
+    if(!config.categoriasIngresos.includes(CAT_INGRESO_RESCATE)){ config.categoriasIngresos.push(CAT_INGRESO_RESCATE); changed = true; }
+    if(!config.categoriasNoVenta.includes(CAT_INGRESO_RESCATE)){ config.categoriasNoVenta.push(CAT_INGRESO_RESCATE); changed = true; }
+    if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_RESCATE)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_RESCATE); changed = true; }
     if(!config.categoriasIngresosSoloFlujo.includes(CAT_INGRESO_PASADA)){ config.categoriasIngresosSoloFlujo.push(CAT_INGRESO_PASADA); changed = true; }
     // "Otros Ingresos" DEJÓ de ser no-venta: en Ingresos y Distribución (V2) es una de las 5 categorías
     // oficiales del embudo Profit First — es venta real, no financiamiento. Se saca de las listas de
@@ -2691,6 +2700,11 @@
       if(!state.config.categoriasCostoDirecto) { state.config.categoriasCostoDirecto = CATEGORIAS_COSTO_DIRECTO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.categoriasEgresoFlujo) { state.config.categoriasEgresoFlujo = CATEGORIAS_EGRESO_FLUJO_DEFAULT.slice(); gastoFinancieroCambio = true; }
       if(!state.config.pasarelasPago) { state.config.pasarelasPago = PASARELAS_PAGO_DEFAULT.slice(); gastoFinancieroCambio = true; }
+      // Una sola vez: la categoría de inversiones en los Egresos de Flujo ya guardados.
+      if(!state.config.migInversiones){
+        if(!state.config.categoriasEgresoFlujo.includes(CAT_EGRESO_INVERSION)) state.config.categoriasEgresoFlujo.push(CAT_EGRESO_INVERSION);
+        state.config.migInversiones = true; gastoFinancieroCambio = true;
+      }
       // Una sola vez: origen de ingreso "Servicios de Agencia", categoría de gasto "Proveedores" y las líneas que siempre se clasifican a mano.
       if(!state.config.migServiciosProveedores){
         if(!state.config.categoriasIngresos.includes('Servicios de Agencia')) state.config.categoriasIngresos.push('Servicios de Agencia');
