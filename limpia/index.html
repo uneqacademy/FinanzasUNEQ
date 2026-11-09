@@ -779,9 +779,25 @@
   // la reduce), nunca un campo guardado — así nunca se desincroniza de los movimientos reales. "Giros" son
   // usos de línea de crédito o compras con tarjeta que AUMENTAN lo que se debe, a diferencia de los pagos.
   // Saldo con signo: si pagaste más de lo que debías, queda NEGATIVO (saldo a favor), igual que en el estado de cuenta del banco.
+  // Tarjeta internacional: la deuda real está en USD. Se suman las compras en USD y se restan los traspasos a la nacional (en USD).
+  function getSaldoUSDInternacional(){
+    const g = (state.deudas.giros||[]).filter(x=> x.deudaId === DEUDA_TC_INTERNACIONAL_ID).reduce((t,x)=> t + (Number(x.montoUSD)||0), 0);
+    const p = state.deudas.pagos.filter(x=> x.deudaId === DEUDA_TC_INTERNACIONAL_ID).reduce((t,x)=> t + (Number(x.capitalUSD)||0), 0);
+    return Math.round((g - p) * 100) / 100;
+  }
+  function tieneLibroUSDInternacional(){
+    return (state.deudas.giros||[]).some(x=> x.deudaId === DEUDA_TC_INTERNACIONAL_ID && x.montoUSD != null) || state.deudas.pagos.some(x=> x.deudaId === DEUDA_TC_INTERNACIONAL_ID && x.capitalUSD != null);
+  }
+  // Equivalencia en pesos: al dólar promedio de las compras registradas.
+  function tasaPromedioInternacional(){
+    let clp = 0, usd = 0;
+    (state.deudas.giros||[]).filter(x=> x.deudaId === DEUDA_TC_INTERNACIONAL_ID && Number(x.montoUSD) > 0).forEach(x=>{ clp += Number(x.monto)||0; usd += Number(x.montoUSD)||0; });
+    return usd > 0 ? clp / usd : 0;
+  }
   function getSaldoDeudaFirmado(deudaId){
     const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
     if(!deuda) return 0;
+    if(deudaId === DEUDA_TC_INTERNACIONAL_ID && tieneLibroUSDInternacional()) return Math.round(getSaldoUSDInternacional() * tasaPromedioInternacional());
     const capitalPagado = state.deudas.pagos.filter(p=>p.deudaId===deudaId).reduce((s,p)=> s + (Number(p.capital)||0), 0);
     const girosTotal = (state.deudas.giros||[]).filter(g=>g.deudaId===deudaId).reduce((s,g)=> s + (Number(g.monto)||0), 0);
     return Math.round((Number(deuda.montoOriginal)||0) + girosTotal - capitalPagado);
@@ -789,16 +805,18 @@
   // Todos los movimientos de una deuda (compras/usos y pagos/abonos) con el saldo corrido.
   function getMovimientosDeuda(deudaId){
     const l = [];
-    (state.deudas.giros||[]).filter(g=> g.deudaId === deudaId).forEach(g=> l.push({ fecha: g.fecha, detalle: g.descripcion || 'Uso', delta: Number(g.monto)||0 }));
-    state.deudas.pagos.filter(x=> x.deudaId === deudaId).forEach(x=> l.push({ fecha: x.fecha, detalle: x.traspaso ? 'Traspaso de deuda hacia la tarjeta nacional' : 'Pago / abono', delta: -(Number(x.capital)||0) }));
+    (state.deudas.giros||[]).filter(g=> g.deudaId === deudaId).forEach(g=> l.push({ fecha: g.fecha, detalle: g.descripcion || 'Uso', delta: Number(g.monto)||0, usd: g.montoUSD != null ? Number(g.montoUSD) : null }));
+    state.deudas.pagos.filter(x=> x.deudaId === deudaId).forEach(x=> l.push({ fecha: x.fecha, detalle: x.traspaso ? 'Traspaso de deuda hacia la tarjeta nacional' : 'Pago / abono', delta: -(Number(x.capital)||0), usd: x.capitalUSD != null ? -Number(x.capitalUSD) : null }));
     l.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
     let acum = Number((state.deudas.inventario.find(d=>d.id===deudaId)||{}).montoOriginal)||0;
-    l.forEach(m=>{ acum += m.delta; m.saldo = Math.round(acum); });
+    let acumUSD = 0;
+    l.forEach(m=>{ acum += m.delta; m.saldo = Math.round(acum); if(m.usd != null){ acumUSD += m.usd; m.saldoUSD = Math.round(acumUSD * 100) / 100; } });
     return l;
   }
   function getSaldoDeuda(deudaId){
     const deuda = state.deudas.inventario.find(d=>d.id===deudaId);
     if(!deuda) return 0;
+    if(deudaId === DEUDA_TC_INTERNACIONAL_ID && tieneLibroUSDInternacional()) return Math.max(Math.round(getSaldoUSDInternacional() * tasaPromedioInternacional()), 0);
     const capitalPagado = state.deudas.pagos
       .filter(p=>p.deudaId===deudaId)
       .reduce((s,p)=> s + (Number(p.capital)||0), 0);
@@ -2345,7 +2363,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -3483,6 +3501,7 @@
       }
       if(it.tarjetaId){
         const giro = { id: uid('giro'), deudaId: it.tarjetaId, fecha: it.gasto.fecha, monto: it.gasto.monto, descripcion: `Compra con tarjeta — ${it.gasto.proveedor || it.gasto.categoria}`, origen: 'tarjeta_credito' };
+        if(it.gasto.monedaOriginal === 'USD') giro.montoUSD = it.gasto.montoUSD;
         state.deudas.giros.push(giro);
         const deuda = state.deudas.inventario.find(d=> d.id === it.tarjetaId);
         if(deuda) deuda.activa = true;
@@ -5639,19 +5658,23 @@
         ${fijas.length === 0 ? `<div class="fa-empty">Aún no defines cupos. Ponlos en Configuración > Cupos de Línea de Crédito y Tarjetas.</div>` : `
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:14px;">
           ${fijas.map(d=>{
+            const esIntlUSD = d.id === DEUDA_TC_INTERNACIONAL_ID && tieneLibroUSDInternacional();
+            const usadoUSD = esIntlUSD ? getSaldoUSDInternacional() : 0;
             const usado = getSaldoDeudaFirmado(d.id);
             const cupo = Number(d.cupo)||0;
-            const pct = (!d.cupoEnUSD && cupo > 0) ? Math.max(Math.min(usado/cupo*100, 100), 0) : 0;
+            const pct = esIntlUSD ? (cupo > 0 ? Math.max(Math.min(usadoUSD/cupo*100, 100), 0) : 0) : ((!d.cupoEnUSD && cupo > 0) ? Math.max(Math.min(usado/cupo*100, 100), 0) : 0);
             const movsDeuda = getMovimientosDeuda(d.id);
             return `
           <div style="border:1.5px solid var(--border); border-radius:12px; padding:16px;">
             <div style="font-weight:700; font-size:14px; margin-bottom:8px;">${escapeHtml(d.nombre)}</div>
-            <div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':(usado<0?'var(--income)':'var(--ink-soft)')};">${fmtMoneyC(Math.abs(usado))}</div>
-            <div class="fa-hint" style="margin:0 0 8px 0;">${usado<0 ? 'Saldo a favor (pagaste de más)' : 'Deuda actual'}</div>
+            ${esIntlUSD ? `<div style="font-size:22px; font-weight:800; color:${usadoUSD>0?'var(--expense)':(usadoUSD<0?'var(--income)':'var(--ink-soft)')};">${usadoUSD<0?'−':''}${fmtMoneyUSDC(Math.abs(usadoUSD))}</div>
+            <div class="fa-hint" style="margin:0 0 2px 0;">${usadoUSD<0 ? 'Saldo a favor en dólares' : 'Deuda actual en dólares'}</div>
+            <div style="font-size:10.5px; color:var(--ink-soft); margin:0 0 8px 0;">≈ ${usado<0?'−':''}${fmtMoneyC(Math.abs(usado))} al dólar promedio de las compras</div>` : `<div style="font-size:22px; font-weight:800; color:${usado>0?'var(--expense)':(usado<0?'var(--income)':'var(--ink-soft)')};">${fmtMoneyC(Math.abs(usado))}</div>
+            <div class="fa-hint" style="margin:0 0 8px 0;">${usado<0 ? 'Saldo a favor (pagaste de más)' : 'Deuda actual'}</div>`}
             ${d.cupoEnUSD ? '' : `<div style="background:#F1F2F4; border-radius:6px; height:10px; overflow:hidden; margin-bottom:6px;"><div style="background:${pct>=80?'var(--expense)':'var(--ink-soft)'}; height:100%; width:${pct.toFixed(0)}%;"></div></div>`}
-            ${d.id===SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Sobregiro no pactado: sin cupo. Se genera solo cuando Operación queda en negativo y la línea de crédito no alcanza.</div>' : ''}<div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(cupo-usado)}</strong>`}</div>
+            ${d.id===SOBREGIRO_CC_ID ? '<div class="fa-hint" style="margin:0 0 6px 0;">Sobregiro no pactado: sin cupo. Se genera solo cuando Operación queda en negativo y la línea de crédito no alcanza.</div>' : ''}<div class="fa-hint" style="margin:0;">Cupo: <strong>${d.cupoEnUSD ? 'US$ ' + cupo.toLocaleString('es-CL') : fmtMoneyC(cupo)}</strong>${d.cupoEnUSD ? '' : ` · Disponible: <strong>${fmtMoneyC(cupo-usado)}</strong>`}${esIntlUSD ? ` · Disponible: <strong>${fmtMoneyUSDC(cupo-usadoUSD)}</strong>` : ''}</div>
             ${movsDeuda.length ? `<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12.5px; font-weight:600;">Ver movimientos (${movsDeuda.length})</summary>
-              <div class="fa-table-wrap" style="margin-top:6px; max-height:260px; overflow:auto;"><table class="fa-table"><thead><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead><tbody>${movsDeuda.slice().reverse().map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>${escapeHtml(m.detalle)}</td><td class="num" style="color:${m.delta<0?'var(--income)':'var(--expense)'};">${m.delta<0?'−':'+'}${fmtMoneyC(Math.abs(m.delta))}</td><td class="num">${m.saldo<0?'−':''}${fmtMoneyC(Math.abs(m.saldo))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+              <div class="fa-table-wrap" style="margin-top:6px; max-height:260px; overflow:auto;"><table class="fa-table"><thead><tr><th>Fecha</th><th>Detalle</th><th class="num">Monto</th><th class="num">Saldo</th></tr></thead><tbody>${movsDeuda.slice().reverse().map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>${escapeHtml(m.detalle)}</td><td class="num" style="color:${m.delta<0?'var(--income)':'var(--expense)'};">${esIntlUSD && m.usd != null ? (m.usd<0?'−':'+') + fmtMoneyUSDC(Math.abs(m.usd)) + `<div style="font-size:10px; color:var(--ink-soft);">${m.delta<0?'−':'+'}${fmtMoneyC(Math.abs(m.delta))}</div>` : (m.delta<0?'−':'+') + fmtMoneyC(Math.abs(m.delta))}</td><td class="num">${esIntlUSD && m.saldoUSD != null ? (m.saldoUSD<0?'−':'') + fmtMoneyUSDC(Math.abs(m.saldoUSD)) : (m.saldo<0?'−':'') + fmtMoneyC(Math.abs(m.saldo))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
             <div class="fa-form-actions" style="margin-top:10px;">
               <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-pago-deuda" data-id="${d.id}">Registrar pago</button>
             </div>
@@ -7209,8 +7232,7 @@ ${lineasDeuda}
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto: Math.abs(monto), moneda:'CLP', clase:'pago_tarjeta', estado:'por_clasificar' });
           return;
         }
-        if(/comision compra internacional/.test(d)){ comisiones.n++; comisiones.total += monto; return; }
-        if(/comision administracion|intereses rotativos|interes de mora|impuesto decreto|intereses?\b/.test(d)){
+        if(/comision compra internacional|comision administracion|comision mantencion|mantencion|intereses rotativos|interes de mora|impuesto decreto|impuesto|intereses?\b/.test(d)){
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'financiero', estado:'por_clasificar' });
           return;
         }
@@ -7228,9 +7250,6 @@ ${lineasDeuda}
         movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + fecha + desc + usd)), tarjeta:'internacional', fecha, desc: desc.replace(/\s+\d{4}$/, ''), monto: 0, montoUSD: usd, moneda:'USD', origenMonto: r[r.length - 2] || '', clase:'compra', estado:'por_clasificar' });
       }
     });
-    if(tipo === 'nacional' && comisiones.n > 0){
-      movs.push({ id: 'tcn_com_' + tarjetaHash('com' + hasta + ult4), tarjeta:'nacional', fecha: comisiones.fecha, desc: `Comisiones por compra internacional (${comisiones.n})`, monto: comisiones.total, moneda:'CLP', clase:'financiero', estado:'por_clasificar' });
-    }
     if(!movs.length) return { ok:false, error:'No encontré movimientos en este estado de cuenta.' };
     return { ok:true, tipo, ult4, desde, hasta, movs };
   }
@@ -7250,18 +7269,7 @@ ${lineasDeuda}
         if(existentes.has(m.id)){ rep++; continue; }
         const mov = { ...m, categoria: m.categoria || '', proyecto:'', detalle:null, archivo: r.tipo + '|' + r.hasta };
         c.tarjetaMovs.push(mov); n++;
-        if(mov.estado === 'por_clasificar'){
-          if(mov.clase === 'financiero'){
-            mov.estado = 'clasificado'; mov.categoria = CAT_GASTO_FINANCIERO; mov.detalle = { proveedor: 'Banco Itaú', descripcion: mov.desc };
-          } else {
-            const regla = cartolaBuscarRegla({ desc: mov.desc, cargo: 1, abono: 0 });
-            if(regla && regla.tipo === 'gasto'){
-              mov.estado = 'clasificado'; mov.categoria = regla.categoria; mov.regla = regla.id;
-              mov.detalle = { proveedor: cartolaNombreCorto(mov.desc), descripcion: mov.desc, pcts: (regla.detalle && regla.detalle.pcts) || null };
-            }
-          }
-          if(mov.estado === 'clasificado') porAplicar.push(mov);
-        }
+        // Todo queda en "Por clasificar", movimiento por movimiento (también comisiones, impuestos y mantención).
       }
       c.tarjetaArchivos = c.tarjetaArchivos.filter(a=> !(a.tipo === r.tipo && a.hasta === r.hasta));
       c.tarjetaArchivos.push({ nombre: file.name, tipo: r.tipo, ult4: r.ult4, desde: r.desde, hasta: r.hasta, n: r.movs.length, cargadoEl: todayISO() });
@@ -7312,6 +7320,7 @@ ${lineasDeuda}
       cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
       if(r.tarjetaId){
         const giro = { id: uid('giro'), deudaId: r.tarjetaId, fecha: r.gasto.fecha, monto: r.gasto.monto, descripcion: `Compra con tarjeta — ${r.gasto.proveedor || r.gasto.categoria}`, origen: 'tarjeta_credito' };
+        if(r.gasto.monedaOriginal === 'USD') giro.montoUSD = r.gasto.montoUSD;
         state.deudas.giros.push(giro);
         const deuda = state.deudas.inventario.find(x=> x.id === r.tarjetaId);
         if(deuda) deuda.activa = true;
@@ -7344,15 +7353,27 @@ ${lineasDeuda}
     return (t.length ? t : cartolaNorm(desc).split(' ')).slice(0, 2).join(' ');
   }
   // Aplica el traspaso: la deuda de la tarjeta internacional baja y la de la nacional sube por el mismo monto en pesos. No toca el flujo.
-  function tarjetaTraspasoAplicar(mov){
+  // Los USD que se traspasan vienen del estado de la tarjeta INTERNACIONAL (mismo día); si ese estado no está cargado, se estiman con el dólar del día.
+  async function tarjetaTraspasoUSD(mov){
+    const dias = f=> Math.abs((new Date(f + 'T00:00:00') - new Date(mov.fecha + 'T00:00:00')) / 86400000);
+    const todos = state.cartola.tarjetaMovs.filter(x=> x.tarjeta === 'internacional' && x.clase === 'interno' && /pago tc|traspaso deuda/i.test(x.desc || ''));
+    const exactos = todos.filter(x=> dias(x.fecha) === 0);
+    const pares = exactos.length ? exactos : todos.filter(x=> dias(x.fecha) <= 1);
+    if(pares.length) return { usd: pares.reduce((t,x)=> t + Math.abs(Number(x.montoUSD)||0), 0), estimado: false };
+    const tc = await dolarDelDiaCache(mov.fecha);
+    return { usd: tc > 0 ? Math.round((Number(mov.monto)||0) / tc * 100) / 100 : 0, estimado: true };
+  }
+  async function tarjetaTraspasoAplicar(mov){
     tarjetaQuitarEfectos(mov.id);
     const monto = Math.round(Number(mov.monto) || 0);
     if(monto <= 0) return false;
-    state.deudas.pagos.push({ id: uid('pagodeuda'), deudaId: DEUDA_TC_INTERNACIONAL_ID, fecha: mov.fecha, montoTotal: monto, montoTotalPagado: monto, capital: monto, interes: 0, interesMora: 0,
+    const { usd, estimado } = await tarjetaTraspasoUSD(mov);
+    if(!(usd > 0)){ showToast('No pude determinar los dólares de este traspaso. Carga también el estado de cuenta de la tarjeta internacional, o revisa tu conexión.'); return false; }
+    state.deudas.pagos.push({ id: uid('pagodeuda'), deudaId: DEUDA_TC_INTERNACIONAL_ID, fecha: mov.fecha, montoTotal: monto, montoTotalPagado: monto, capital: monto, capitalUSD: usd, interes: 0, interesMora: 0,
       cuentaOrigen: 'traspaso', traspaso: true, origenTarjeta: mov.id, aplicaciones: [] });
     state.deudas.giros.push({ id: uid('giro'), deudaId: DEUDA_TC_NACIONAL_ID, fecha: mov.fecha, monto, descripcion: 'Traspaso de deuda desde la tarjeta internacional', origen: 'traspaso_deuda', origenTarjeta: mov.id });
     [DEUDA_TC_INTERNACIONAL_ID, DEUDA_TC_NACIONAL_ID].forEach(id=>{ const d = state.deudas.inventario.find(x=> x.id === id); if(d) d.activa = true; });
-    mov.estado = 'clasificado'; mov.categoria = 'Traspaso de deuda: internacional → nacional';
+    mov.estado = 'clasificado'; mov.categoria = 'Traspaso de deuda: internacional → nacional (US$ ' + usd.toFixed(2) + (estimado ? ', estimado' : '') + ')';
     return true;
   }
   // Un pago que muestra el estado de cuenta de la tarjeta. Casi siempre ya está registrado desde la cartola de la cuenta (la salida de plata);
@@ -7422,6 +7443,26 @@ ${lineasDeuda}
     showToast('Pago clasificado.');
     return true;
   }
+  // Deja las tarjetas de crédito en cero: estados de cuenta, gastos con tarjeta, compras, pagos y traspasos. Los pagos de la cuenta a la tarjeta
+  // se vuelven a clasificar como abono a la nacional.
+  async function tarjetasReiniciar(){
+    const ids = [DEUDA_TC_NACIONAL_ID, DEUDA_TC_INTERNACIONAL_ID];
+    state.cartola.tarjetaMovs.forEach(m=> tarjetaQuitarEfectos(m.id));
+    state.cartola.tarjetaMovs = []; state.cartola.tarjetaArchivos = [];
+    // lo que venga de la cartola de la cuenta vuelve a Por clasificar (y los pagos de tarjeta se reclasifican a la nacional)
+    state.cartola.movimientos.filter(m=> m.estado === 'clasificado' && m.tipo === 'pago_deuda' && m.deudaInfo && ids.includes(m.deudaInfo.deudaId)).forEach(m=> cartolaReabrirMov(m));
+    state.cartola.movimientos.filter(m=> m.estado === 'clasificado' && m.tipo === 'giro_linea' && m.deudaInfo && ids.includes(m.deudaInfo.deudaId)).forEach(m=> cartolaReabrirMov(m));
+    // todo lo que quede en las dos deudas (compras manuales con sus gastos, abonos, traspasos)
+    (state.deudas.giros||[]).filter(g=> ids.includes(g.deudaId)).forEach(g=> deleteGiroDeuda(g.id));
+    state.deudas.pagos.filter(x=> ids.includes(x.deudaId)).forEach(x=> { if(typeof deletePagoDeuda === 'function') deletePagoDeuda(x.id); });
+    state.deudas.pagos = state.deudas.pagos.filter(x=> !ids.includes(x.deudaId));
+    state.cartola.movimientos.filter(m=> (m.estado === 'por_clasificar' || m.estado === 'deuda') && m.cargo > 0).forEach(m=>{ if(cartolaAutoPagoTarjeta(m)) cartolaAplicarEfectos(m); });
+    await cartolaGuardarTodo();
+    await saveKey('cartola/tarjetaMovs', state.cartola.tarjetaMovs);
+    await saveKey('cartola/tarjetaArchivos', state.cartola.tarjetaArchivos);
+    showToast('Tarjetas reiniciadas. Ahora sube de nuevo los estados de cuenta: todo quedará en "Por clasificar".');
+    render();
+  }
   function tarjetaMovsPendientes(){ return state.cartola.tarjetaMovs.filter(m=> m.estado === 'por_clasificar').sort((a,b)=> a.fecha.localeCompare(b.fecha)); }
   function tarjetaMontoTxt(m){ return m.moneda === 'USD' ? fmtMoneyUSD(m.montoUSD) : fmtMoney(m.monto); }
   function tarjetaAbrirClasificar(id, editar){
@@ -7443,7 +7484,8 @@ ${lineasDeuda}
     if(!m) return '';
     const cd = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
     const ef = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
-    const optCat = lista=> lista.map(c=>`<option>${escapeHtml(c)}</option>`).join('');
+    const preCat = (m.clase === 'financiero' && !cl.editar) ? CAT_GASTO_FINANCIERO : '';
+    const optCat = lista=> lista.map(c=>`<option ${c === preCat ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
     const manual = cartolaEsSiempreManual(m.desc);
     return `
       <div class="fa-modal-overlay" data-action="tarjeta-clasificar-cerrar">
@@ -7542,7 +7584,7 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">Estados de cuenta de tarjetas de crédito</div>
         <div class="fa-section-note">Sube el estado de cuenta de la tarjeta nacional y/o internacional de Itaú (Excel). Cada compra queda en "Por clasificar" para asignarle categoría, evento y líneas de negocio. Las comisiones e intereses del banco entran solos como Gasto Financiero; los pagos y traspasos entre tarjetas se ignoran (no son gasto). Para que cuenten, define antes el cupo de cada tarjeta en Configuración.</div>
-        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-reabrir-pagos">Dejar todos los pagos de tarjeta por clasificar</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-pagos-a-nacional">Clasificar los pagos de la cuenta como pago a la Tarjeta Nacional</button></div>
+        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-reabrir-pagos">Dejar todos los pagos de tarjeta por clasificar</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-pagos-a-nacional">Clasificar los pagos de la cuenta como pago a la Tarjeta Nacional</button> <button type="button" class="fa-btn fa-btn-ghost" style="color:var(--expense);" data-action="tarjeta-reiniciar">Reiniciar todo lo de tarjetas</button></div>
         <input type="file" id="fa-import-tarjeta" data-action="import-tarjeta-file" accept=".xls,.xlsx" multiple style="display:none;">
         ${(state.tarjetaMensajes || []).length ? `<div style="margin-top:10px;">${state.tarjetaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':'inherit'};">${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
         ${c.tarjetaArchivos.length ? `
@@ -10598,9 +10640,9 @@ ${lineasDeuda}
     }
     else if(action === 'tarjeta-traspaso-aplicar'){
       const m = state.cartola.tarjetaMovs.find(x=> x.id === btn.dataset.id);
-      if(m && tarjetaTraspasoAplicar(m)){
+      if(m && await tarjetaTraspasoAplicar(m)){
         await tarjetaGuardarTodo();
-        showToast('Traspaso aplicado: baja la deuda de la tarjeta internacional y sube la de la nacional.');
+        showToast('Traspaso aplicado: bajan los USD de la tarjeta internacional y sube la deuda en pesos de la nacional.');
         render();
       }
     }
@@ -10611,6 +10653,17 @@ ${lineasDeuda}
       pend.forEach(m=>{ if(cartolaAutoPagoTarjeta(m)) cartolaAplicarEfectos(m); });
       await cartolaGuardarTodo();
       showToast(`Listo: ${pend.length} pago${pend.length===1?'':'s'} de la cuenta quedaron como abono a la Tarjeta Nacional.`);
+      render();
+    }
+    else if(action === 'tarjeta-reiniciar'){
+      const ids = [DEUDA_TC_NACIONAL_ID, DEUDA_TC_INTERNACIONAL_ID];
+      const nMovs = state.cartola.tarjetaMovs.length, nArch = state.cartola.tarjetaArchivos.length;
+      const nGiros = (state.deudas.giros||[]).filter(g=> ids.includes(g.deudaId)).length, nPagos = state.deudas.pagos.filter(x=> ids.includes(x.deudaId)).length;
+      const nGastos = state.gastos.filter(g=> g.origenTarjeta || (g.origenGiro && (state.deudas.giros||[]).some(x=> x.id === g.origenGiro && ids.includes(x.deudaId)))).length;
+      state.confirmDialog = {
+        message: `¿Reiniciar TODO lo de las tarjetas de crédito? Se borran los ${nArch} estados de cuenta cargados (${nMovs} movimientos), los ${nGastos} gasto${nGastos===1?'':'s'} pagados con tarjeta (también los hechos a mano), ${nGiros} compra${nGiros===1?'':'s'} y uso${nGiros===1?'':'s'} de deuda y ${nPagos} pago${nPagos===1?'':'s'}/traspaso${nPagos===1?'':'s'}. Los pagos "Pago Tarjeta De Credito" de tu cuenta se vuelven a clasificar como abono a la Tarjeta Nacional. Después vuelves a subir los estados de cuenta y todo queda en "Por clasificar". Esta acción no se puede deshacer.`,
+        action: 'do-reiniciar-tarjetas', data: '', confirmLabel: 'Reiniciar tarjetas'
+      };
       render();
     }
     else if(action === 'tarjeta-pago-abrir'){
@@ -10923,6 +10976,9 @@ ${lineasDeuda}
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
         render();
+      }
+      else if(cd.action === 'do-reiniciar-tarjetas'){
+        await tarjetasReiniciar();
       }
       else if(cd.action === 'do-reabrir-pagos-tarjeta'){
         state.cartola.movimientos.filter(m=> m.estado === 'clasificado' && m.tipo === 'pago_deuda' && m.deudaInfo && (m.deudaInfo.deudaId === DEUDA_TC_NACIONAL_ID || m.deudaInfo.deudaId === DEUDA_TC_INTERNACIONAL_ID)).forEach(m=> cartolaReabrirMov(m));
