@@ -7355,8 +7355,10 @@ ${lineasDeuda}
   function tarjetaPagoLineasCuenta(m){
     if(m.moneda === 'USD') return [];
     const dias = f=> Math.abs((new Date(f + 'T00:00:00') - new Date(m.fecha + 'T00:00:00')) / 86400000);
-    return state.cartola.movimientos.filter(x=> x.cargo === Math.round(m.monto) && dias(x.fecha) <= 7)
-      .map(x=> ({ fecha: x.fecha, cuenta: x.cuenta, desc: x.desc, estado: x.estado, categoria: x.categoria }));
+    const mismas = state.cartola.movimientos.filter(x=> x.cargo === Math.round(m.monto) && dias(x.fecha) <= 7);
+    const deTarjeta = mismas.filter(x=> /tarjeta|\btc\b/i.test(x.desc) || (x.deudaInfo && (x.deudaInfo.deudaId === DEUDA_TC_NACIONAL_ID || x.deudaInfo.deudaId === DEUDA_TC_INTERNACIONAL_ID)));
+    return (deTarjeta.length ? deTarjeta : mismas).sort((a,b)=> dias(a.fecha) - dias(b.fecha))
+      .map(x=> ({ fecha: x.fecha, cuenta: x.cuenta, desc: x.desc, estado: x.estado, categoria: x.categoria, aTarjeta: !!(x.deudaInfo && (x.deudaInfo.deudaId === DEUDA_TC_NACIONAL_ID || x.deudaInfo.deudaId === DEUDA_TC_INTERNACIONAL_ID)), esPagoTarjeta: /tarjeta|\btc\b/i.test(x.desc) }));
   }
   function renderTarjetaPagoModal(){
     const pg = state.tarjetaPago;
@@ -7369,16 +7371,17 @@ ${lineasDeuda}
         <div class="fa-modal" data-action="confirm-noop" id="fa-tarjeta-pago" style="max-width:560px;">
           <div class="fa-modal-title">Pago de tarjeta — ${tarjetaMontoTxt(m)}</div>
           <div class="fa-hint" style="margin-top:0;">Estado de la tarjeta ${m.tarjeta} · ${fmtDate(m.fecha)} · ${escapeHtml(m.desc)}</div>
-          <div class="fa-hint">${lineas.length ? 'Posibles líneas de tu cuenta con este mismo monto:<br>' + lineas.map(x=> `• ${fmtDate(x.fecha)} · cuenta ${x.cuenta} · ${escapeHtml(x.desc)} — <strong>${escapeHtml(CARTOLA_ESTADO_LABEL[x.estado] || x.estado)}${x.categoria ? ' — ' + escapeHtml(x.categoria) : ''}</strong>`).join('<br>') : 'No encontré una línea de tu cuenta con este mismo monto en esas fechas.'}</div>
-          <div class="fa-form-grid">
+          <div class="fa-hint" style="background:#F0F7FF; border:1px solid #BBD7F5; border-radius:8px; padding:8px 10px;"><strong>¿Qué es esto?</strong> Es un pago que aparece en el estado de cuenta de la tarjeta. La plata salió de tu cuenta, y esa salida ya está (o debe estar) en tu cartola. Acá solo hay que evitar contar el abono dos veces.<br><strong>Qué hacer:</strong> ${(() => { const pend = lineas.find(x=> x.esPagoTarjeta && (x.estado === 'por_clasificar' || x.estado === 'deuda')); const ok = lineas.find(x=> x.aTarjeta); if(ok) return 'Esa línea de tu cuenta ya está clasificada como pago a una tarjeta: elige <em>"Ya está registrado"</em> y guarda.'; if(pend) return 'La línea de tu cuenta del ' + fmtDate(pend.fecha) + ' ("' + escapeHtml(pend.desc) + '") todavía está sin clasificar. <strong>Cancela esto, clasifícala primero como Pago de deuda</strong> (con la tarjeta que corresponda), y después vuelve acá y elige <em>"Ya está registrado"</em>.'; return 'No veo una línea de pago de tarjeta en tu cuenta con este monto. Si el pago salió de otra cuenta que no cargaste, elige <em>"Registrar el abono"</em>.'; })()}</div>
+          <div class="fa-hint">${lineas.length ? 'Líneas de tu cuenta con este monto y fecha cercana:<br>' + lineas.map(x=> `• ${fmtDate(x.fecha)} · cuenta ${x.cuenta} · ${escapeHtml(x.desc)} — <strong>${escapeHtml(CARTOLA_ESTADO_LABEL[x.estado] || x.estado)}${x.categoria ? ' — ' + escapeHtml(x.categoria) : ''}</strong>`).join('<br>') : 'No encontré una línea de tu cuenta con este mismo monto en esas fechas.'}</div>
+          <div class="fa-form-grid" style="grid-template-columns:1fr;">
             <div class="fa-field"><label>¿Qué hago con este pago?</label>
-              <select name="accion">
+              <select name="accion" style="width:100%;">
                 <option value="ya">Ya está registrado desde la cartola de la cuenta (no hacer nada más)</option>
                 <option value="registrar">Registrar el abono a una tarjeta (sin tocar el flujo)</option>
               </select>
             </div>
             <div class="fa-field"><label>Tarjeta a la que se abona</label>
-              <select name="destino"><option value="deuda_tc_internacional" ${m.tarjeta === 'internacional' ? 'selected' : ''}>Tarjeta de Crédito Internacional</option><option value="deuda_tc_nacional" ${m.tarjeta === 'nacional' ? 'selected' : ''}>Tarjeta de Crédito Nacional</option></select>
+              <select name="destino" style="width:100%;"><option value="deuda_tc_internacional" ${m.tarjeta === 'internacional' ? 'selected' : ''}>Tarjeta de Crédito Internacional</option><option value="deuda_tc_nacional" ${m.tarjeta === 'nacional' ? 'selected' : ''}>Tarjeta de Crédito Nacional</option></select>
             </div>
           </div>
           <div class="fa-hint">Usa "Registrar el abono" solo si ese pago NO está clasificado desde la cartola de la cuenta; si no, la deuda bajaría dos veces. Si el pago de la cuenta ya está como "Pago de deuda", deja la primera opción.</div>
