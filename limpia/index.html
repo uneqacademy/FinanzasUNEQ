@@ -2077,6 +2077,7 @@
     cartolaDividir: null, // { id, partes } — línea de cartola que se está dividiendo
     cartolaClasificar: null, // { id, tipo } — línea de cartola que se está clasificando
     tarjetaClasificar: null, // { id, editar } — compra de tarjeta que se está clasificando
+    tarjetaPago: null, // { id } — pago del estado de cuenta de una tarjeta que se está clasificando
     tarjetaMensajes: [],
     ingresos: [],
     gastos: [],
@@ -2344,7 +2345,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -4462,6 +4463,7 @@
       ${renderCartolaDividirModal()}
       ${renderCartolaClasificarModal()}
       ${renderTarjetaClasificarModal()}
+      ${renderTarjetaPagoModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
       ${renderMarcarCuotaPagadaModal()}
@@ -6299,6 +6301,8 @@ ${lineasDeuda}
       tarjetaMovs: (Array.isArray(base.tarjetaMovs) ? base.tarjetaMovs : []).map(m=>{
         // Antes los traspasos de deuda entre tarjetas se ignoraban; ahora se aplican (baja la internacional y sube la nacional).
         if(m && m.tarjeta === 'nacional' && m.clase === 'interno' && m.estado === 'ignorado' && /traspaso deuda/i.test(m.desc || '')) return { ...m, clase:'traspaso_deuda', estado:'por_clasificar', categoria:'' };
+        // Los pagos que muestra el estado de cuenta ("Monto cancelado" / "Pago Tc Usd") también quedan por clasificar.
+        if(m && m.clase === 'interno' && m.estado === 'ignorado' && /monto cancelado|pago tc/i.test(m.desc || '')) return { ...m, clase:'pago_tarjeta', estado:'por_clasificar', categoria:'', monto: Math.abs(Number(m.monto) || 0), montoUSD: m.montoUSD == null ? m.montoUSD : Math.abs(Number(m.montoUSD) || 0) };
         return m;
       }),
       tarjetaArchivos: Array.isArray(base.tarjetaArchivos) ? base.tarjetaArchivos : [],
@@ -7188,7 +7192,11 @@ ${lineasDeuda}
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'traspaso_deuda', estado:'por_clasificar' });
           return;
         }
-        if(/monto cancelado|regul deuda/.test(d)){
+        if(/monto cancelado/.test(d)){
+          movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto: Math.abs(monto), moneda:'CLP', clase:'pago_tarjeta', estado:'por_clasificar' });
+          return;
+        }
+        if(/regul deuda/.test(d)){
           movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'interno', estado:'ignorado', categoria:'Pago o traspaso entre tarjetas — no es gasto' });
           return;
         }
@@ -7204,8 +7212,12 @@ ${lineasDeuda}
         const fecha = tarjetaFechaISO(r[i]), desc = r[i+1] || '', usd = tarjetaNumero(r[r.length - 1]);
         const d = desc.toLowerCase();
         if(/^total de/.test(d)) return;
-        if(/pago tc|traspaso deuda/.test(d)){
-          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: usd, moneda:'USD', clase:'interno', estado:'ignorado', categoria:'Pago o traspaso entre tarjetas — no es gasto' });
+        if(/pago tc/.test(d)){
+          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: Math.abs(usd), moneda:'USD', clase:'pago_tarjeta', estado:'por_clasificar' });
+          return;
+        }
+        if(/traspaso deuda/.test(d)){
+          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: usd, moneda:'USD', clase:'interno', estado:'ignorado', categoria:'Traspaso de deuda — se aplica desde el estado de la tarjeta nacional' });
           return;
         }
         movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + fecha + desc + usd)), tarjeta:'internacional', fecha, desc: desc.replace(/\s+\d{4}$/, ''), monto: 0, montoUSD: usd, moneda:'USD', origenMonto: r[r.length - 2] || '', clase:'compra', estado:'por_clasificar' });
@@ -7338,6 +7350,70 @@ ${lineasDeuda}
     mov.estado = 'clasificado'; mov.categoria = 'Traspaso de deuda: internacional → nacional';
     return true;
   }
+  // Un pago que muestra el estado de cuenta de la tarjeta. Casi siempre ya está registrado desde la cartola de la cuenta (la salida de plata);
+  // acá se decide si se deja así o si se registra el abono a una tarjeta.
+  function tarjetaPagoLineasCuenta(m){
+    if(m.moneda === 'USD') return [];
+    const dias = f=> Math.abs((new Date(f + 'T00:00:00') - new Date(m.fecha + 'T00:00:00')) / 86400000);
+    return state.cartola.movimientos.filter(x=> x.cargo === Math.round(m.monto) && dias(x.fecha) <= 7)
+      .map(x=> ({ fecha: x.fecha, cuenta: x.cuenta, desc: x.desc, estado: x.estado, categoria: x.categoria }));
+  }
+  function renderTarjetaPagoModal(){
+    const pg = state.tarjetaPago;
+    if(!pg) return '';
+    const m = state.cartola.tarjetaMovs.find(x=> x.id === pg.id);
+    if(!m) return '';
+    const lineas = tarjetaPagoLineasCuenta(m);
+    return `
+      <div class="fa-modal-overlay" data-action="tarjeta-pago-cerrar">
+        <div class="fa-modal" data-action="confirm-noop" id="fa-tarjeta-pago" style="max-width:560px;">
+          <div class="fa-modal-title">Pago de tarjeta — ${tarjetaMontoTxt(m)}</div>
+          <div class="fa-hint" style="margin-top:0;">Estado de la tarjeta ${m.tarjeta} · ${fmtDate(m.fecha)} · ${escapeHtml(m.desc)}</div>
+          <div class="fa-hint">${lineas.length ? 'Posibles líneas de tu cuenta con este mismo monto:<br>' + lineas.map(x=> `• ${fmtDate(x.fecha)} · cuenta ${x.cuenta} · ${escapeHtml(x.desc)} — <strong>${escapeHtml(CARTOLA_ESTADO_LABEL[x.estado] || x.estado)}${x.categoria ? ' — ' + escapeHtml(x.categoria) : ''}</strong>`).join('<br>') : 'No encontré una línea de tu cuenta con este mismo monto en esas fechas.'}</div>
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>¿Qué hago con este pago?</label>
+              <select name="accion">
+                <option value="ya">Ya está registrado desde la cartola de la cuenta (no hacer nada más)</option>
+                <option value="registrar">Registrar el abono a una tarjeta (sin tocar el flujo)</option>
+              </select>
+            </div>
+            <div class="fa-field"><label>Tarjeta a la que se abona</label>
+              <select name="destino"><option value="deuda_tc_internacional" ${m.tarjeta === 'internacional' ? 'selected' : ''}>Tarjeta de Crédito Internacional</option><option value="deuda_tc_nacional" ${m.tarjeta === 'nacional' ? 'selected' : ''}>Tarjeta de Crédito Nacional</option></select>
+            </div>
+          </div>
+          <div class="fa-hint">Usa "Registrar el abono" solo si ese pago NO está clasificado desde la cartola de la cuenta; si no, la deuda bajaría dos veces. Si el pago de la cuenta ya está como "Pago de deuda", deja la primera opción.</div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-pago-cerrar">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="tarjeta-pago-guardar">Guardar</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  async function tarjetaPagoGuardar(id, form){
+    const mov = state.cartola.tarjetaMovs.find(x=> x.id === id);
+    if(!mov) return false;
+    tarjetaQuitarEfectos(mov.id);
+    if(form.accion === 'registrar'){
+      let monto = Math.round(Number(mov.monto) || 0);
+      if(mov.moneda === 'USD'){
+        const tc = await dolarDelDiaCache(mov.fecha);
+        if(!(tc > 0)){ showToast('No pude obtener el dólar del ' + fmtDate(mov.fecha) + '. Revisa tu conexión e inténtalo de nuevo.'); return false; }
+        monto = Math.round((Number(mov.montoUSD) || 0) * tc);
+      }
+      const destino = state.deudas.inventario.find(x=> x.id === form.destino);
+      if(!destino){ showToast('Primero define el cupo de esa tarjeta en Configuración, para que exista su deuda.'); return false; }
+      state.deudas.pagos.push({ id: uid('pagodeuda'), deudaId: destino.id, fecha: mov.fecha, montoTotal: monto, montoTotalPagado: monto, capital: monto, interes: 0, interesMora: 0,
+        cuentaOrigen: 'tarjeta', sinFlujo: true, origenTarjeta: mov.id, aplicaciones: [] });
+      destino.activa = true;
+      mov.categoria = 'Abono registrado a ' + destino.nombre;
+    } else {
+      mov.categoria = 'Pago ya registrado desde la cartola de la cuenta';
+    }
+    mov.estado = 'clasificado';
+    await tarjetaGuardarTodo();
+    showToast('Pago clasificado.');
+    return true;
+  }
   function tarjetaMovsPendientes(){ return state.cartola.tarjetaMovs.filter(m=> m.estado === 'por_clasificar').sort((a,b)=> a.fecha.localeCompare(b.fecha)); }
   function tarjetaMontoTxt(m){ return m.moneda === 'USD' ? fmtMoneyUSD(m.montoUSD) : fmtMoney(m.monto); }
   function tarjetaAbrirClasificar(id, editar){
@@ -7458,7 +7534,7 @@ ${lineasDeuda}
       <div class="fa-card">
         <div class="fa-card-title">Estados de cuenta de tarjetas de crédito</div>
         <div class="fa-section-note">Sube el estado de cuenta de la tarjeta nacional y/o internacional de Itaú (Excel). Cada compra queda en "Por clasificar" para asignarle categoría, evento y líneas de negocio. Las comisiones e intereses del banco entran solos como Gasto Financiero; los pagos y traspasos entre tarjetas se ignoran (no son gasto). Para que cuenten, define antes el cupo de cada tarjeta en Configuración.</div>
-        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button></div>
+        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button> <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-reabrir-pagos">Dejar todos los pagos de tarjeta por clasificar</button></div>
         <input type="file" id="fa-import-tarjeta" data-action="import-tarjeta-file" accept=".xls,.xlsx" multiple style="display:none;">
         ${(state.tarjetaMensajes || []).length ? `<div style="margin-top:10px;">${state.tarjetaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':'inherit'};">${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
         ${c.tarjetaArchivos.length ? `
@@ -7475,7 +7551,7 @@ ${lineasDeuda}
           <tbody>${movs.map(m=>`
             <tr><td>${fmtDate(m.fecha)}</td><td>${m.tarjeta === 'nacional' ? 'Nacional' : 'Internacional'}</td><td>${escapeHtml(m.desc)}</td><td class="num">${tarjetaMontoTxt(m)}</td>
             <td>${m.estado === 'por_clasificar' ? 'Por clasificar' : m.estado === 'ignorado' ? escapeHtml(m.categoria) : escapeHtml(m.categoria)}${m.proyecto ? ` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(m.proyecto)}</span>` : ''}</td>
-            <td style="white-space:nowrap;">${m.estado === 'por_clasificar' ? (m.clase === 'traspaso_deuda' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-traspaso-aplicar" data-id="${m.id}">Aplicar traspaso</button>` : `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button>`) : (m.estado === 'clasificado' ? `<button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-edit="1" data-id="${m.id}">Editar</button> <button class="fa-icon-btn" data-action="tarjeta-reabrir" data-id="${m.id}">Reabrir</button>` : '')}</td></tr>`).join('')}
+            <td style="white-space:nowrap;">${m.estado === 'por_clasificar' ? (m.clase === 'traspaso_deuda' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-traspaso-aplicar" data-id="${m.id}">Aplicar traspaso</button>` : m.clase === 'pago_tarjeta' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-pago-abrir" data-id="${m.id}">Clasificar pago</button>` : `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button>`) : (m.estado === 'clasificado' ? (((m.clase === 'pago_tarjeta' || m.clase === 'traspaso_deuda') ? '' : `<button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-edit="1" data-id="${m.id}">Editar</button> `) + `<button class="fa-icon-btn" data-action="tarjeta-reabrir" data-id="${m.id}">Reabrir</button>`) : '')}</td></tr>`).join('')}
           </tbody></table></div>` : ''}
       </div>`;
   }
@@ -7490,7 +7566,7 @@ ${lineasDeuda}
         <div class="fa-table-wrap"><table class="fa-table">
           <thead><tr><th>Fecha</th><th>Tarjeta</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
           <tbody>${porMes[ym].map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>${m.tarjeta === 'nacional' ? 'Nacional' : 'Internacional'}</td><td>${escapeHtml(m.desc)}</td><td class="num">${tarjetaMontoTxt(m)}</td>
-            <td>${m.clase === 'traspaso_deuda' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-traspaso-aplicar" data-id="${m.id}">Aplicar traspaso</button>` : `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button>`}</td></tr>`).join('')}</tbody>
+            <td>${m.clase === 'traspaso_deuda' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-traspaso-aplicar" data-id="${m.id}">Aplicar traspaso</button>` : m.clase === 'pago_tarjeta' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-pago-abrir" data-id="${m.id}">Clasificar pago</button>` : `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button>`}</td></tr>`).join('')}</tbody>
         </table></div>
       </div>`).join('');
   }
@@ -10520,6 +10596,34 @@ ${lineasDeuda}
         render();
       }
     }
+    else if(action === 'tarjeta-pago-abrir'){
+      state.tarjetaPago = { id: btn.dataset.id };
+      render();
+    }
+    else if(action === 'tarjeta-pago-cerrar'){
+      state.tarjetaPago = null;
+      render();
+    }
+    else if(action === 'tarjeta-pago-guardar'){
+      const pg = state.tarjetaPago;
+      if(!pg) return;
+      const textoBoton = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Guardando…';
+      let guardado = false;
+      try{ guardado = await tarjetaPagoGuardar(pg.id, readFields(document.getElementById('fa-tarjeta-pago'))); }
+      finally{ if(!guardado){ btn.disabled = false; btn.textContent = textoBoton; } }
+      if(guardado){ state.tarjetaPago = null; render(); }
+    }
+    else if(action === 'tarjeta-reabrir-pagos'){
+      const delEstado = state.cartola.tarjetaMovs.filter(m=> m.estado === 'clasificado' && (m.clase === 'pago_tarjeta' || m.clase === 'traspaso_deuda'));
+      const delaCuenta = state.cartola.movimientos.filter(m=> m.estado === 'clasificado' && m.tipo === 'pago_deuda' && m.deudaInfo && (m.deudaInfo.deudaId === DEUDA_TC_NACIONAL_ID || m.deudaInfo.deudaId === DEUDA_TC_INTERNACIONAL_ID));
+      if(!delEstado.length && !delaCuenta.length){ showToast('No hay pagos de tarjeta clasificados para reabrir.'); return; }
+      state.confirmDialog = {
+        message: `¿Dejar todos los pagos a tarjeta de crédito como "Por clasificar"? Se reabren ${delaCuenta.length} pago${delaCuenta.length===1?'':'s'} de tu cuenta (se les quita el abono a la tarjeta) y ${delEstado.length} del estado de cuenta de la tarjeta. Las compras y gastos de la tarjeta NO se tocan.`,
+        action: 'do-reabrir-pagos-tarjeta', data: '', confirmLabel: 'Reabrir los pagos'
+      };
+      render();
+    }
     else if(action === 'tarjeta-reabrir'){
       await tarjetaReabrir(btn.dataset.id);
     }
@@ -10801,6 +10905,13 @@ ${lineasDeuda}
           state.editingGastoId = null;
           showToast('Gasto histórico guardado — Tesorería fue alterada, tal como confirmaste');
         }
+        render();
+      }
+      else if(cd.action === 'do-reabrir-pagos-tarjeta'){
+        state.cartola.movimientos.filter(m=> m.estado === 'clasificado' && m.tipo === 'pago_deuda' && m.deudaInfo && (m.deudaInfo.deudaId === DEUDA_TC_NACIONAL_ID || m.deudaInfo.deudaId === DEUDA_TC_INTERNACIONAL_ID)).forEach(m=> cartolaReabrirMov(m));
+        state.cartola.tarjetaMovs.filter(m=> m.estado === 'clasificado' && (m.clase === 'pago_tarjeta' || m.clase === 'traspaso_deuda')).forEach(m=>{ tarjetaQuitarEfectos(m.id); m.estado = 'por_clasificar'; m.categoria = ''; });
+        await cartolaGuardarTodo();
+        showToast('Listo: los pagos a tarjeta quedaron en "Por clasificar".');
         render();
       }
       else if(cd.action === 'do-eliminar-tarjeta'){
