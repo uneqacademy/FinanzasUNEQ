@@ -2058,6 +2058,8 @@
     cartolaMensajes: [],
     cartolaDividir: null, // { id, partes } — línea de cartola que se está dividiendo
     cartolaClasificar: null, // { id, tipo } — línea de cartola que se está clasificando
+    tarjetaClasificar: null, // { id, editar } — compra de tarjeta que se está clasificando
+    tarjetaMensajes: [],
     ingresos: [],
     gastos: [],
     ingresosUSD: [],
@@ -2324,7 +2326,7 @@
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
     'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
-    'import-cartola-file','eliminar-cartola','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
+    'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
 
@@ -4441,6 +4443,7 @@
       ${renderConfirmModal()}
       ${renderCartolaDividirModal()}
       ${renderCartolaClasificarModal()}
+      ${renderTarjetaClasificarModal()}
       ${renderPfMonthModal()}
       ${renderPagoDeudaModal()}
       ${renderMarcarCuotaPagadaModal()}
@@ -6272,6 +6275,8 @@ ${lineasDeuda}
     return {
       movimientos: Array.isArray(base.movimientos) ? base.movimientos : [],
       archivos: Array.isArray(base.archivos) ? base.archivos : [],
+      tarjetaMovs: Array.isArray(base.tarjetaMovs) ? base.tarjetaMovs : [],
+      tarjetaArchivos: Array.isArray(base.tarjetaArchivos) ? base.tarjetaArchivos : [],
       reglas: Array.isArray(base.reglas) ? base.reglas : cartolaVacia().reglas
     };
   }
@@ -6692,7 +6697,7 @@ ${lineasDeuda}
   }
   // Al elegir un evento, propone el 100% de la línea de negocio que le corresponde (solo si no hay porcentajes escritos).
   window.faProyectoPct = function(sel){
-    const cont = sel.closest('#fa-cartola-clasificar, [data-form]'); if(!cont) return;
+    const cont = sel.closest('#fa-cartola-clasificar, #fa-tarjeta-clasificar, [data-form]'); if(!cont) return;
     const campos = UNIDADES_NEGOCIO.map(u=> cont.querySelector('[name="pct_'+u.id+'"]')).filter(Boolean);
     if(!campos.length || campos.some(c=> c.value !== '' && Number(c.value) !== 0)) return;
     const ud = unidadDeProyecto(sel.value); if(!ud) return;
@@ -7073,6 +7078,324 @@ ${lineasDeuda}
       </div>`;
   }
 
+  // ---------------- Estados de cuenta de tarjetas de crédito (Itaú, Excel) ----------------
+  // Cada compra queda "por clasificar" y, al clasificarla, entra como un gasto pagado con la tarjeta: cuenta en Estado de
+  // Resultados y sube la deuda de la tarjeta, pero no toca el flujo (el flujo sale cuando pagas la tarjeta desde la cuenta).
+  // Se guardan dentro de state.cartola (tarjetaMovs / tarjetaArchivos) para compartir respaldo, borrado y reglas.
+  const TARJETA_METODO = { nacional: 'Tarjeta de Crédito Nacional', internacional: 'Tarjeta de Crédito Internacional' };
+  function tarjetaNumero(s){
+    const t = String(s == null ? '' : s).replace(/[^0-9.,\-]/g, '');
+    if(!t) return 0;
+    const neg = t.indexOf('-') >= 0;
+    let n;
+    if(t.indexOf('.') >= 0 && t.indexOf(',') >= 0) n = parseFloat(t.split(',').join(''));
+    else n = parseFloat(t.split(',').join(''));
+    return (neg ? -1 : 1) * Math.abs(n || 0);
+  }
+  function tarjetaFechaISO(s){
+    const t = String(s || '').trim();
+    let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);          // dd/mm/yyyy (internacional)
+    if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);               // m/d/yy (nacional)
+    if(m) return `20${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+    return '';
+  }
+  function tarjetaHash(s){
+    let h = 0; const t = String(s);
+    for(let i = 0; i < t.length; i++){ h = ((h << 5) - h + t.charCodeAt(i)) | 0; }
+    return Math.abs(h).toString(36);
+  }
+  function parseEstadoTarjeta(buffer){
+    if(typeof XLSX === 'undefined') return { ok:false, error:'No se pudo cargar el lector de Excel. Revisa tu conexión y recarga la página.' };
+    let rows;
+    try{
+      const wb = XLSX.read(new Uint8Array(buffer), { type:'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, raw:false, defval:'' });
+    } catch(e){ return { ok:false, error:'No se pudo abrir el archivo como Excel.' }; }
+    const filas = rows.map(r=> r.map(x=> String(x == null ? '' : x).trim()).filter(x=> x !== ''));
+    const texto = filas.map(r=> r.join(' | '));
+    const cab = texto.slice(0, 12).join(' ').toLowerCase();
+    const tipo = cab.indexOf('estado de cuenta internacional') >= 0 ? 'internacional' : (cab.indexOf('estado de cuenta nacional') >= 0 ? 'nacional' : '');
+    if(!tipo) return { ok:false, error:'No parece un estado de cuenta de tarjeta de crédito de Itaú (nacional o internacional).' };
+    const tarjetaTxt = texto.slice(0, 14).join(' ');
+    const ult4 = (tarjetaTxt.match(/xxxx-xxxx-xxxx-(\d{4})/) || [])[1] || '';
+    // Período facturado
+    let desde = '', hasta = '';
+    filas.forEach(r=>{
+      if(/^per[ií]odo facturado$/i.test(r[0]) && r.length >= 3){ desde = tarjetaFechaISO(r[1]); hasta = tarjetaFechaISO(r[2]); }
+    });
+    if(!hasta){
+      const f = filas.find(r=> /^fecha de estado de cuenta/i.test(r[0]));
+      if(f) hasta = tarjetaFechaISO(f[1]);
+    }
+    const movs = [];
+    const vistos = {};
+    const unico = (base)=>{ vistos[base] = (vistos[base] || 0) + 1; return base + '_' + vistos[base]; };
+    let seccion = '';
+    let comisiones = { n: 0, total: 0, fecha: hasta };
+    filas.forEach(r=>{
+      const j = r.join(' | ');
+      if(/^1\.\s*total operaciones/i.test(j)){ seccion = 'compras'; return; }
+      if(/^2\.\s*productos o servicios/i.test(j)){ seccion = 'voluntarios'; return; }
+      if(/^3\.\s*cargos, comisiones/i.test(j)){ seccion = 'cargos'; return; }
+      if(/^(III\.|IV\.)/.test(j)) { seccion = ''; return; }
+      if(tipo === 'nacional'){
+        if(!seccion) return;
+        const i = r.findIndex(x=> /^\d{1,2}\/\d{1,2}\/\d{2}$/.test(x));
+        if(i < 0 || !/^\d{10,}$/.test(r[i+1] || '')) return;
+        const fecha = tarjetaFechaISO(r[i]), ref = r[i+1], desc = r[i+2] || '', monto = tarjetaNumero(r[i+3]);
+        const d = desc.toLowerCase();
+        if(/monto cancelado|regul deuda|traspaso deuda/.test(d)){
+          movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'interno', estado:'ignorado', categoria:'Pago o traspaso entre tarjetas — no es gasto' });
+          return;
+        }
+        if(/comision compra internacional/.test(d)){ comisiones.n++; comisiones.total += monto; return; }
+        if(/comision administracion|intereses rotativos|interes de mora|impuesto decreto|intereses?\b/.test(d)){
+          movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'financiero', estado:'por_clasificar' });
+          return;
+        }
+        movs.push({ id: 'tcn_' + tarjetaHash(unico(ref + desc + monto)), tarjeta:'nacional', fecha, desc, monto, moneda:'CLP', clase:'compra', estado:'por_clasificar' });
+      } else {
+        const i = r.findIndex(x=> /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(x));
+        if(i !== 1 || !/^\d{15,}$/.test(r[0]) || r.length < 5) return; // solo las filas de movimientos (referencia larga + fecha), no los encabezados
+        const fecha = tarjetaFechaISO(r[i]), desc = r[i+1] || '', usd = tarjetaNumero(r[r.length - 1]);
+        const d = desc.toLowerCase();
+        if(/^total de/.test(d)) return;
+        if(/pago tc|traspaso deuda/.test(d)){
+          movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + desc + usd)), tarjeta:'internacional', fecha, desc, monto: 0, montoUSD: usd, moneda:'USD', clase:'interno', estado:'ignorado', categoria:'Pago o traspaso entre tarjetas — no es gasto' });
+          return;
+        }
+        movs.push({ id: 'tci_' + tarjetaHash(unico((r[0]||'') + fecha + desc + usd)), tarjeta:'internacional', fecha, desc: desc.replace(/\s+\d{4}$/, ''), monto: 0, montoUSD: usd, moneda:'USD', origenMonto: r[r.length - 2] || '', clase:'compra', estado:'por_clasificar' });
+      }
+    });
+    if(tipo === 'nacional' && comisiones.n > 0){
+      movs.push({ id: 'tcn_com_' + tarjetaHash('com' + hasta + ult4), tarjeta:'nacional', fecha: comisiones.fecha, desc: `Comisiones por compra internacional (${comisiones.n})`, monto: comisiones.total, moneda:'CLP', clase:'financiero', estado:'por_clasificar' });
+    }
+    if(!movs.length) return { ok:false, error:'No encontré movimientos en este estado de cuenta.' };
+    return { ok:true, tipo, ult4, desde, hasta, movs };
+  }
+  async function importarEstadosTarjeta(files){
+    const c = state.cartola;
+    const mensajes = [];
+    let nuevas = 0;
+    for(const file of files){
+      let buffer;
+      try{ buffer = await file.arrayBuffer(); } catch(e){ mensajes.push({ nivel:'error', texto:`${file.name}: no se pudo leer el archivo.` }); continue; }
+      const r = parseEstadoTarjeta(buffer);
+      if(!r.ok){ mensajes.push({ nivel:'error', texto:`${file.name}: ${r.error}` }); continue; }
+      const existentes = new Set(c.tarjetaMovs.map(m=> m.id));
+      let n = 0, rep = 0;
+      for(const m of r.movs){
+        if(existentes.has(m.id)){ rep++; continue; }
+        const mov = { ...m, categoria: m.categoria || '', proyecto:'', detalle:null, archivo: r.tipo + '|' + r.hasta };
+        c.tarjetaMovs.push(mov); n++;
+        if(mov.estado === 'por_clasificar'){
+          if(mov.clase === 'financiero'){
+            mov.estado = 'clasificado'; mov.categoria = CAT_GASTO_FINANCIERO; mov.detalle = { proveedor: 'Banco Itaú', descripcion: mov.desc };
+          } else {
+            const regla = cartolaBuscarRegla({ desc: mov.desc, cargo: 1, abono: 0 });
+            if(regla && regla.tipo === 'gasto'){
+              mov.estado = 'clasificado'; mov.categoria = regla.categoria; mov.regla = regla.id;
+              mov.detalle = { proveedor: cartolaNombreCorto(mov.desc), descripcion: mov.desc, pcts: (regla.detalle && regla.detalle.pcts) || null };
+            }
+          }
+          if(mov.estado === 'clasificado'){
+            const ok = await tarjetaAplicarEfectos(mov);
+            if(!ok){ mov.estado = 'por_clasificar'; mov.categoria = ''; mov.detalle = null; }
+          }
+        }
+      }
+      c.tarjetaArchivos = c.tarjetaArchivos.filter(a=> !(a.tipo === r.tipo && a.hasta === r.hasta));
+      c.tarjetaArchivos.push({ nombre: file.name, tipo: r.tipo, ult4: r.ult4, desde: r.desde, hasta: r.hasta, n: r.movs.length, cargadoEl: todayISO() });
+      nuevas += n;
+      mensajes.push({ nivel:'ok', texto:`${file.name} — tarjeta ${r.tipo}, ${r.movs.length} movimientos (${n} nuevos${rep ? `, ${rep} ya estaban` : ''}).` });
+    }
+    state.tarjetaMensajes = mensajes;
+    await cartolaGuardarTodo();
+    showToast(nuevas > 0 ? `Estados de tarjeta cargados: ${nuevas} movimientos nuevos.` : 'Esos estados ya estaban cargados — no se duplicó nada.');
+    render();
+  }
+  // Crea el gasto de una compra clasificada (con su efecto en la deuda de la tarjeta). Devuelve true si quedó aplicado.
+  async function tarjetaAplicarEfectos(mov){
+    tarjetaQuitarEfectos(mov.id);
+    if(mov.estado !== 'clasificado') return true;
+    const d = mov.detalle || {};
+    const esUSD = mov.moneda === 'USD';
+    const data = {
+      fecha: mov.fecha, metodo: TARJETA_METODO[mov.tarjeta], moneda: esUSD ? 'USD' : 'CLP', proveedor: d.proveedor || cartolaNombreCorto(mov.desc),
+      descripcion: d.descripcion || mov.desc, categoria: mov.categoria, monto: esUSD ? mov.montoUSD : mov.monto, tipoCambio: esUSD ? (mov.tipoCambio || '') : '',
+      proyecto: mov.proyecto || '', ...(d.pcts || {})
+    };
+    const r = await prepararGastoManual(data);
+    if(r.error){ showToast(r.error); return false; }
+    r.gasto.origenTarjeta = mov.id;
+    if(esUSD) mov.tipoCambio = r.gasto.tipoCambio;
+    cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
+    await guardarGastosPreparados([r]);
+    return true;
+  }
+  function tarjetaQuitarEfectos(movId){
+    state.gastos.filter(g=> g.origenTarjeta === movId).forEach(g=>{
+      if(g.origenGiro) deleteGiroDeuda(g.origenGiro);
+      removeTesoreriaGasto(g.id);
+    });
+    state.gastos = state.gastos.filter(g=> g.origenTarjeta !== movId);
+  }
+  // Texto de la regla: las primeras palabras sin códigos (ej. "Facebk Kcb9zxvj52" -> "facebk").
+  function tarjetaPatronSugerido(desc){
+    const t = cartolaNorm(desc).split(' ').filter(x=> x && !/\d/.test(x));
+    return (t.length ? t : cartolaNorm(desc).split(' ')).slice(0, 2).join(' ');
+  }
+  function tarjetaMovsPendientes(){ return state.cartola.tarjetaMovs.filter(m=> m.estado === 'por_clasificar').sort((a,b)=> a.fecha.localeCompare(b.fecha)); }
+  function tarjetaMontoTxt(m){ return m.moneda === 'USD' ? fmtMoneyUSD(m.montoUSD) : fmtMoney(m.monto); }
+  function tarjetaAbrirClasificar(id, editar){
+    const m = state.cartola.tarjetaMovs.find(x=> x.id === id); if(!m) return;
+    state.tarjetaClasificar = { id, editar: !!editar };
+    render();
+    if(editar){
+      const cont = document.getElementById('fa-tarjeta-clasificar'); if(!cont) return;
+      const d = m.detalle || {};
+      const set = (n, v)=>{ const el = cont.querySelector('[name="'+n+'"]'); if(el && v !== undefined && v !== null) el.value = v; };
+      set('proveedor', d.proveedor); set('descripcion', d.descripcion); set('categoria', m.categoria); set('proyecto', m.proyecto || '');
+      if(d.pcts) UNIDADES_NEGOCIO.forEach(u=> set('pct_'+u.id, d.pcts['pct_'+u.id] || ''));
+    }
+  }
+  function renderTarjetaClasificarModal(){
+    const cl = state.tarjetaClasificar;
+    if(!cl) return '';
+    const m = state.cartola.tarjetaMovs.find(x=> x.id === cl.id);
+    if(!m) return '';
+    const cd = state.config.categoriasCostoDirecto || CATEGORIAS_COSTO_DIRECTO_DEFAULT;
+    const ef = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+    const optCat = lista=> lista.map(c=>`<option>${escapeHtml(c)}</option>`).join('');
+    const manual = cartolaEsSiempreManual(m.desc);
+    return `
+      <div class="fa-modal-overlay" data-action="tarjeta-clasificar-cerrar">
+        <div class="fa-modal fa-modal-wide" data-action="confirm-noop" id="fa-tarjeta-clasificar" style="max-width:640px;">
+          <div class="fa-modal-title">${cl.editar ? 'Editar' : 'Clasificar'} compra con tarjeta — ${tarjetaMontoTxt(m)}</div>
+          <div class="fa-hint" style="margin-top:0;">Tarjeta ${m.tarjeta} · ${fmtDate(m.fecha)} · ${escapeHtml(m.desc)}</div>
+          <div class="fa-hint">Es un gasto pagado con tarjeta de crédito: cuenta en Estado de Resultados y sube la deuda de la tarjeta. No toca el flujo hasta que pagues la tarjeta.${m.moneda === 'USD' ? ' El monto en pesos se calcula con el dólar del día de la compra.' : ''}</div>
+          <div class="fa-form-grid">
+            <div class="fa-field"><label>Proveedor</label><input type="text" name="proveedor" value="${escapeHtml(cartolaNombreCorto(m.desc))}"></div>
+            <div class="fa-field"><label>Descripción</label><input type="text" name="descripcion" value="${escapeHtml(m.desc)}"></div>
+            <div class="fa-field"><label>Categoría</label>
+              <select name="categoria"><option value="">Elige la categoría…</option>
+                <optgroup label="Costos Directos">${optCat(cd)}</optgroup>
+                <optgroup label="Gastos Operacionales y otros">${optCat(state.config.categoriasGastos.filter(c=> !cd.includes(c) && !ef.includes(c)))}</optgroup>
+                <optgroup label="Egresos de Flujo (no afecta EERR)">${optCat(ef)}</optgroup>
+              </select>
+            </div>
+            <div class="fa-field"><label>Proyecto / Evento (opcional)</label>
+              <select name="proyecto" onchange="window.faProyectoPct(this)">${opcionesProyecto('')}</select>
+            </div>
+          </div>
+          <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%; al elegir un evento se propone su línea):</div>
+          <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
+            ${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0"></div>`).join('')}
+          </div>
+          <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px;">
+            <label style="font-size:12.5px; display:flex; gap:6px; align-items:center;"><input type="checkbox" name="crearRegla" ${(cl.editar || manual) ? '' : 'checked'} ${manual ? 'disabled' : ''}> Aplicar a las compras parecidas y recordarlo para los próximos estados</label>
+            <div class="fa-field" style="margin-top:6px;"><label>Texto que se buscará en la descripción</label><input type="text" name="patron" value="${escapeHtml(tarjetaPatronSugerido(m.desc))}"></div>
+          </div>
+          <div class="fa-modal-actions">
+            <button type="button" class="fa-btn fa-btn-ghost" data-action="tarjeta-clasificar-cerrar">Cancelar</button>
+            <button type="button" class="fa-btn fa-btn-primary" data-action="tarjeta-clasificar-guardar">Guardar</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  async function tarjetaClasificarGuardar(id, form){
+    const mov = state.cartola.tarjetaMovs.find(x=> x.id === id);
+    if(!mov){ showToast('No se encontró la compra.'); return false; }
+    if(!form.categoria){ showToast('Elige la categoría del gasto.'); return false; }
+    const { pcts, suma } = cartolaPctsDeForm(form);
+    if(pcts && Math.round(suma) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + suma + '%) o quedar todas vacías.'); return false; }
+    const antes = { estado: mov.estado, categoria: mov.categoria, proyecto: mov.proyecto, detalle: mov.detalle };
+    mov.estado = 'clasificado'; mov.categoria = form.categoria; mov.proyecto = form.proyecto || '';
+    mov.detalle = { proveedor: (form.proveedor || '').trim(), descripcion: (form.descripcion || '').trim(), pcts };
+    const ok = await tarjetaAplicarEfectos(mov);
+    if(!ok){ Object.assign(mov, antes); await tarjetaAplicarEfectos(mov); return false; }
+    const afectadas = [mov];
+    const patron = cartolaNorm(form.patron);
+    if(form.crearRegla && patron && !cartolaEsSiempreManual(mov.desc)){
+      state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
+      const regla = { id: uid('regla'), patron, tipo: 'gasto', categoria: form.categoria, detalle: { pcts } };
+      state.cartola.reglas.push(regla);
+      for(const m of state.cartola.tarjetaMovs){
+        if(m.id === mov.id || m.estado !== 'por_clasificar' || m.clase !== 'compra') continue;
+        if(!cartolaCalza(cartolaNorm(m.desc), patron)) continue;
+        m.estado = 'clasificado'; m.categoria = form.categoria; m.regla = regla.id;
+        m.detalle = { proveedor: cartolaNombreCorto(m.desc), descripcion: m.desc, pcts };
+        if(await tarjetaAplicarEfectos(m)) afectadas.push(m); else { m.estado = 'por_clasificar'; m.categoria = ''; m.detalle = null; }
+      }
+    }
+    await cartolaGuardarTodo();
+    showToast(afectadas.length > 1 ? `Listo: se clasificaron ${afectadas.length} compras parecidas.` : 'Compra clasificada.');
+    return true;
+  }
+  async function tarjetaReabrir(id){
+    const m = state.cartola.tarjetaMovs.find(x=> x.id === id); if(!m) return;
+    tarjetaQuitarEfectos(m.id);
+    m.estado = 'por_clasificar'; m.categoria = ''; m.proyecto = ''; m.detalle = null; m.regla = null;
+    await cartolaGuardarTodo();
+    showToast('La compra volvió a "Por clasificar".');
+    render();
+  }
+  async function tarjetaEliminarArchivo(clave){
+    const [tipo, hasta] = String(clave).split('|');
+    const ids = new Set(state.cartola.tarjetaMovs.filter(m=> m.archivo === clave).map(m=> m.id));
+    ids.forEach(id=> tarjetaQuitarEfectos(id));
+    state.cartola.tarjetaMovs = state.cartola.tarjetaMovs.filter(m=> m.archivo !== clave);
+    state.cartola.tarjetaArchivos = state.cartola.tarjetaArchivos.filter(a=> !(a.tipo === tipo && a.hasta === hasta));
+    await cartolaGuardarTodo();
+    showToast(`Estado de cuenta eliminado: ${ids.size} movimientos y los gastos que habían generado.`);
+    render();
+  }
+  function renderTarjetasCard(){
+    const c = state.cartola;
+    const movs = c.tarjetaMovs.slice().sort((a,b)=> b.fecha.localeCompare(a.fecha)).slice(0, 300);
+    const pend = tarjetaMovsPendientes().length;
+    return `
+      <div class="fa-card">
+        <div class="fa-card-title">Estados de cuenta de tarjetas de crédito</div>
+        <div class="fa-section-note">Sube el estado de cuenta de la tarjeta nacional y/o internacional de Itaú (Excel). Cada compra queda en "Por clasificar" para asignarle categoría, evento y líneas de negocio. Las comisiones e intereses del banco entran solos como Gasto Financiero; los pagos y traspasos entre tarjetas se ignoran (no son gasto). Para que cuenten, define antes el cupo de cada tarjeta en Configuración.</div>
+        <div class="fa-form-actions"><button type="button" class="fa-btn fa-btn-primary" data-action="abrir-tarjeta-file">Elegir estados de tarjeta (.xls)</button></div>
+        <input type="file" id="fa-import-tarjeta" data-action="import-tarjeta-file" accept=".xls,.xlsx" multiple style="display:none;">
+        ${(state.tarjetaMensajes || []).length ? `<div style="margin-top:10px;">${state.tarjetaMensajes.map(m=>`<div class="fa-hint" style="margin:3px 0; color:${m.nivel==='error'?'var(--expense)':'inherit'};">${escapeHtml(m.texto)}</div>`).join('')}</div>` : ''}
+        ${c.tarjetaArchivos.length ? `
+        <div class="fa-table-wrap" style="margin-top:10px;"><table class="fa-table">
+          <thead><tr><th>Tarjeta</th><th>Período</th><th class="num">Movimientos</th><th></th></tr></thead>
+          <tbody>${c.tarjetaArchivos.slice().sort((a,b)=> (a.tipo+a.hasta).localeCompare(b.tipo+b.hasta)).map(a=>`
+            <tr><td>${a.tipo === 'nacional' ? 'Nacional (CLP)' : 'Internacional (USD)'}</td><td>${a.desde ? fmtDate(a.desde) + ' – ' : ''}${fmtDate(a.hasta)}</td><td class="num">${a.n}</td>
+            <td><button type="button" class="fa-icon-btn danger" data-action="eliminar-tarjeta" data-clave="${a.tipo}|${a.hasta}">Eliminar</button></td></tr>`).join('')}
+          </tbody></table></div>` : ''}
+        ${movs.length ? `
+        <div class="fa-card-title" style="margin-top:14px;">Movimientos de tarjetas ${pend ? `<span style="font-weight:400; font-size:12px; color:var(--expense);">(${pend} por clasificar — están en "Por clasificar")</span>` : ''}</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Fecha</th><th>Tarjeta</th><th>Descripción</th><th class="num">Monto</th><th>Clasificación</th><th></th></tr></thead>
+          <tbody>${movs.map(m=>`
+            <tr><td>${fmtDate(m.fecha)}</td><td>${m.tarjeta === 'nacional' ? 'Nacional' : 'Internacional'}</td><td>${escapeHtml(m.desc)}</td><td class="num">${tarjetaMontoTxt(m)}</td>
+            <td>${m.estado === 'por_clasificar' ? 'Por clasificar' : m.estado === 'ignorado' ? escapeHtml(m.categoria) : escapeHtml(m.categoria)}${m.proyecto ? ` <span class="fa-badge" style="background:#EEF2FF;">${escapeHtml(m.proyecto)}</span>` : ''}</td>
+            <td style="white-space:nowrap;">${m.estado === 'por_clasificar' ? `<button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button>` : (m.estado === 'clasificado' ? `<button type="button" class="fa-btn fa-btn-ghost" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-edit="1" data-id="${m.id}">Editar</button> <button class="fa-icon-btn" data-action="tarjeta-reabrir" data-id="${m.id}">Reabrir</button>` : '')}</td></tr>`).join('')}
+          </tbody></table></div>` : ''}
+      </div>`;
+  }
+  function renderTarjetasPorClasificar(){
+    const pend = tarjetaMovsPendientes();
+    if(!pend.length) return '';
+    const porMes = {};
+    pend.forEach(m=> (porMes[m.fecha.slice(0,7)] = porMes[m.fecha.slice(0,7)] || []).push(m));
+    return Object.keys(porMes).sort().map(ym=>`
+      <div class="fa-card">
+        <div class="fa-card-title">💳 Tarjetas de crédito — ${cartolaMesLabel(ym)} — ${porMes[ym].length} compra${porMes[ym].length===1?'':'s'}</div>
+        <div class="fa-table-wrap"><table class="fa-table">
+          <thead><tr><th>Fecha</th><th>Tarjeta</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
+          <tbody>${porMes[ym].map(m=>`<tr><td>${fmtDate(m.fecha)}</td><td>${m.tarjeta === 'nacional' ? 'Nacional' : 'Internacional'}</td><td>${escapeHtml(m.desc)}</td><td class="num">${tarjetaMontoTxt(m)}</td>
+            <td><button type="button" class="fa-btn fa-btn-primary" style="padding:3px 10px; font-size:12px;" data-action="tarjeta-clasificar-abrir" data-id="${m.id}">Clasificar…</button></td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>`).join('');
+  }
+
   function renderCartolas(){
     const c = state.cartola;
     const archivos = cartolaResumenArchivos();
@@ -7144,6 +7467,8 @@ ${lineasDeuda}
         </table></div>`}
       </div>
 
+      ${renderTarjetasCard()}
+
       ${renderCuadreMensual()}
 
       <div class="fa-card">
@@ -7204,7 +7529,8 @@ ${lineasDeuda}
       <div class="fa-topbar">
         <div><h1>Por clasificar${pend.length?` (${pend.length})`:''}</h1><div class="fa-sub">Líneas de tus cartolas que la app no reconoció, ordenadas por mes. Aquí también están las líneas de Deuda (créditos, línea de crédito, tarjetas): clasifícalas como Pago de deuda o Uso de la línea. Al pulsar Clasificar… se abre el mismo formulario que usas al registrar un gasto o ingreso a mano, con la fecha, el monto y la descripción del banco ya puestos. Al guardar, se actualizan Estado de Resultados, ingresos y flujo.</div></div>
       </div>
-      ${pend.length === 0 ? `<div class="fa-card"><div class="fa-empty">No hay nada por clasificar. 🎉 (Carga más cartolas en "Cartolas bancarias".)</div></div>` : ''}
+      ${renderTarjetasPorClasificar()}
+      ${(pend.length === 0 && !tarjetaMovsPendientes().length) ? `<div class="fa-card"><div class="fa-empty">No hay nada por clasificar. 🎉 (Carga más cartolas en "Cartolas bancarias".)</div></div>` : ''}
       ${meses.map(ym=>{
         const l = porMes[ym];
         const tAb = l.reduce((s,m)=>s+m.abono,0), tCa = l.reduce((s,m)=>s+m.cargo,0);
@@ -10056,6 +10382,36 @@ ${lineasDeuda}
       }
       render();
     }
+    else if(action === 'abrir-tarjeta-file'){
+      const fi = document.getElementById('fa-import-tarjeta');
+      if(fi) fi.click();
+    }
+    else if(action === 'eliminar-tarjeta'){
+      const clave = btn.dataset.clave;
+      const n = state.cartola.tarjetaMovs.filter(m=> m.archivo === clave).length;
+      const g = state.gastos.filter(x=> state.cartola.tarjetaMovs.some(m=> m.archivo === clave && m.id === x.origenTarjeta)).length;
+      state.confirmDialog = {
+        message: `¿Eliminar este estado de cuenta? Se borran sus ${n} movimientos${g ? ` y los ${g} gasto${g===1?'':'s'} que generaron (con su efecto en la deuda de la tarjeta)` : ''}. Puedes volver a subir el archivo cuando quieras. Esta acción no se puede deshacer.`,
+        action: 'do-eliminar-tarjeta', data: clave, confirmLabel: 'Eliminar estado de cuenta'
+      };
+      render();
+    }
+    else if(action === 'tarjeta-clasificar-abrir'){
+      tarjetaAbrirClasificar(btn.dataset.id, btn.dataset.edit === '1');
+    }
+    else if(action === 'tarjeta-clasificar-cerrar'){
+      state.tarjetaClasificar = null;
+      render();
+    }
+    else if(action === 'tarjeta-clasificar-guardar'){
+      const cl = state.tarjetaClasificar;
+      if(!cl) return;
+      const guardado = await tarjetaClasificarGuardar(cl.id, readFields(document.getElementById('fa-tarjeta-clasificar')));
+      if(guardado){ state.tarjetaClasificar = null; render(); }
+    }
+    else if(action === 'tarjeta-reabrir'){
+      await tarjetaReabrir(btn.dataset.id);
+    }
     else if(action === 'cartola-clasificar-abrir'){
       cartolaAbrirClasificar(btn.dataset.id, btn.dataset.edit === '1');
     }
@@ -10332,6 +10688,9 @@ ${lineasDeuda}
         }
         render();
       }
+      else if(cd.action === 'do-eliminar-tarjeta'){
+        await tarjetaEliminarArchivo(cd.data);
+      }
       else if(cd.action === 'do-eliminar-cartola'){
         const [cta, desde] = String(cd.data).split('|');
         await cartolaEliminarArchivo(cta, desde);
@@ -10458,6 +10817,7 @@ ${lineasDeuda}
         state.cartolaMensajes = [];
         state.cartolaDividir = null;
         state.cartolaClasificar = null;
+        state.tarjetaClasificar = null; state.tarjetaMensajes = [];
         state.gastoLote = [];
         state.proyectoSel = '';
         asegurarDeudasFijas();
@@ -12549,6 +12909,12 @@ ${lineasDeuda}
       el.value = '';
       if(files.length === 0) return;
       await importarCartolas(files);
+    }
+    else if(action === 'import-tarjeta-file'){
+      const files = Array.from(el.files || []);
+      el.value = '';
+      if(files.length === 0) return;
+      await importarEstadosTarjeta(files);
     }
     else if(action === 'cartola-filtro'){
       state.cartolaFiltro[el.dataset.campo] = el.value;
