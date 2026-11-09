@@ -3394,7 +3394,7 @@
     for(let intento = 0; intento < 5; intento++){
       const dd = `${String(fecha.getDate()).padStart(2,'0')}-${String(fecha.getMonth()+1).padStart(2,'0')}-${fecha.getFullYear()}`;
       try{
-        const resp = await fetch(`https://mindicador.cl/api/dolar/${dd}`);
+        const resp = await Promise.race([fetch(`https://mindicador.cl/api/dolar/${dd}`), new Promise((_, rej)=> setTimeout(()=> rej(new Error('tiempo agotado')), 7000))]);
         if(!resp.ok) throw new Error('status ' + resp.status);
         const j = await resp.json();
         if(!j.serie || !j.serie.length) throw new Error('sin datos');
@@ -7178,6 +7178,7 @@ ${lineasDeuda}
     const c = state.cartola;
     const mensajes = [];
     let nuevas = 0;
+    const porAplicar = [];
     for(const file of files){
       let buffer;
       try{ buffer = await file.arrayBuffer(); } catch(e){ mensajes.push({ nivel:'error', texto:`${file.name}: no se pudo leer el archivo.` }); continue; }
@@ -7199,10 +7200,7 @@ ${lineasDeuda}
               mov.detalle = { proveedor: cartolaNombreCorto(mov.desc), descripcion: mov.desc, pcts: (regla.detalle && regla.detalle.pcts) || null };
             }
           }
-          if(mov.estado === 'clasificado'){
-            const ok = await tarjetaAplicarEfectos(mov);
-            if(!ok){ mov.estado = 'por_clasificar'; mov.categoria = ''; mov.detalle = null; }
-          }
+          if(mov.estado === 'clasificado') porAplicar.push(mov);
         }
       }
       c.tarjetaArchivos = c.tarjetaArchivos.filter(a=> !(a.tipo === r.tipo && a.hasta === r.hasta));
@@ -7210,28 +7208,65 @@ ${lineasDeuda}
       nuevas += n;
       mensajes.push({ nivel:'ok', texto:`${file.name} — tarjeta ${r.tipo}, ${r.movs.length} movimientos (${n} nuevos${rep ? `, ${rep} ya estaban` : ''}).` });
     }
+    if(porAplicar.length){
+      showToast(`Aplicando ${porAplicar.length} movimientos…`);
+      const rl = await tarjetaAplicarEfectosLote(porAplicar);
+      rl.fallidos.forEach(m=>{ m.estado = 'por_clasificar'; m.categoria = ''; m.detalle = null; });
+      if(rl.fallidos.length) mensajes.push({ nivel:'error', texto: rl.error + ` (${rl.fallidos.length} quedaron por clasificar)` });
+    }
     state.tarjetaMensajes = mensajes;
     await cartolaGuardarTodo();
     showToast(nuevas > 0 ? `Estados de tarjeta cargados: ${nuevas} movimientos nuevos.` : 'Esos estados ya estaban cargados — no se duplicó nada.');
     render();
   }
-  // Crea el gasto de una compra clasificada (con su efecto en la deuda de la tarjeta). Devuelve true si quedó aplicado.
+  // Dólar del día con memoria: cada fecha se consulta una sola vez (y todas las fechas distintas a la vez).
+  const _dolarCache = {};
+  function dolarDelDiaCache(fecha){
+    if(!_dolarCache[fecha]){
+      _dolarCache[fecha] = obtenerDolarDelDia(fecha).then(v=>{ if(!(v > 0)) delete _dolarCache[fecha]; return v; });
+    }
+    return _dolarCache[fecha];
+  }
+  // Crea los gastos de varias compras clasificadas de una vez (con su efecto en la deuda de la tarjeta). Todo se hace en
+  // memoria y SIN guardar: quien llama guarda una sola vez al final (guardar compra por compra era lo que dejaba la pantalla pegada).
+  async function tarjetaAplicarEfectosLote(movs){
+    const fallidos = []; let error = '';
+    const fechas = [...new Set(movs.filter(m=> m.estado === 'clasificado' && m.moneda === 'USD' && !(m.tipoCambio > 0)).map(m=> m.fecha))];
+    await Promise.all(fechas.map(f=> dolarDelDiaCache(f)));
+    for(const mov of movs){
+      tarjetaQuitarEfectos(mov.id);
+      if(mov.estado !== 'clasificado') continue;
+      const d = mov.detalle || {};
+      const esUSD = mov.moneda === 'USD';
+      const tc = esUSD ? (mov.tipoCambio > 0 ? mov.tipoCambio : await dolarDelDiaCache(mov.fecha)) : '';
+      if(esUSD && !(tc > 0)){ fallidos.push(mov); error = 'No pude obtener el dólar del ' + fmtDate(mov.fecha) + '. Revisa tu conexión e inténtalo de nuevo.'; continue; }
+      const data = {
+        fecha: mov.fecha, metodo: TARJETA_METODO[mov.tarjeta], moneda: esUSD ? 'USD' : 'CLP', proveedor: d.proveedor || cartolaNombreCorto(mov.desc),
+        descripcion: d.descripcion || mov.desc, categoria: mov.categoria, monto: esUSD ? mov.montoUSD : mov.monto, tipoCambio: tc,
+        proyecto: mov.proyecto || '', ...(d.pcts || {})
+      };
+      const r = await prepararGastoManual(data);
+      if(r.error){ fallidos.push(mov); error = r.error; continue; }
+      r.gasto.id = uid('gas'); r.gasto.origenTarjeta = mov.id;
+      if(esUSD) mov.tipoCambio = r.gasto.tipoCambio;
+      cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
+      if(r.tarjetaId){
+        const giro = { id: uid('giro'), deudaId: r.tarjetaId, fecha: r.gasto.fecha, monto: r.gasto.monto, descripcion: `Compra con tarjeta — ${r.gasto.proveedor || r.gasto.categoria}`, origen: 'tarjeta_credito' };
+        state.deudas.giros.push(giro);
+        const deuda = state.deudas.inventario.find(x=> x.id === r.tarjetaId);
+        if(deuda) deuda.activa = true;
+        r.gasto.origenGiro = giro.id;
+      }
+      state.gastos.push(r.gasto);
+      syncTesoreriaGasto(r.gasto);
+      syncTesoreriaGastoUSD(r.gasto);
+    }
+    return { fallidos, error };
+  }
+  // Una sola compra. Devuelve true si quedó aplicada (quien llama guarda).
   async function tarjetaAplicarEfectos(mov){
-    tarjetaQuitarEfectos(mov.id);
-    if(mov.estado !== 'clasificado') return true;
-    const d = mov.detalle || {};
-    const esUSD = mov.moneda === 'USD';
-    const data = {
-      fecha: mov.fecha, metodo: TARJETA_METODO[mov.tarjeta], moneda: esUSD ? 'USD' : 'CLP', proveedor: d.proveedor || cartolaNombreCorto(mov.desc),
-      descripcion: d.descripcion || mov.desc, categoria: mov.categoria, monto: esUSD ? mov.montoUSD : mov.monto, tipoCambio: esUSD ? (mov.tipoCambio || '') : '',
-      proyecto: mov.proyecto || '', ...(d.pcts || {})
-    };
-    const r = await prepararGastoManual(data);
-    if(r.error){ showToast(r.error); return false; }
-    r.gasto.origenTarjeta = mov.id;
-    if(esUSD) mov.tipoCambio = r.gasto.tipoCambio;
-    cartolaAsegurarCategoria(state.config.categoriasGastos, mov.categoria);
-    await guardarGastosPreparados([r]);
+    const r = await tarjetaAplicarEfectosLote([mov]);
+    if(r.fallidos.length){ showToast(r.error); return false; }
     return true;
   }
   function tarjetaQuitarEfectos(movId){
@@ -7321,12 +7356,19 @@ ${lineasDeuda}
       state.cartola.reglas = state.cartola.reglas.filter(r=> cartolaNorm(r.patron) !== patron);
       const regla = { id: uid('regla'), patron, tipo: 'gasto', categoria: form.categoria, detalle: { pcts } };
       state.cartola.reglas.push(regla);
+      const parecidas = [];
       for(const m of state.cartola.tarjetaMovs){
         if(m.id === mov.id || m.estado !== 'por_clasificar' || m.clase !== 'compra') continue;
         if(!cartolaCalza(cartolaNorm(m.desc), patron)) continue;
         m.estado = 'clasificado'; m.categoria = form.categoria; m.regla = regla.id;
         m.detalle = { proveedor: cartolaNombreCorto(m.desc), descripcion: m.desc, pcts };
-        if(await tarjetaAplicarEfectos(m)) afectadas.push(m); else { m.estado = 'por_clasificar'; m.categoria = ''; m.detalle = null; }
+        parecidas.push(m);
+      }
+      if(parecidas.length){
+        showToast(`Clasificando ${parecidas.length} compras parecidas…`);
+        const rl = await tarjetaAplicarEfectosLote(parecidas);
+        parecidas.forEach(m=>{ if(rl.fallidos.includes(m)){ m.estado = 'por_clasificar'; m.categoria = ''; m.detalle = null; } else afectadas.push(m); });
+        if(rl.fallidos.length) showToast(rl.error);
       }
     }
     await cartolaGuardarTodo();
