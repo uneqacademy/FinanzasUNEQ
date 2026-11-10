@@ -1440,6 +1440,16 @@
       .sort((a,b)=>(a.fechaCreacion||'').localeCompare(b.fechaCreacion||''));
   }
 
+  function quitarAsignacionesIngresos(){
+    let cambio = false;
+    const esPct = k=> k.indexOf('pct_') === 0;
+    state.ingresos.forEach(i=>{ Object.keys(i).filter(esPct).forEach(k=>{ delete i[k]; cambio = true; }); });
+    const movs = (state.cartola && state.cartola.movimientos) || [];
+    movs.forEach(m=>{ if(m.tipo === 'ingreso' && m.detalle && m.detalle.pcts){ m.detalle.pcts = null; cambio = true; } });
+    ((state.cartola && state.cartola.reglas) || []).forEach(r=>{ if(r.tipo === 'ingreso' && r.detalle && r.detalle.pcts){ r.detalle.pcts = null; cambio = true; } });
+    return cambio;
+  }
+
   // ---- Traer las ventas de la versión anterior (respaldo .json) ----
   // Suma al Registro de Ventas actual las líneas (con sus comisiones y anticipos) de un respaldo de la app anterior.
   // Solo agrega: no toca ingresos, gastos, cartolas ni nada ya clasificado, y lo que ya existe (mismo id) se omite.
@@ -1684,16 +1694,8 @@
       UNIDADES_NEGOCIO.forEach(u=> resultado[u.id][destino] += monto * (fracciones[u.id]||0));
     });
 
-    // Cobros (ingresos de la cartola o manuales) que asignaste a una o más unidades con porcentajes. Solo cuentan los que tienen %
-    // asignado (si después registras esas mismas ventas en Registro de Ventas, quítale el % al cobro para no contarlas dos veces).
-    state.ingresos.forEach(i=>{
-      if(!i.fecha || i.moneda === 'USD' || !esIngresoVenta(i) || esIngresoPorDeuda(i)) return;
-      const d = new Date(i.fecha+'T00:00:00');
-      if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
-      const fr = getFraccionesUnidadGasto(i);
-      if(!fr) return;
-      UNIDADES_NEGOCIO.forEach(u=> resultado[u.id].ingresos += (Number(i.monto)||0) * (fr[u.id]||0));
-    });
+    // Los ingresos que entran a la cuenta (cartola o manuales) son solo flujo de caja: no se asignan a líneas de negocio.
+    // Los ingresos de cada unidad salen únicamente de las ventas (Registro de Ventas) y su devengo.
 
     UNIDADES_NEGOCIO.forEach(u=>{
       const r = resultado[u.id];
@@ -2887,6 +2889,12 @@
       state.pagosImpuestos = pagosImpuestos || [];
       state.tesoreriaUSD = (tesoreriaUSD && typeof tesoreriaUSD === 'object') ? tesoreriaUSD : { movimientos: [] };
       if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
+
+      // Los ingresos que entran a la cuenta son solo flujo: se quitan las asignaciones a líneas de negocio que tuvieran.
+      if(quitarAsignacionesIngresos()){
+        await saveKey('ingresos', state.ingresos, {silent:true});
+        await saveKey('cartola', state.cartola, {silent:true});
+      }
 
       // Plantilla de Gastos Fijos: al abrir la app, si una plantilla activa no tiene todavía su gasto del
       // mes en curso, se genera automáticamente en estado "Pendiente" — no hay servidor que lo haga solo un
@@ -6767,8 +6775,7 @@ ${lineasDeuda}
       cartolaAsegurarCategoria(state.config.categoriasIngresos, mov.categoria);
       const ingreso = {
         id: uid('ing'), fecha: mov.fecha, categoria: mov.categoria, cliente: nombre, pasarela: (mov.detalle && mov.detalle.medioPago) || '', descripcion: (mov.detalle && mov.detalle.descripcion) || '',
-        monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id, proyecto: mov.proyecto || '',
-        ...((mov.detalle && mov.detalle.pcts) || {})
+        monto: mov.abono, moneda: 'CLP', estado: 'Pagado', distribucion: null, origenCartola: mov.id, proyecto: mov.proyecto || ''
       };
       state.ingresos.push(ingreso);
       // Entra directo a Operación (no pasa por el reparto Profit First) si cuenta para el flujo.
@@ -6901,7 +6908,7 @@ ${lineasDeuda}
             <div class="fa-field" ${ver('deuda')}><label>Detalle de la deuda</label><input type="text" name="detalleDeuda" placeholder="Ej: tarjeta, crédito, línea"></div>
           </div>
           <div class="fa-hint" ${ver('pago_deuda')}>Capital + interés + mora tienen que sumar exactamente el cargo del banco. El pago se aplica a la cuota más atrasada primero. Solo el interés y la mora llegan al Estado de Resultados.</div>
-          <div ${ver('gasto','ingreso')}>
+          <div ${ver('gasto')}>
             <div class="fa-hint" style="margin:6px 0 4px;">Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%; al elegir un evento se propone su línea):</div>
             <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">
               ${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0"></div>`).join('')}
@@ -7059,9 +7066,7 @@ ${lineasDeuda}
       detalle = { metodo: form.metodo || METODOS_PAGO_BANCO[0], proveedor: (form.proveedor || '').trim(), descripcion: (form.descripcion || '').trim(), pcts };
       detalleRegla = { metodo: detalle.metodo, pcts };
     } else if(tipo === 'ingreso'){
-      const { pcts, suma } = cartolaPctsDeForm(form);
-      if(pcts && Math.round(suma) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + suma + '%) o quedar todas vacías.'); return; }
-      detalle = { descripcion: (form.detalleIngreso || '').trim(), medioPago: form.medioPago || '', pcts };
+      detalle = { descripcion: (form.detalleIngreso || '').trim(), medioPago: form.medioPago || '', pcts: null };
       detalleRegla = { medioPago: detalle.medioPago };
     }
     let regla = null;
@@ -8305,7 +8310,7 @@ ${lineasDeuda}
             </div>
             <div class="fa-field"><label>Detalle / Comentarios</label><input type="text" name="cliente" placeholder="Ej: Cliente o comentario" value="${editing?escapeHtml(editing.cliente||''):''}"></div>
             <div class="fa-field" id="fa-pf-proyecto-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Proyecto / Evento (opcional)</label><select name="proyecto" onchange="window.faProyectoPct(this)">${opcionesProyecto(editing?editing.proyecto:'')}</select></div>
-            <div class="fa-field" id="fa-pf-pct-wrap" style="grid-column:1/-1; display:${editing&&editing.moneda==='USD'?'none':''};"><label>Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%)</label>
+            <div class="fa-field" id="fa-pf-pct-wrap" style="grid-column:1/-1; display:none;"><label>Asignación a líneas de negocio (opcional — si la completas, tiene que sumar 100%)</label>
               <div class="fa-form-grid" style="grid-template-columns:repeat(4,1fr);">${UNIDADES_NEGOCIO.map(u=>`<div class="fa-field"><label>% ${escapeHtml(u.label)}</label><input type="number" name="pct_${u.id}" min="0" max="100" step="1" placeholder="0" value="${editing&&editing['pct_'+u.id]?editing['pct_'+u.id]:''}"></div>`).join('')}</div>
             </div>
             <div class="fa-field" id="fa-pf-pasarela-wrap" style="display:${editing&&editing.moneda==='USD'?'none':''};"><label>Medio de pago</label>
@@ -11762,7 +11767,7 @@ ${lineasDeuda}
       const pct = state.config.distribucionPorcentajes || DISTRIBUCION_DEFAULT;
       const montos = repartirMontoPF(montoParaDistribuir, pct);
 
-      const { pcts: pctsIng, suma: sumaIng } = cartolaPctsDeForm(data);
+      const pctsIng = null, sumaIng = 0;
       if(pctsIng && Math.round(sumaIng) !== 100){ showToast('Las líneas de negocio tienen que sumar 100% (hoy suman ' + sumaIng + '%) o quedar todas vacías.'); return; }
       const ingreso = {
         id: ingresoId,
