@@ -6429,6 +6429,37 @@ ${lineasDeuda}
     return (4294967296 * (2097151 & h2) + (h1>>>0)).toString(36);
   }
 
+  // Cartola PROVISORIA del banco ("Consulta Saldos y Últimos movimientos"): sin período ni saldo anterior, fechas mes/día/año,
+  // más nuevo arriba. Se ordena, se calcula el saldo anterior y se marca como provisoria para reemplazarla cuando llegue la oficial.
+  function parseCartolaProvisoria(rows, cuenta, numero){
+    const iHead = rows.findIndex(r=> r && /^fecha$/i.test(String(r[0]||'').trim()) && /^movimientos$/i.test(String(r[3]||'').trim()));
+    if(iHead === -1) return null;
+    const pad = n=> String(n).padStart(2,'0');
+    const num = v=>{ if(typeof v === 'number') return v; const t = String(v==null?'':v).replace(/[^\d-]/g,''); return (t === '' || t === '-') ? 0 : parseInt(t, 10); };
+    const lista = [];
+    for(let i=iHead+1; i<rows.length; i++){
+      const r = rows[i]; if(!r || r[0] == null) continue;
+      let aa, mm, dd;
+      if(typeof r[0] === 'number' && r[0] > 40000){ const dt = new Date(Date.UTC(1899, 11, 30) + Math.round(r[0]) * 86400000); aa = dt.getUTCFullYear(); mm = dt.getUTCMonth() + 1; dd = dt.getUTCDate(); }
+      else {
+        const mt = String(r[0]).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); // texto: mes/día/año
+        if(!mt) continue;
+        mm = +mt[1]; dd = +mt[2]; aa = +mt[3]; if(aa < 100) aa += 2000;
+      }
+      if(mm < 1 || mm > 12 || dd < 1 || dd > 31) continue;
+      lista.push({ fecha: aa + '-' + pad(mm) + '-' + pad(dd), oper: String(r[1]==null?'':r[1]).trim(), desc: String(r[3]==null?'':r[3]).replace(/\s+/g,' ').trim(), abono: num(r[4]), cargo: num(r[5]), saldo: num(r[6]) });
+    }
+    if(!lista.length) return null;
+    lista.reverse(); // el banco lista del más nuevo al más antiguo
+    const movs = lista.map(m=> ({ id:'cl_' + cartolaHash([cuenta, m.fecha, m.oper, m.desc, m.abono, m.cargo, m.saldo].join('|')), cuenta, ...m, prov:true }));
+    const avisos = [];
+    const saldoAnterior = movs[0].saldo - movs[0].abono + movs[0].cargo;
+    let corrido = saldoAnterior, desfases = 0;
+    movs.forEach(m=>{ corrido += m.abono - m.cargo; if(Math.round(corrido) !== Math.round(m.saldo)){ desfases++; corrido = m.saldo; } });
+    if(desfases > 0) avisos.push('El saldo corrido no calza en ' + desfases + ' línea' + (desfases===1?'':'s') + '.');
+    return { ok:true, provisoria:true, cuenta, numero, desde:movs[0].fecha, hasta:movs[movs.length-1].fecha, saldoAnterior, saldoFinal:movs[movs.length-1].saldo, movs, avisos };
+  }
+
   // Lee una cartola de cuenta corriente de Itaú (Excel). Devuelve { ok, error } o el detalle completo.
   function parseCartolaItau(buffer){
     if(typeof XLSX === 'undefined') return { ok:false, error:'No se pudo cargar el lector de Excel. Revisa tu conexión y recarga la página.' };
@@ -6452,7 +6483,11 @@ ${lineasDeuda}
       }
       if(desde) break;
     }
-    if(!desde) return { ok:false, error:'No se encontró el período de la cartola.' };
+    if(!desde){
+      const prov = parseCartolaProvisoria(rows, cuenta, numero);
+      if(prov) return prov;
+      return { ok:false, error:'No se encontró el período de la cartola.' };
+    }
 
     const iSaldo = rows.findIndex(r=> r && r[0] === 'Monto disponible');
     const saldoAnterior = (iSaldo > -1 && rows[iSaldo+1]) ? Number(rows[iSaldo+1][2]) : NaN;
@@ -6886,10 +6921,25 @@ ${lineasDeuda}
       try{ buffer = await file.arrayBuffer(); } catch(e){ mensajes.push({ nivel:'error', texto:`${file.name}: no se pudo leer el archivo.` }); continue; }
       const r = parseCartolaItau(buffer);
       if(!r.ok){ mensajes.push({ nivel:'error', texto:`${file.name}: ${r.error}` }); continue; }
-      const existentes = new Set(state.cartola.movimientos.map(m=>m.id));
-      let nuevas = 0, repetidas = 0, auto = 0;
+      const existentes = new Set(state.cartola.movimientos.flatMap(m=> m.idOficial ? [m.id, m.idOficial] : [m.id]));
+      let nuevas = 0, repetidas = 0, auto = 0, fusionadas = 0, retiradas = 0, yaOficiales = 0;
+      const oficialHasta = state.cartola.archivos.filter(a=> a.cuenta === r.cuenta && !a.provisoria).reduce((mx,a)=> a.hasta > mx ? a.hasta : mx, '');
+      if(r.provisoria && oficialHasta){
+        // lo que ya cubre una cartola oficial no se vuelve a cargar desde la provisoria
+        const antes = r.movs.length; r.movs = r.movs.filter(m=> m.fecha > oficialHasta); yaOficiales = antes - r.movs.length;
+        if(!r.movs.length){ mensajes.push({ nivel:'aviso', texto: file.name + ': ya tienes la cartola oficial de la cuenta ' + r.cuenta + ' hasta ' + fmtDate(oficialHasta) + '; esta provisoria no trae nada más reciente.' }); continue; }
+        r.desde = r.movs[0].fecha; r.saldoAnterior = r.movs[0].saldo - r.movs[0].abono + r.movs[0].cargo;
+      }
+      // Al subir la cartola OFICIAL se reemplaza lo provisorio de ese período: las líneas que coinciden conservan su clasificación.
+      const provPend = r.provisoria ? [] : state.cartola.movimientos.filter(m=> m.prov && m.cuenta === r.cuenta && m.fecha >= r.desde && m.fecha <= r.hasta);
+      const mismaDesc = (a, b)=>{ const x = cartolaNorm(a), y = cartolaNorm(b); const n = Math.min(x.length, y.length); return n >= 8 && x.slice(0, n) === y.slice(0, n); };
       r.movs.forEach(m=>{
         if(existentes.has(m.id)){ repetidas++; return; }
+        const iP = provPend.findIndex(x=> x.fecha === m.fecha && x.abono === m.abono && x.cargo === m.cargo && mismaDesc(x.desc, m.desc));
+        if(iP > -1){
+          const pm = provPend[iP]; provPend.splice(iP, 1);
+          pm.idOficial = m.id; pm.oper = m.oper; pm.desc = m.desc; pm.saldo = m.saldo; delete pm.prov; fusionadas++; return;
+        }
         const mov = { ...m, estado:'por_clasificar', tipo:null, categoria:'', regla:null };
         const regla = cartolaBuscarRegla(mov);
         if(regla){ cartolaSetClasificacion(mov, regla.tipo, regla.categoria, regla.id); mov.detalle = regla.detalle ? {...regla.detalle} : null; auto++; }
@@ -6898,13 +6948,16 @@ ${lineasDeuda}
         if(mov.estado === 'clasificado') cartolaAplicarEfectos(mov);
         nuevas++;
       });
-      state.cartola.archivos = state.cartola.archivos.filter(a=> !(a.cuenta === r.cuenta && a.desde === r.desde));
+      // provisorias de ese período que la oficial no trae: se quitan con lo que hubieran generado
+      provPend.forEach(m=>{ cartolaQuitarEfectos(m.id); retiradas++; });
+      if(provPend.length){ const ids = new Set(provPend.map(m=> m.id)); state.cartola.movimientos = state.cartola.movimientos.filter(m=> !ids.has(m.id)); }
+      state.cartola.archivos = state.cartola.archivos.filter(a=> !(a.cuenta === r.cuenta && a.desde === r.desde) && !(!r.provisoria && a.provisoria && a.cuenta === r.cuenta && a.desde >= r.desde && a.desde <= r.hasta));
       state.cartola.archivos.push({
         nombre: file.name, cuenta: r.cuenta, desde: r.desde, hasta: r.hasta, saldoAnterior: r.saldoAnterior,
-        saldoFinal: r.saldoFinal, n: r.movs.length, avisos: r.avisos, cargadoEl: todayISO()
+        saldoFinal: r.saldoFinal, n: r.movs.length, avisos: r.avisos, cargadoEl: todayISO(), ...(r.provisoria ? { provisoria:true } : {})
       });
-      nuevasTotal += nuevas; autoTotal += auto; repetidasTotal += repetidas;
-      mensajes.push({ nivel: r.avisos.length ? 'aviso' : 'ok', texto:`${file.name} — cuenta ${r.cuenta}, ${r.movs.length} movimientos (${nuevas} nuevos${repetidas?`, ${repetidas} ya estaban`:''}, ${auto} clasificados solos).` + (r.avisos.length ? ' ⚠ ' + r.avisos.join(' ') : '') });
+      nuevasTotal += nuevas + fusionadas; autoTotal += auto; repetidasTotal += repetidas;
+      mensajes.push({ nivel: r.avisos.length ? 'aviso' : 'ok', texto: file.name + ' — ' + (r.provisoria ? 'PROVISORIA, ' : '') + 'cuenta ' + r.cuenta + ', ' + r.movs.length + ' movimientos (' + nuevas + ' nuevos' + (repetidas ? ', ' + repetidas + ' ya estaban' : '') + ', ' + auto + ' clasificados solos' + (fusionadas ? ', ' + fusionadas + ' reemplazan a los provisorios conservando su clasificación' : '') + (retiradas ? ', ' + retiradas + ' provisorios que el banco no confirmó se quitaron' : '') + ').' + (r.provisoria ? ' Cuando llegue la cartola oficial del mes, súbela: reemplaza esta.' : '') + (yaOficiales ? ' (' + yaOficiales + ' líneas ya estaban en la cartola oficial.)' : '') + (r.avisos.length ? ' ⚠ ' + r.avisos.join(' ') : '') });
     }
     state.cartolaMensajes = mensajes;
     if(nuevasTotal > 0 || mensajes.length) await cartolaGuardarTodo();
@@ -7881,7 +7934,7 @@ ${lineasDeuda}
 
       <div class="fa-card">
         <div class="fa-card-title">Subir cartolas</div>
-        <div class="fa-section-note">Puedes elegir varios archivos de una vez (de cualquier mes y de las dos cuentas). Si subes un mes que ya estaba, la app no duplica nada. La app lee el número de cuenta y el período desde el propio archivo.</div>
+        <div class="fa-section-note">Puedes elegir varios archivos de una vez (de cualquier mes y de las dos cuentas). Si subes un mes que ya estaba, la app no duplica nada. La app lee el número de cuenta y el período desde el propio archivo. También acepta la consulta provisoria del banco ("Últimos movimientos"): queda marcada como PROVISORIA y se reemplaza sola cuando subes la cartola oficial del mes.</div>
         <div class="fa-form-actions">
           <button type="button" class="fa-btn fa-btn-primary" data-action="abrir-cartola-file">Elegir cartolas (.xls)</button>
         </div>
@@ -7905,7 +7958,7 @@ ${lineasDeuda}
           <tbody>${archivos.map(a=>`
             <tr>
               <td>${escapeHtml(a.cuenta)}</td>
-              <td>${fmtDate(a.desde)} – ${fmtDate(a.hasta)}</td>
+              <td>${fmtDate(a.desde)} – ${fmtDate(a.hasta)}${a.provisoria ? ' <span style="background:#FFF3CD; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700;">PROVISORIA</span>' : ''}</td>
               <td class="num">${a.n}</td>
               <td class="num">${fmtMoney(a.saldoAnterior)}</td>
               <td class="num">${fmtMoney(a.saldoFinal)}</td>
