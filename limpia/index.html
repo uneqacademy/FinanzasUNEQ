@@ -944,7 +944,24 @@
     });
     return plan;
   }
+  // Si un traspaso ya aplicado tomó los dólares de otro día, se corrige con la contraparte del mismo día del estado internacional.
+  function tarjetaRepararTraspasosUSD(){
+    const T = state.cartola && state.cartola.tarjetaMovs; if(!T || !state.deudas || !state.deudas.pagos) return false;
+    let cambio = false;
+    T.filter(m=> m.tarjeta === 'nacional' && m.clase === 'traspaso_deuda' && m.estado === 'clasificado').forEach(m=>{
+      const exactos = T.filter(x=> x.tarjeta === 'internacional' && (x.clase === 'interno' || x.clase === 'pago_tarjeta') && /pago tc|traspaso deuda/i.test(x.desc || '') && x.fecha === m.fecha);
+      if(!exactos.length) return;
+      const usd = Math.round(exactos.reduce((t,x)=> t + Math.abs(Number(x.montoUSD)||0), 0) * 100) / 100;
+      const pg = state.deudas.pagos.find(x=> x.origenTarjeta === m.id && x.deudaId === DEUDA_TC_INTERNACIONAL_ID);
+      if(!pg || !(usd > 0) || Math.abs((pg.capitalUSD||0) - usd) < 0.005) return;
+      pg.capitalUSD = usd; m.categoria = 'Traspaso de deuda: internacional → nacional (US$ ' + usd.toFixed(2) + ')'; cambio = true;
+    });
+    return cambio;
+  }
   async function recalcCoberturasAuto(){
+    if(state.cartola && state.deudas && !state.readOnly && tarjetaRepararTraspasosUSD()){
+      try{ await saveKey('deudas', state.deudas, {silent:true}); await saveKey('cartola/tarjetaMovs', state.cartola.tarjetaMovs, {silent:true}); }catch(e){ console.error(e); }
+    }
     if(!state.tesoreria || !state.deudas || !state.deudas.inventario || !state.config) return false;
     if(!state.deudas.giros) state.deudas.giros = [];
     const plan = planSobregiroCC();
@@ -6383,7 +6400,7 @@ ${lineasDeuda}
         // El "Pago Tc Usd" del estado internacional es la contraparte del traspaso desde la nacional: no es un pago aparte.
         if(m && m.tarjeta === 'internacional' && m.clase === 'pago_tarjeta' && m.estado === 'por_clasificar') return { ...m, clase:'interno', estado:'ignorado', categoria:'Contraparte en dólares del traspaso de deuda — se aplica desde el estado de la tarjeta nacional' };
         // Los pagos que muestra el estado de cuenta ("Monto cancelado" / "Pago Tc Usd") también quedan por clasificar.
-        if(m && m.clase === 'interno' && m.estado === 'ignorado' && /monto cancelado|pago tc/i.test(m.desc || '')) return { ...m, clase:'pago_tarjeta', estado:'por_clasificar', categoria:'', monto: Math.abs(Number(m.monto) || 0), montoUSD: m.montoUSD == null ? m.montoUSD : Math.abs(Number(m.montoUSD) || 0) };
+        if(m && m.tarjeta !== 'internacional' && m.clase === 'interno' && m.estado === 'ignorado' && /monto cancelado|pago tc/i.test(m.desc || '')) return { ...m, clase:'pago_tarjeta', estado:'por_clasificar', categoria:'', monto: Math.abs(Number(m.monto) || 0), montoUSD: m.montoUSD == null ? m.montoUSD : Math.abs(Number(m.montoUSD) || 0) };
         return m;
       }),
       tarjetaArchivos: Array.isArray(base.tarjetaArchivos) ? base.tarjetaArchivos : [],
@@ -7414,7 +7431,7 @@ ${lineasDeuda}
   // Los USD que se traspasan vienen del estado de la tarjeta INTERNACIONAL (mismo día); si ese estado no está cargado, se estiman con el dólar del día.
   async function tarjetaTraspasoUSD(mov){
     const dias = f=> Math.abs((new Date(f + 'T00:00:00') - new Date(mov.fecha + 'T00:00:00')) / 86400000);
-    const todos = state.cartola.tarjetaMovs.filter(x=> x.tarjeta === 'internacional' && x.clase === 'interno' && /pago tc|traspaso deuda/i.test(x.desc || ''));
+    const todos = state.cartola.tarjetaMovs.filter(x=> x.tarjeta === 'internacional' && (x.clase === 'interno' || x.clase === 'pago_tarjeta') && /pago tc|traspaso deuda/i.test(x.desc || ''));
     const exactos = todos.filter(x=> dias(x.fecha) === 0);
     const pares = exactos.length ? exactos : todos.filter(x=> dias(x.fecha) <= 1);
     if(pares.length) return { usd: pares.reduce((t,x)=> t + Math.abs(Number(x.montoUSD)||0), 0), estimado: false };
