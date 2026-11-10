@@ -1450,6 +1450,48 @@
     return cambio;
   }
 
+  // ---- Traer las ventas de la versión anterior (respaldo .json) ----
+  // Suma al Registro de Ventas actual las líneas (con sus comisiones y anticipos) de un respaldo de la app anterior.
+  // Solo agrega: no toca ingresos, gastos, cartolas ni nada ya clasificado, y lo que ya existe (mismo id) se omite.
+  function nombreProyectoSOS(){
+    const ps = getProyectos().filter(p=> p.tipo === 'sinergia_on_stage');
+    const pref = ps.find(p=> /^soss*-?s*26/i.test(p.nombre)) || ps[0];
+    return pref ? pref.nombre : '';
+  }
+  function planImportarVentas(data){
+    const lineas = Array.isArray(data && data.contratosDevengados) ? data.contratosDevengados.filter(c=> c && c.id) : [];
+    const gastos = Array.isArray(data && data.gastos) ? data.gastos.filter(g=> g && g.id && g.origenContrato) : [];
+    const idsC = new Set(state.contratosDevengados.map(c=> c.id));
+    const idsG = new Set(state.gastos.map(g=> g.id));
+    const nuevas = lineas.filter(c=> !idsC.has(c.id)).map(c=> ({...c}));
+    const sos = nombreProyectoSOS();
+    let nSOS = 0;
+    nuevas.forEach(c=>{ if(c.tipoIngreso === 'evento_presencial'){ if(sos && !c.proyecto) c.proyecto = sos; nSOS++; } });
+    const porId = new Set(nuevas.map(c=> c.id));
+    const porLote = {};
+    nuevas.forEach(c=>{ const l = c.loteId || c.id; (porLote[l] = porLote[l] || []).push(c); });
+    let reenlazados = 0;
+    const gastosNuevos = [];
+    gastos.forEach(g=>{
+      if(idsG.has(g.id)) return;
+      let destino;
+      if(porId.has(g.origenContrato)) destino = g.origenContrato;
+      else if(porLote[g.origenContrato]){
+        // Algunos gastos de la app anterior apuntaban al lote y no a su línea: se re-enlazan a la línea del mismo cliente.
+        const lote = porLote[g.origenContrato];
+        let mism = lote.length === 1 ? lote : lote.filter(c=> c.nombre === g.proveedor);
+        // Si el nombre no coincide (p. ej. escrito distinto), se usa la única línea del lote que lleva comisión o anticipo.
+        if(mism.length !== 1) mism = lote.filter(c=> (Number(c.comisionPorCuota)||0) > 0 || (Number(c.anticipoPorCuotaUSD)||0) > 0);
+        if(mism.length === 1){ destino = mism[0].id; reenlazados++; } else destino = g.origenContrato;
+      } else return;
+      gastosNuevos.push({ ...g, origenContrato: destino });
+    });
+    const lotes = new Set(nuevas.map(c=> c.loteId || c.id)).size;
+    const ventaBruta = nuevas.reduce((a,c)=> a + (Number(c.montoTotal)||0), 0);
+    const montoGastos = gastosNuevos.reduce((a,g)=> a + (Number(g.monto)||0), 0);
+    return { nuevas, gastosNuevos, repetidas: lineas.length - nuevas.length, reenlazados, sos, nSOS, lotes, ventaBruta, montoGastos };
+  }
+
   // ---- Estado de Resultados (Módulo 3, base devengada) ----
   // Procesa UNA línea (ya sea de un lote o de un Ingreso Único): crea su contratoDevengado y genera sus
   // gastos de comisión/anticipo (uno por cuota, mes a mes desde fechaInicioVenta). Devuelve true si generó
@@ -2425,7 +2467,7 @@
     'delete-ingreso','delete-gasto','delete-pf','bulk-delete-ingresos','bulk-delete-gastos',
     'reset-data','confirm-ok',
     'save-monto-exigible-pf','add-abono-pf','marcar-pagado-pf','delete-abono-pf','toggle-pendiente-pf','toggle-cat-no-venta',
-    'import-json-file','import-csv-ingresos-file','import-csv-gastos-file',
+    'import-json-file','import-ventas-file','import-csv-ingresos-file','import-csv-gastos-file',
     'import-cartola-file','eliminar-cartola','import-tarjeta-file','eliminar-tarjeta','tarjeta-clasificar-guardar','tarjeta-reabrir','tarjeta-traspaso-aplicar','tarjeta-pago-guardar','tarjeta-reabrir-pagos','tarjeta-pagos-a-nacional','tarjeta-reiniciar','import-linea-file','eliminar-linea','linea-auto','linea-aceptar','linea-aceptar-todos','linea-deshacer','agregar-manual-cartola','quitar-manual-cartola','asignar-cartola','reabrir-cartola','borrar-regla-cartola','cartola-dividir-guardar','cartola-clasificar-guardar','agregar-linea-gasto','quitar-linea-gasto','confirmar-ventas',
     'agregar-evento','borrar-evento','guardar-cupos'
   ]);
@@ -5222,6 +5264,7 @@
       <div class="fa-card">
         <div class="fa-card-title">${state.editingContratoId ? 'Editar venta' : 'Registro de Ventas'}</div>
         <div class="fa-section-note">Un lote puede tener varias líneas de venta adentro — cada una con su propia duración y prorrateo. Comisión y Anticipo se cargan por línea, según cómo paga ESE cliente.</div>
+        ${state.editingContratoId ? '' : `<div class="fa-hint" style="margin-bottom:8px;">¿Tienes ventas en un respaldo de la versión anterior? <button class="fa-btn fa-btn-ghost" data-action="import-ventas">&#128228; Traer ventas de un respaldo (.json)</button> Solo agrega las ventas con sus comisiones; no toca ingresos, gastos ni cartolas.</div><input type="file" id="fa-import-ventas-input" data-action="import-ventas-file" accept=".json,application/json" style="display:none;">`}
         ${state.editingContratoId ? (() => {
           const editingC = state.contratosDevengados.find(c=>c.id===state.editingContratoId);
           if(!editingC) return `<div class="fa-hint">No se encontró la línea a editar.</div>`;
@@ -11503,6 +11546,27 @@ ${lineasDeuda}
         }
         render();
       }
+      else if(cd.action === 'do-import-ventas'){
+        const data = state.pendingImportVentas;
+        state.pendingImportVentas = null;
+        if(!data){ showToast('No se encontró el archivo. Intenta de nuevo.'); render(); }
+        else {
+          const plan = planImportarVentas(data);
+          const nuevasL = plan.nuevas, nuevosG = plan.gastosNuevos;
+          state.contratosDevengados = (await saveKeyMerged('contratosDevengados', current=>{
+            const ids = new Set((current||[]).map(c=> c.id));
+            return [...(current||[]), ...nuevasL.filter(c=> !ids.has(c.id))];
+          })) ?? state.contratosDevengados;
+          if(nuevosG.length){
+            state.gastos = (await saveKeyMerged('gastos', current=>{
+              const ids = new Set((current||[]).map(g=> g.id));
+              return [...(current||[]), ...nuevosG.filter(g=> !ids.has(g.id))];
+            })) ?? state.gastos;
+          }
+          showToast('Ventas importadas: ' + nuevasL.length + ' líneas y ' + nuevosG.length + ' comisiones/anticipos. Nada más se modificó.');
+          render();
+        }
+      }
       else if(cd.action === 'do-import-json'){
         const data = state.pendingImportJson;
         state.pendingImportJson = null;
@@ -13015,6 +13079,10 @@ ${lineasDeuda}
     else if(action === 'export-json'){
       exportBackupJson();
     }
+    else if(action === 'import-ventas'){
+      const fi = document.getElementById('fa-import-ventas-input');
+      if(fi) fi.click();
+    }
     else if(action === 'import-json'){
       const fileInput = document.getElementById('fa-import-file-input');
       if(fileInput) fileInput.click();
@@ -13536,6 +13604,29 @@ ${lineasDeuda}
       } catch(err){
         console.error('Import error', err);
         showToast('No se pudo importar el archivo. Verifica que sea un respaldo válido exportado desde esta misma app.');
+      }
+    }
+    else if(action === 'import-ventas-file'){
+      const file = el.files && el.files[0];
+      el.value = '';
+      if(!file) return;
+      try{
+        const data = JSON.parse(await file.text());
+        if(!data || !Array.isArray(data.contratosDevengados)) throw new Error('sin contratosDevengados');
+        const plan = planImportarVentas(data);
+        if(!plan.nuevas.length){ showToast('Ese respaldo no trae ventas nuevas: las ' + plan.repetidas + ' líneas ya están en el registro.'); return; }
+        state.pendingImportVentas = data;
+        state.confirmDialog = {
+          message: 'Se agregarán ' + plan.nuevas.length + ' líneas de venta (' + plan.lotes + ' ventas) por ' + fmtMoney(plan.ventaBruta) + ' de venta bruta, con sus ' + plan.gastosNuevos.length + ' gastos de comisión y anticipo (' + fmtMoney(plan.montoGastos) + ').'
+            + (plan.repetidas ? ' ' + plan.repetidas + ' líneas ya estaban y se omiten.' : '')
+            + (plan.nSOS ? (plan.sos ? ' ' + plan.nSOS + ' líneas de Sinergia on Stage se asignan al evento "' + plan.sos + '".' : ' ⚠ No encontré un evento de tipo Sinergia on Stage: ' + plan.nSOS + ' líneas quedarán sin evento (créalo en Eventos y vuelve a importar).') : '')
+            + ' No se modifica ningún ingreso, gasto ni cartola ya clasificados.',
+          action: 'do-import-ventas', data: null, confirmLabel: 'Agregar ventas'
+        };
+        render();
+      } catch(err){
+        console.error('Import ventas error', err);
+        showToast('No se pudo leer el archivo. Debe ser un respaldo (.json) exportado desde la app anterior.');
       }
     }
     else if(action === 'import-cartola-file'){
