@@ -435,6 +435,8 @@
     .fa-kpi-value{ font-size:17px; }
     .fa-real-value{ font-size:17px; }
   }
+  /* Todo número o porcentaje negativo se ve en rojo (lo marca pintarNegativosRojo tras cada render) */
+  .fa-neg-auto, .fa-neg-auto *{ color:#D32F2F !important; }
 </style>
 
 <div id="fin-app-root"></div>
@@ -4620,7 +4622,33 @@
     if(mainScrollElDespues) mainScrollElDespues.scrollTop = scrollTopGuardado;
     if(state.activeTab === 'ingresosdist') window.faToggleCategoriaIngresoPF();
     if(state.activeTab === 'estadoresultados') window.faToggleTipoIngresoLinea();
+    pintarNegativosRojo();
   }
+
+  // Marca en rojo todo número negativo de la app (montos, tasas, porcentajes). Mira solo los textos "hoja" (sin otros
+  // elementos adentro) y exige que el signo menos esté pegado a un monto ($) o a un porcentaje, o que el texto sea
+  // solo el número — así no pinta fechas (2026-05-10), rangos (Ene-Feb) ni nombres.
+  const RE_NEG_MONEDA = /(?:^|[\s(:>])[-−–]\s*(?:US)?\$\s*\d|(?:^|[\s(:>])(?:US)?\$\s*[-−–]\s*\d/;
+  const RE_NEG_PCT = /(?:^|[\s(:>])[-−–]\s*\d[\d.,]*\s*%/;
+  const RE_NEG_SOLO = /^[^\dA-Za-zÁ-ú−–-]*[-−–]\s*\d[\d.,]*\s*(?:CLP|USD|x|[a-záéíóúñ]{1,8})?\s*$/;
+  function pintarNegativosRojo(){
+    try{
+      root.querySelectorAll('*').forEach(el=>{
+        if(el.children.length || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.tagName === 'OPTION' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
+        const t = el.textContent;
+        if(!t || t.length > 60) return;
+        const neg = RE_NEG_MONEDA.test(t) || RE_NEG_PCT.test(t) || RE_NEG_SOLO.test(t.trim());
+        if(neg){ if(!el.classList.contains('fa-neg-auto')) el.classList.add('fa-neg-auto'); }
+        else if(el.classList.contains('fa-neg-auto')) el.classList.remove('fa-neg-auto');
+      });
+    } catch(e){ /* solo cosmético */ }
+  }
+  // También cubre lo que se escribe fuera de render() (modales, cálculos en vivo).
+  (function(){
+    let pend = false;
+    const obs = new MutationObserver(()=>{ if(pend) return; pend = true; setTimeout(()=>{ pend = false; pintarNegativosRojo(); }, 60); });
+    obs.observe(root, { childList:true, subtree:true, characterData:true });
+  })();
 
   function renderLogin(){
     return `
