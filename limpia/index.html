@@ -636,6 +636,16 @@
     }
     return '';
   }
+  // Un evento presencial (Sinergia on Stage) devenga TODO en el mes del evento: sus ingresos y sus gastos, sin importar
+  // cuándo se vendió o se pagó. Estas funciones dan la fecha con la que cuenta en Estado de Resultados y Rentabilidad
+  // (el flujo de caja sigue usando la fecha real del pago). Sin evento presencial con fecha, vale la fecha normal.
+  function fechaEventoPresencial(nombre){
+    if(!nombre) return '';
+    const pr = getProyectos().find(x=> x.nombre === nombre);
+    return (pr && pr.tipo === 'sinergia_on_stage' && pr.fechaCierre) ? pr.fechaCierre : '';
+  }
+  function fechaEERRGasto(g){ return fechaEventoPresencial(proyectoEfectivoGasto(g)) || g.fecha; }
+  function fechaDevengoContrato(c){ return fechaEventoPresencial(c.proyecto) || c.fechaInicio; }
   // A qué unidad de negocio pertenece un proyecto/evento (por el tipo del evento): Sinergia on Stage → su propia unidad;
   // Maratón Digital y Emprende Consciente (online) → Academia.
   function unidadDeProyecto(nombre){
@@ -1604,8 +1614,9 @@
   function getDetalleIngresosDevengadosMes(anio, mesIdx){
     const detalle = [];
     state.contratosDevengados.forEach(c=>{
-      if(!c.fechaInicio) return;
-      const inicio = new Date(c.fechaInicio+'T00:00:00');
+      const fiDev = fechaDevengoContrato(c);
+      if(!fiDev) return;
+      const inicio = new Date(fiDev+'T00:00:00');
       const montos = getProrrateoContrato(c);
       montos.forEach((monto,i)=>{
         const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
@@ -1630,7 +1641,7 @@
     const detalle = [];
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
-      const d = new Date(g.fecha+'T00:00:00');
+      const d = new Date(fechaEERRGasto(g)+'T00:00:00');
       if(d.getFullYear() !== anio || d.getMonth() !== mesIdx) return;
       const monto = montoNegocioGasto(g);
       if(monto === 0) return;
@@ -1660,8 +1671,9 @@
 
     state.contratosDevengados.forEach(c=>{
       const unidad = getUnidadNegocio(c.tipoIngreso);
-      if(!unidad || !c.fechaInicio) return;
-      const inicio = new Date(c.fechaInicio+'T00:00:00');
+      const fiDev = fechaDevengoContrato(c);
+      if(!unidad || !fiDev) return;
+      const inicio = new Date(fiDev+'T00:00:00');
       const montos = getProrrateoContrato(c);
       montos.forEach((monto,i)=>{
         const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
@@ -1671,7 +1683,7 @@
 
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
-      const d = new Date(g.fecha+'T00:00:00');
+      const d = new Date(fechaEERRGasto(g)+'T00:00:00');
       if(d.getFullYear()!==anio || d.getMonth()!==mesIdx) return;
       const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
       if(categoriasEgresoFlujo.includes(g.categoria)) return; // cortafuegos: nunca cuenta en Rentabilidad por Unidad tampoco
@@ -1796,8 +1808,9 @@
     const meses = Array.from({length:12}, ()=> ({ ingresosDevengados:0, costosDirectos:0, gastosOperacionales:0, gastosFinancieros:0 }));
 
     state.contratosDevengados.forEach(c=>{
-      if(!c.fechaInicio) return;
-      const inicio = new Date(c.fechaInicio+'T00:00:00');
+      const fiDev = fechaDevengoContrato(c);
+      if(!fiDev) return;
+      const inicio = new Date(fiDev+'T00:00:00');
       const montos = getProrrateoContrato(c);
       montos.forEach((monto,i)=>{
         const d = new Date(inicio.getFullYear(), inicio.getMonth()+i, 1);
@@ -1809,7 +1822,7 @@
     const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
-      const d = new Date(g.fecha+'T00:00:00');
+      const d = new Date(fechaEERRGasto(g)+'T00:00:00');
       if(d.getFullYear() !== anio) return;
       const m = d.getMonth();
       const monto = montoNegocioGasto(g); // respeta no-venta y el desglose interés/capital ya construidos
@@ -3871,7 +3884,7 @@
     const months = Array.from({length:12}, ()=> ({ fijos:0, variables:0 }));
     state.gastos.forEach(g=>{
       if(!g.fecha) return;
-      const d = new Date(g.fecha+'T00:00:00');
+      const d = new Date(fechaEERRGasto(g)+'T00:00:00');
       if(d.getFullYear() !== anio) return;
       if(categoriasEgresoFlujo.includes(g.categoria)) return; // cortafuegos: Egreso de Flujo no es parte de la estructura de costos del negocio
       const monto = montoNegocioGasto(g);
@@ -3890,14 +3903,14 @@
   // Matriz de Categoría x Mes, filtrable por tipo ('fijos' | 'variables' | 'todos') — para ver $ o % de cada categoría mes a mes
   function getCategoriaMensual(anio, tipo){
     const categoriasEgresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
-    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(g.fecha+'T00:00:00').getFullYear()===anio && !categoriasEgresoFlujo.includes(g.categoria) && montoNegocioGasto(g) !== 0);
+    const gastosAnio = state.gastos.filter(g=> g.fecha && new Date(fechaEERRGasto(g)+'T00:00:00').getFullYear()===anio && !categoriasEgresoFlujo.includes(g.categoria) && montoNegocioGasto(g) !== 0);
     const filtrados = tipo==='todos' ? gastosAnio : gastosAnio.filter(g=> tipo==='fijos' ? !!g.origenPagoFijo : !g.origenPagoFijo);
 
     const matrix = {};
     state.config.categoriasGastos.forEach(c=> matrix[c] = Array(12).fill(0));
     const totalPorMes = Array(12).fill(0);
     filtrados.forEach(g=>{
-      const d = new Date(g.fecha+'T00:00:00');
+      const d = new Date(fechaEERRGasto(g)+'T00:00:00');
       const m = d.getMonth();
       const monto = montoNegocioGasto(g);
       if(!matrix[g.categoria]) matrix[g.categoria] = Array(12).fill(0);
