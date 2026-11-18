@@ -6405,6 +6405,9 @@
     'Cuando enumeres, usa solo viñetas con el símbolo • al inicio de cada línea, o numeración 1. 2. 3. si el orden importa. Una idea por línea.',
     'Para separar secciones escribe un título corto en su propia línea terminado en dos puntos, y deja una línea en blanco antes de cada sección.',
     'Escribe los montos en pesos con punto de miles y el signo $ (ejemplo: $1.250.000) y los porcentajes con coma decimal (ejemplo: 12,5%).',
+    'En las cifras de abajo están los eventos o proyectos creados (por ejemplo SOS26_MAY), las unidades de negocio y los gastos separados por evento y por mes. Los gastos "etiquetados con un evento" son los que tienen ese proyecto.',
+    'Sinergia on Stage es la unidad de los eventos presenciales; sus gastos e ingresos se cuentan en el mes del evento. Si el usuario escribe un nombre parecido (SOS26, SOS_MAY26, Sinergia on Stage), asócialo al evento o unidad que más se le parezca y úsalo, sin pedirle que confirme el nombre.',
+    'Para promedios "sin" un evento o unidad, usa las líneas ya calculadas "sin ese evento" y, si no está, resta el evento del total mes a mes.',
     'Si falta información para responder con certeza, dilo en una línea y di qué dato falta.'
   ].join('\n');
   function limpiarTextoAsesor(texto){
@@ -6463,6 +6466,65 @@
         'Estado de Resultados mes a mes (' + anio + '):\n' + le.join('\n') + '\n  Promedio mensual de utilidad neta: ' + fmtMoney(nUt ? Math.round(sumaUt / nUt) : 0) + '\n';
     } catch(e){ return ''; }
   }
+  // Eventos/proyectos y unidades de negocio: qué eventos existen, cuánto gastó y rindió cada uno, y el gasto mes a mes
+  // separado por evento (para poder responder "el gasto promedio sin SOS26_MAY", "cuánto costó cada evento", "por unidad").
+  function resumenProyectosUnidadesAsesor(anio, mesIdx){
+    try{
+      const egresoFlujo = state.config.categoriasEgresoFlujo || CATEGORIAS_EGRESO_FLUJO_DEFAULT;
+      const proyectos = getProyectos();
+      const etiquetaTipo = function(t){ return t === 'sinergia_on_stage' ? 'evento presencial (Sinergia on Stage)' : (t === 'maraton_digital' ? 'evento online (Maratón Digital)' : (t === 'emprende_consciente' ? 'evento online (Emprende Consciente)' : (t || 'sin tipo'))); };
+      const lineas = [];
+      lineas.push('Unidades de negocio: ' + UNIDADES_NEGOCIO.map(function(u){ return u.label; }).join(', ') + '. Sinergia on Stage = eventos presenciales.');
+      if(proyectos.length){
+        lineas.push('Eventos / proyectos creados:');
+        proyectos.forEach(function(pr){
+          const un = unidadDeProyecto(pr.nombre);
+          const r = getRentabilidadProyecto(pr.nombre);
+          lineas.push('  ' + pr.nombre + ' — ' + etiquetaTipo(pr.tipo) + (un ? ', unidad ' + (UNIDADES_NEGOCIO.find(function(u){ return u.id === un; }) || {}).label : '') + (pr.fechaCierre ? ', fecha del evento ' + pr.fechaCierre : '') +
+            ': ventas ' + fmtMoney(r.totalIngresos) + ', costos directos ' + fmtMoney(r.totalCostos) + ', otros gastos etiquetados ' + fmtMoney(r.totalOtros) + ', margen bruto ' + fmtMoney(r.margenBruto) + ', resultado tras otros gastos ' + fmtMoney(r.resultadoTrasOtros));
+        });
+      } else {
+        lineas.push('Eventos / proyectos creados: ninguno.');
+      }
+      // gasto del negocio mes a mes (mismo criterio del Estado de Resultados), por evento y sin evento
+      const nombres = proyectos.map(function(pr){ return pr.nombre; });
+      const sinEvento = Array(12).fill(0), total = Array(12).fill(0), porEvento = {};
+      nombres.forEach(function(n){ porEvento[n] = Array(12).fill(0); });
+      state.gastos.forEach(function(g){
+        if(!g.fecha || egresoFlujo.includes(g.categoria)) return;
+        const monto = montoNegocioGasto(g); if(monto === 0) return;
+        const d = new Date(fechaEERRGasto(g) + 'T00:00:00'); if(d.getFullYear() !== anio) return;
+        const m = d.getMonth(); total[m] += monto;
+        const ev = proyectoEfectivoGasto(g);
+        if(ev && porEvento[ev]) porEvento[ev][m] += monto; else sinEvento[m] += monto;
+      });
+      const hasta = Array.from({length: mesIdx + 1}, function(_, i){ return i; });
+      const prom = function(arr){ const con = hasta.filter(function(i){ return arr[i] !== 0; }); return con.length ? Math.round(con.reduce(function(a, i){ return a + arr[i]; }, 0) / con.length) : 0; };
+      lineas.push('Gastos del negocio por mes (costos directos + gastos operacionales + financieros, sin retiros ni egresos de flujo) — total, de cada evento y sin evento:');
+      hasta.forEach(function(i){
+        lineas.push('  ' + MESES[i] + ': total ' + fmtMoney(total[i]) + ', sin evento ' + fmtMoney(sinEvento[i]) + nombres.map(function(n){ return ', ' + n + ' ' + fmtMoney(porEvento[n][i]); }).join(''));
+      });
+      lineas.push('  Gasto promedio mensual total: ' + fmtMoney(prom(total)) + '; sin eventos: ' + fmtMoney(prom(sinEvento)));
+      const presenciales = proyectos.filter(function(pr){ return pr.tipo === 'sinergia_on_stage'; }).map(function(pr){ return pr.nombre; });
+      if(presenciales.length){
+        const sinPres = total.map(function(t, i){ return t - presenciales.reduce(function(a, n){ return a + porEvento[n][i]; }, 0); });
+        lineas.push('  Gasto promedio mensual sin eventos presenciales (' + presenciales.join(', ') + '): ' + fmtMoney(prom(sinPres)));
+      }
+      nombres.forEach(function(n){
+        const sinEste = total.map(function(t, i){ return t - porEvento[n][i]; });
+        lineas.push('  Gasto promedio mensual sin ' + n + ': ' + fmtMoney(prom(sinEste)) + ' (gasto total de ' + n + ': ' + fmtMoney(porEvento[n].reduce(function(a, b){ return a + b; }, 0)) + ')');
+      });
+      // por unidad de negocio, año hasta el mes en curso
+      const por = getRentabilidadPorUnidadMensual;
+      lineas.push('Por unidad de negocio, ' + anio + ' hasta ' + MESES[mesIdx] + ' (ingresos devengados, costos directos, gastos operacionales, rentabilidad neta):');
+      UNIDADES_NEGOCIO.forEach(function(u){
+        let ing = 0, cd = 0, go = 0, rn = 0;
+        hasta.forEach(function(i){ const r = por(anio, i)[u.id]; ing += r.ingresos; cd += r.costosDirectos; go += r.gastosOperacionales; rn += r.rentabilidadNeta; });
+        lineas.push('  ' + u.label + ': ingresos ' + fmtMoney(ing) + ', costos directos ' + fmtMoney(cd) + ', gastos operacionales ' + fmtMoney(go) + ', rentabilidad neta ' + fmtMoney(rn));
+      });
+      return lineas.join('\n') + '\n';
+    } catch(e){ return ''; }
+  }
   function construirContextoFinancieroAsesor(){
     const hoy = new Date();
     const anio = hoy.getFullYear();
@@ -6486,7 +6548,7 @@ Flujo de Caja:
   Saldo acumulado a fin de mes: ${fmtMoney(flujo.operativoAcumFinal)}
 Deudas activas:
 ${lineasDeuda}
-${resumenAnualAsesor(anio, mesIdx)}
+${resumenAnualAsesor(anio, mesIdx)}${resumenProyectosUnidadesAsesor(anio, mesIdx)}
 ${INSTRUCCIONES_FORMATO_ASESOR}
 
 [Pregunta del usuario]
