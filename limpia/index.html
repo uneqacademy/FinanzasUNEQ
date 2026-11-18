@@ -178,6 +178,12 @@
   .fa-asesor-msg-user .fa-asesor-msg-bubble{ background:var(--ink); color:#fff; border-bottom-right-radius:4px; }
   .fa-asesor-msg-assistant .fa-asesor-msg-bubble{ background:#fff; border:1px solid var(--border); color:var(--ink); border-bottom-left-radius:4px; }
   .fa-asesor-pensando{ color:var(--muted); font-style:italic; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble p{ margin:0 0 9px; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble p:last-child, .fa-asesor-msg-assistant .fa-asesor-msg-bubble ul:last-child, .fa-asesor-msg-assistant .fa-asesor-msg-bubble ol:last-child{ margin-bottom:0; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble ul, .fa-asesor-msg-assistant .fa-asesor-msg-bubble ol{ margin:0 0 10px; padding-left:20px; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble li{ margin-bottom:4px; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble .fa-asesor-tit{ font-weight:700; margin-top:12px; }
+  .fa-asesor-msg-assistant .fa-asesor-msg-bubble > :first-child{ margin-top:0; }
   .fa-asesor-error{ color:#B3261E; font-size:12.5px; padding:6px 4px; }
   .fa-asesor-input-row{ display:flex; gap:10px; margin-top:12px; align-items:flex-end; }
   .fa-asesor-input-row textarea{
@@ -6391,6 +6397,72 @@
   // y Deudas activas) para que el Asesor IA responda usando datos reales, sin necesitar que Felipe los escriba
   // a mano. Se antepone a la pregunta antes de mandarla a la Cloud Function — para esa función, es solo texto
   // más largo, no necesita ningún cambio de su lado.
+  // Reglas de formato que se le piden al asesor en cada pregunta, y limpieza de lo que igual llegue con símbolos de más.
+  const INSTRUCCIONES_FORMATO_ASESOR = [
+    '[Instrucciones de formato para tu respuesta — obligatorias]',
+    'Responde en español, claro, ordenado y breve. Empieza con la respuesta directa en una o dos frases.',
+    'No uses asteriscos, almohadillas, negritas, cursivas, tablas, líneas separadoras (---), emojis ni íconos.',
+    'Cuando enumeres, usa solo viñetas con el símbolo • al inicio de cada línea, o numeración 1. 2. 3. si el orden importa. Una idea por línea.',
+    'Para separar secciones escribe un título corto en su propia línea terminado en dos puntos, y deja una línea en blanco antes de cada sección.',
+    'Escribe los montos en pesos con punto de miles y el signo $ (ejemplo: $1.250.000) y los porcentajes con coma decimal (ejemplo: 12,5%).',
+    'Si falta información para responder con certeza, dilo en una línea y di qué dato falta.'
+  ].join('\n');
+  function limpiarTextoAsesor(texto){
+    let t = String(texto == null ? '' : texto).replace(/\r/g, '');
+    t = t.replace(/```[a-z]*\n?/gi, '').replace(/`/g, '');
+    t = t.replace(/^[ \t]{0,3}#{1,6}[ \t]*(.+?)[ \t]*#*[ \t]*$/gm, function(_, ti){ ti = ti.replace(/[*_]/g, '').trim(); return /[:.]$/.test(ti) ? ti : ti + ':'; }); // títulos markdown → "Título:"
+    t = t.replace(/^[ \t]*([-_=*][ \t]*){3,}$/gm, '');                            // líneas separadoras
+    t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, ''); // fila de guiones de tabla
+    t = t.replace(/^[ \t]*\|(.+)\|[ \t]*$/gm, function(_, fila){ return '• ' + fila.split('|').map(function(c){ return c.trim(); }).filter(Boolean).join(' — '); });
+    t = t.replace(/^[ \t]*[*\-–—+][ \t]+/gm, '• ');                               // viñetas con * - + → •
+    t = t.replace(/^[ \t]*•[ \t]*•[ \t]*/gm, '• ');
+    t = t.replace(/\*\*|__/g, '').replace(/\*/g, '');                             // negritas y asteriscos sueltos
+    t = t.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, ''); // emojis e íconos
+    t = t.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+    return t;
+  }
+  function htmlRespuestaAsesor(texto){
+    const lineas = limpiarTextoAsesor(texto).split('\n');
+    let html = '', lista = null;
+    const cerrar = function(){ if(lista){ html += '</' + lista + '>'; lista = null; } };
+    lineas.forEach(function(l){
+      const s = l.trim();
+      if(!s){ cerrar(); return; }
+      let m;
+      if((m = s.match(/^•\s+(.*)$/))){
+        if(lista !== 'ul'){ cerrar(); html += '<ul>'; lista = 'ul'; }
+        html += '<li>' + escapeHtml(m[1]) + '</li>';
+      } else if((m = s.match(/^(\d{1,2})[.)]\s+(.*)$/))){
+        if(lista !== 'ol'){ cerrar(); html += '<ol>'; lista = 'ol'; }
+        html += '<li value="' + m[1] + '">' + escapeHtml(m[2]) + '</li>';
+      } else {
+        cerrar();
+        html += (/:$/.test(s) && s.length <= 70) ? '<p class="fa-asesor-tit">' + escapeHtml(s) + '</p>' : '<p>' + escapeHtml(s) + '</p>';
+      }
+    });
+    cerrar();
+    return html;
+  }
+  // Mes a mes del año hasta el mes en curso: flujo de caja (lo que entró y salió de verdad) y Estado de Resultados,
+  // con sus promedios — para poder responder preguntas como "¿cuál es el flujo promedio?".
+  function resumenAnualAsesor(anio, mesIdx){
+    try{
+      const flujo = getMonthlyStats(anio), eerr = getEstadoResultadosMensual(anio);
+      const lf = [], le = [];
+      let sumaRes = 0, n = 0, sumaIng = 0, sumaEgr = 0, sumaUt = 0, nUt = 0;
+      for(let i = 0; i <= mesIdx; i++){
+        const f = flujo[i], e = eerr[i];
+        const hay = (f.ingresosCobradosFlujo || 0) !== 0 || (f.gastosFlujo || 0) !== 0;
+        if(hay){ n++; sumaRes += f.resultadoOperativo; sumaIng += f.ingresosCobradosFlujo; sumaEgr += f.gastosFlujo; }
+        lf.push('  ' + MESES[i] + ': ingresos ' + fmtMoney(f.ingresosCobradosFlujo) + ', egresos ' + fmtMoney(f.gastosFlujo) + ', resultado ' + fmtMoney(f.resultadoOperativo) + ', saldo acumulado ' + fmtMoney(f.operativoAcumFinal));
+        const conMov = (e.ingresosDevengados || 0) !== 0 || (e.costosDirectos || 0) !== 0 || (e.gastosOperacionales || 0) !== 0;
+        if(conMov){ nUt++; sumaUt += e.utilidadNeta; }
+        le.push('  ' + MESES[i] + ': ingresos devengados ' + fmtMoney(e.ingresosDevengados) + ', utilidad neta ' + fmtMoney(e.utilidadNeta));
+      }
+      return 'Flujo de Caja mes a mes (' + anio + '):\n' + lf.join('\n') + '\n  Promedio mensual de ingresos: ' + fmtMoney(n ? Math.round(sumaIng / n) : 0) + ', de egresos: ' + fmtMoney(n ? Math.round(sumaEgr / n) : 0) + ', del resultado de flujo: ' + fmtMoney(n ? Math.round(sumaRes / n) : 0) + ' (sobre ' + n + ' meses con movimiento)\n' +
+        'Estado de Resultados mes a mes (' + anio + '):\n' + le.join('\n') + '\n  Promedio mensual de utilidad neta: ' + fmtMoney(nUt ? Math.round(sumaUt / nUt) : 0) + '\n';
+    } catch(e){ return ''; }
+  }
   function construirContextoFinancieroAsesor(){
     const hoy = new Date();
     const anio = hoy.getFullYear();
@@ -6414,6 +6486,8 @@ Flujo de Caja:
   Saldo acumulado a fin de mes: ${fmtMoney(flujo.operativoAcumFinal)}
 Deudas activas:
 ${lineasDeuda}
+${resumenAnualAsesor(anio, mesIdx)}
+${INSTRUCCIONES_FORMATO_ASESOR}
 
 [Pregunta del usuario]
 `;
@@ -6438,7 +6512,7 @@ ${lineasDeuda}
             </div>
           ` : mensajes.map(m => `
             <div class="fa-asesor-msg fa-asesor-msg-${m.role}">
-              <div class="fa-asesor-msg-bubble">${escapeHtml(m.text).replace(/\n/g,'<br>')}</div>
+              <div class="fa-asesor-msg-bubble">${m.role === 'assistant' ? htmlRespuestaAsesor(m.text) : escapeHtml(m.text).replace(/\n/g,'<br>')}</div>
             </div>
           `).join('')}
           ${state.asesorCargando ? `<div class="fa-asesor-msg fa-asesor-msg-assistant"><div class="fa-asesor-msg-bubble fa-asesor-pensando">Pensando…</div></div>` : ''}
@@ -12707,9 +12781,17 @@ ${lineasDeuda}
         // ella es simplemente una pregunta más larga.
         const preguntaConContexto = construirContextoFinancieroAsesor() + pregunta;
         const llamarAsesor = firebase.functions().httpsCallable('asesorIA');
-        const resp = await llamarAsesor({ pregunta: preguntaConContexto, historial: state.asesorHistorialAPI });
-        state.asesorChat.push({role:'assistant', text: resp.data.respuesta});
-        state.asesorHistorialAPI = resp.data.historial;
+        const textoDe = function(r){ return (r && r.data && typeof r.data.respuesta === 'string') ? limpiarTextoAsesor(r.data.respuesta) : ''; };
+        let resp = await llamarAsesor({ pregunta: preguntaConContexto, historial: state.asesorHistorialAPI });
+        // A veces la respuesta llega vacía: se reintenta una vez antes de avisar (sin dejar nada vacío en la conversación).
+        if(!textoDe(resp)) resp = await llamarAsesor({ pregunta: preguntaConContexto, historial: state.asesorHistorialAPI });
+        if(!textoDe(resp)){
+          console.error('Asesor IA: respuesta vacía', resp && resp.data);
+          state.asesorError = 'El asesor respondió en blanco. Intenta de nuevo o reformula la pregunta con otras palabras.';
+        } else {
+          state.asesorChat.push({role:'assistant', text: resp.data.respuesta});
+          if(Array.isArray(resp.data.historial)) state.asesorHistorialAPI = resp.data.historial;
+        }
       } catch(err){
         console.error('Error del asesor IA', err);
         const msgs = {
