@@ -1452,6 +1452,26 @@
       .sort((a,b)=>(a.fechaCreacion||'').localeCompare(b.fechaCreacion||''));
   }
 
+  // Quita gastos duplicados que se generaron solos: (a) comisión/anticipo de una venta repetido (mismo contrato, descripción,
+  // fecha y monto), y (b) gasto fijo "Pendiente" de una plantilla que ya no existe cuando hay otro idéntico de una plantilla vigente.
+  // Nunca toca gastos pagados, ligados a la cartola ni de tarjeta. Devuelve cuántos quitó.
+  function quitarGastosDuplicados(){
+    let quitados = 0;
+    const vistos = new Set();
+    state.gastos = state.gastos.filter(g=>{
+      if(!g.origenContrato) return true;
+      const k = [g.origenContrato, g.descripcion, g.fecha, g.monto].join('|');
+      if(vistos.has(k)){ quitados++; return false; }
+      vistos.add(k); return true;
+    });
+    const plantillas = new Set(state.plantillasGastosFijos.map(p=> p.id));
+    const huerfanos = new Set(state.gastos.filter(g=>
+      g.origenPlantilla && !plantillas.has(g.origenPlantilla) && g.estado === 'Pendiente' && !(Number(g.montoPagado) > 0) && !g.enlaceCartola && !g.origenCartola &&
+      state.gastos.some(h=> h !== g && h.origenPlantilla && plantillas.has(h.origenPlantilla) && h.proveedor === g.proveedor && h.fecha === g.fecha && h.monto === g.monto && h.categoria === g.categoria)
+    ).map(g=> g.id));
+    if(huerfanos.size){ state.gastos = state.gastos.filter(g=> !huerfanos.has(g.id)); quitados += huerfanos.size; }
+    return quitados;
+  }
   function quitarAsignacionesIngresos(){
     let cambio = false;
     const esPct = k=> k.indexOf('pct_') === 0;
@@ -1484,6 +1504,7 @@
     nuevas.forEach(c=>{ const l = c.loteId || c.id; (porLote[l] = porLote[l] || []).push(c); });
     let reenlazados = 0;
     const gastosNuevos = [];
+    const clavesG = new Set(state.gastos.filter(g=> g.origenContrato).map(g=> [g.origenContrato, g.descripcion, g.fecha, g.monto].join('|')));
     gastos.forEach(g=>{
       if(idsG.has(g.id)) return;
       let destino;
@@ -1496,6 +1517,9 @@
         if(mism.length !== 1) mism = lote.filter(c=> (Number(c.comisionPorCuota)||0) > 0 || (Number(c.anticipoPorCuotaUSD)||0) > 0);
         if(mism.length === 1){ destino = mism[0].id; reenlazados++; } else destino = g.origenContrato;
       } else return;
+      const clave = [destino, g.descripcion, g.fecha, g.monto].join('|');
+      if(clavesG.has(clave)) return; // el respaldo viejo traía ese gasto dos veces
+      clavesG.add(clave);
       gastosNuevos.push({ ...g, origenContrato: destino });
     });
     const lotes = new Set(nuevas.map(c=> c.loteId || c.id)).size;
@@ -2906,6 +2930,7 @@
       if(!Array.isArray(state.tesoreriaUSD.movimientos)) state.tesoreriaUSD.movimientos = [];
 
       // Los ingresos que entran a la cuenta son solo flujo: se quitan las asignaciones a líneas de negocio que tuvieran.
+      if(quitarGastosDuplicados()) await saveKey('gastos', state.gastos, {silent:true});
       if(quitarAsignacionesIngresos()){
         await saveKey('ingresos', state.ingresos, {silent:true});
         await saveKey('cartola', state.cartola, {silent:true});
